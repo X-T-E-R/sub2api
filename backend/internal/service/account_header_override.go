@@ -61,7 +61,16 @@ var headerOverrideBlockedNames = map[string]struct{}{
 	"chatgpt-account-id":       {},
 	"x-claude-code-session-id": {},
 	"x-client-request-id":      {},
+	"session-id":               {},
+	"thread-id":                {},
 	"x-grok-conv-id":           {},
+	"x-grok-session-id":        {},
+	"x-grok-req-id":            {},
+	"x-grok-model-override":    {},
+	"x-grok-agent-id":          {},
+	"x-grok-turn-idx":          {},
+	"x-grok-deployment-id":     {},
+	"x-grok-user-id":           {},
 }
 
 func isHeaderOverrideBlockedName(lowerName string) bool {

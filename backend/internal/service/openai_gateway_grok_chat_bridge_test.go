@@ -258,8 +258,9 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 
 	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
 	require.NotEmpty(t, identity)
-	require.NotEqual(t, "stable-session", identity)
+	require.Equal(t, "stable-session", identity)
 	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
+	require.Equal(t, identity, upstream.lastReq.Header.Get(grokSessionIDHeader))
 	require.Equal(t, "web_search", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
 	require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
 	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(upstream.lastBody, "tool_choice").String())

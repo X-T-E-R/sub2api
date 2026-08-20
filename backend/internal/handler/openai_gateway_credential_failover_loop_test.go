@@ -320,6 +320,7 @@ type grokCredentialHandlerUpstream struct {
 	rateLimitIDs  map[int64]bool
 	failureStatus map[int64]int
 	cancelRequest context.CancelFunc
+	streamFactory func(accountID int64) (*http.Response, bool)
 }
 
 func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
@@ -335,7 +336,13 @@ func (u *grokCredentialHandlerUpstream) Do(req *http.Request, _ string, accountI
 	rateLimited := u.rateLimitIDs[accountID]
 	failureStatus := u.failureStatus[accountID]
 	cancelRequest := u.cancelRequest
+	streamFactory := u.streamFactory
 	u.mu.Unlock()
+	if streamFactory != nil {
+		if response, ok := streamFactory(accountID); ok {
+			return response, nil
+		}
+	}
 	if rateLimited {
 		return &http.Response{
 			StatusCode: http.StatusTooManyRequests,

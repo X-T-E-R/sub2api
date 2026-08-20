@@ -9,12 +9,23 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
 	grokConversationIDHeader         = "X-Grok-Conv-Id"
+	grokSessionIDHeader              = "X-Grok-Session-Id"
+	grokRequestIDHeader              = "X-Grok-Req-Id"
+	grokModelOverrideHeader          = "X-Grok-Model-Override"
+	grokAgentIDHeader                = "X-Grok-Agent-Id"
+	grokTurnIndexHeader              = "X-Grok-Turn-Idx"
+	grokDeploymentIDHeader           = "X-Grok-Deployment-Id"
+	grokUserIDHeader                 = "X-Grok-User-Id"
+	codexSessionIDHeader             = "Session-Id"
+	codexThreadIDHeader              = "Thread-Id"
 	claudeCodeSessionHeader          = "X-Claude-Code-Session-Id"
 	grokClientToolCacheOptInHeader   = "X-Sub2API-Grok-Client-Tool-Cache"
 	grokFreeCacheNativeToolsJSON     = `[{"type":"web_search"},{"type":"x_search"}]`
@@ -25,8 +36,11 @@ const (
 // Claude Code metadata.user_id often ends with _session_<uuid>.
 var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 
-// extractClaudeCodeSessionID resolves the Claude Code conversation id from
-// headers or Anthropic/OpenAI-compatible payload metadata.
+const grokLogicalRequestIDContextKey = "sub2api_grok_logical_request_id"
+
+// extractClaudeCodeSessionID resolves the pre-existing Claude Code session
+// compatibility signals. Native Codex and Grok request contracts are handled
+// separately so metadata.user_id is not broadened into a generic ID channel.
 func extractClaudeCodeSessionID(c *gin.Context, body []byte) string {
 	if c != nil {
 		if seed := strings.TrimSpace(c.GetHeader(claudeCodeSessionHeader)); seed != "" {
@@ -56,9 +70,9 @@ func extractClaudeCodeSessionIDFromPayload(body []byte) string {
 	return ""
 }
 
-// resolveGrokCacheIdentity derives one stable, tenant-isolated routing identity
-// for xAI's server-side prompt cache. The returned value is safe to expose to
-// the upstream: it never contains the client's raw session identifier.
+// resolveGrokCacheIdentity selects xAI's prompt-cache routing identity. Explicit
+// native prompt/session values are preserved exactly; only gateway bridge and
+// content-derived fallback seeds are tenant/model-isolated and hashed.
 //
 // A valid downstream API key is required. This intentionally fails closed on
 // internal probes and incomplete request contexts instead of creating a cache
@@ -80,7 +94,11 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 		return ""
 	}
 
-	seed := explicitGrokCacheSeed(c, body, explicitKey)
+	if identity := explicitGrokNativeCacheIdentity(c, body); identity != "" {
+		return identity
+	}
+
+	seed := grokBridgeCacheSeed(c, body, explicitKey)
 	if seed == "" {
 		seed = deriveOpenAIStablePrefixSessionSeed(body)
 		if seed == "" {
@@ -102,18 +120,37 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 }
 
 func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) string {
+	if identity := explicitGrokNativeCacheIdentity(c, body); identity != "" {
+		return identity
+	}
+	return grokBridgeCacheSeed(c, body, explicitKey)
+}
+
+// explicitGrokNativeCacheIdentity returns upstream-native identity values
+// unchanged. prompt_cache_key is the strongest signal because both Codex
+// Responses and Grok Build place their cache identity directly in the body.
+func explicitGrokNativeCacheIdentity(c *gin.Context, body []byte) string {
+	if len(body) > 0 {
+		if identity := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); identity != "" {
+			return identity
+		}
+	}
+	if identity := validInboundHeaderValue(c, grokConversationIDHeader); identity != "" {
+		return identity
+	}
+	if identity := validInboundHeaderValue(c, grokSessionIDHeader); identity != "" {
+		return identity
+	}
+	return codexResponsesSessionID(c, body)
+}
+
+func grokBridgeCacheSeed(c *gin.Context, body []byte, explicitKey string) string {
 	// Claude Code session is the most stable multi-turn identity for
 	// /v1/messages → Grok bridges. Prefer it over generic session headers so
 	// prompt cache routing follows the gateway's existing cache affinity rules.
 	seed := extractClaudeCodeSessionID(c, body)
 	if seed == "" {
 		seed = explicitOpenAIHeaderSessionID(c)
-	}
-	if seed == "" && c != nil {
-		seed = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
-	}
-	if seed == "" && len(body) > 0 {
-		seed = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 	}
 	if seed == "" {
 		seed = strings.TrimSpace(explicitKey)
@@ -125,6 +162,33 @@ func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) stri
 		seed = grokPreviousResponseSessionSeed(body)
 	}
 	return seed
+}
+
+func isCodexResponsesRequestShape(c *gin.Context, body []byte) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil || len(body) == 0 {
+		return false
+	}
+	path := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	if !strings.HasSuffix(path, "/responses") && !strings.HasSuffix(path, "/responses/compact") {
+		return false
+	}
+	metadata := gjson.GetBytes(body, "client_metadata")
+	if !metadata.IsObject() {
+		return false
+	}
+	for _, field := range []string{"session_id", "thread_id", "turn_id", "x-codex-turn-metadata"} {
+		if value := strings.TrimSpace(metadata.Get(field).String()); value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func codexResponsesSessionID(c *gin.Context, body []byte) string {
+	if !isCodexResponsesRequestShape(c, body) {
+		return ""
+	}
+	return validInboundHeaderValue(c, codexSessionIDHeader)
 }
 
 func isGrokRequestContext(c *gin.Context) bool {
@@ -524,19 +588,82 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	return sjson.SetRawBytes(body, "tools", encoded)
 }
 
-// applyGrokCacheHeaders applies the documented Chat Completions conversation
-// routing header. The request is built from a fresh header map, so client
-// supplied x-grok headers cannot override this server-derived value.
-func applyGrokCacheHeaders(headers http.Header, identity string) {
+var grokNativePassthroughHeaders = []string{
+	grokModelOverrideHeader,
+	grokAgentIDHeader,
+	grokTurnIndexHeader,
+	grokDeploymentIDHeader,
+	grokUserIDHeader,
+}
+
+func validInboundHeaderValue(c *gin.Context, name string) string {
+	if c == nil {
+		return ""
+	}
+	value := strings.TrimSpace(c.GetHeader(name))
+	if value == "" || len(value) > maxHeaderOverrideValueLength || !httpguts.ValidHeaderFieldValue(value) {
+		return ""
+	}
+	return value
+}
+
+// applyGrokNativeRequestHeaders preserves the established Grok Build inference
+// contract. Distinct native conversation/session IDs remain distinct; missing
+// values are filled from the selected bridge/cache identity. Optional semantic
+// headers are never synthesized.
+func applyGrokNativeRequestHeaders(headers http.Header, c *gin.Context, identity string, body []byte) {
 	if headers == nil {
 		return
 	}
 	identity = strings.TrimSpace(identity)
-	if identity == "" {
-		headers.Del(grokConversationIDHeader)
-		return
+	conversationID := validInboundHeaderValue(c, grokConversationIDHeader)
+	if conversationID == "" {
+		conversationID = identity
 	}
-	headers.Set(grokConversationIDHeader, identity)
+	sessionID := validInboundHeaderValue(c, grokSessionIDHeader)
+	if sessionID == "" {
+		sessionID = identity
+	}
+	if conversationID != "" {
+		headers.Set(grokConversationIDHeader, conversationID)
+	}
+	if sessionID != "" {
+		headers.Set(grokSessionIDHeader, sessionID)
+	}
+	for _, name := range grokNativePassthroughHeaders {
+		if value := validInboundHeaderValue(c, name); value != "" {
+			headers.Set(name, value)
+		}
+	}
+	headers.Set(grokRequestIDHeader, grokLogicalRequestID(c))
+	if isCodexResponsesRequestShape(c, body) {
+		for _, name := range []string{codexSessionIDHeader, codexThreadIDHeader, "X-Client-Request-Id"} {
+			if value := validInboundHeaderValue(c, name); value != "" {
+				headers.Set(name, value)
+			}
+		}
+	}
+}
+
+// grokLogicalRequestID returns one opaque identifier for the whole downstream
+// request. gin.Context survives same-request account failover and recursive
+// repair paths, so rebuilt upstream requests reuse the original identifier.
+func grokLogicalRequestID(c *gin.Context) string {
+	if c == nil {
+		return uuid.NewString()
+	}
+	if existing, ok := c.Get(grokLogicalRequestIDContextKey); ok {
+		if value, ok := existing.(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	if value := validInboundHeaderValue(c, grokRequestIDHeader); value != "" {
+		c.Set(grokLogicalRequestIDContextKey, value)
+		return value
+	}
+	value := uuid.NewString()
+	c.Set(grokLogicalRequestIDContextKey, value)
+	return value
 }
 
 // stripGrokChatPromptCacheKey removes the Responses-only body field after it

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -118,6 +119,43 @@ func TestForwardAsAnthropic_StreamingBareErrorAfterOutputIsVisible(t *testing.T)
 	require.Contains(t, clientStream, "mixed tools failed")
 	require.NotContains(t, clientStream, "event: message_stop")
 	require.NotContains(t, err.Error(), "missing terminal event")
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "semantic text output must prevent unsafe replay")
+}
+
+func TestForwardAsAnthropic_KeepalivePingDoesNotSuppressPreOutputFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = reader.Close() })
+	go func() {
+		time.Sleep(1400 * time.Millisecond)
+		_, _ = io.WriteString(writer, buildResponsesFailedSSEStream("rate_limit_error", "temporary upstream failure"))
+		_ = writer.Close()
+	}()
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       reader,
+	}}
+	cfg := rawChatCompletionsTestConfig()
+	cfg.Gateway.StreamKeepaliveInterval = 1
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+
+	_, err := svc.ForwardAsAnthropic(context.Background(), c, rawChatCompletionsTestAccount(), body, "", "")
+
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.True(t, errors.As(err, &failoverErr), "ping is transport output, not semantic model output")
+	require.True(t, failoverErr.SafeToFailoverAfterWrite, "service must declare ping-only bytes safe for the handler retry gate")
+	require.Contains(t, rec.Body.String(), "event: ping")
+	require.NotContains(t, rec.Body.String(), "temporary upstream failure", "failover path must not emit the upstream error")
 }
 
 func TestForwardAsAnthropic_StreamingBareErrorBeforeOutputFailsOver(t *testing.T) {

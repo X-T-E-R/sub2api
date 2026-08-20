@@ -86,10 +86,27 @@ func explicitOpenAIRequestSessionID(c *gin.Context, body []byte) string {
 		return ""
 	}
 
-	sessionID := explicitOpenAIHeaderSessionID(c)
-	if sessionID == "" && isGrokRequestContext(c) {
-		sessionID = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
+	if isGrokRequestContext(c) {
+		// Native Responses body identity is authoritative. Preserve distinct Grok
+		// conversation/session headers for forwarding, but use conversation first
+		// for sticky affinity when the body has no cache key.
+		if len(body) > 0 {
+			if sessionID := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); sessionID != "" {
+				return sessionID
+			}
+		}
+		if sessionID := validInboundHeaderValue(c, grokConversationIDHeader); sessionID != "" {
+			return sessionID
+		}
+		if sessionID := validInboundHeaderValue(c, grokSessionIDHeader); sessionID != "" {
+			return sessionID
+		}
+		if sessionID := codexResponsesSessionID(c, body); sessionID != "" {
+			return sessionID
+		}
 	}
+
+	sessionID := explicitOpenAIHeaderSessionID(c)
 	if sessionID == "" && len(body) > 0 {
 		sessionID = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 	}

@@ -282,19 +282,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	responsesBody = updatedBody
 	grokCacheIdentity := ""
 	if account.Platform == PlatformGrok {
-		grokIntentBody := responsesBody
-		grokCacheIdentity = resolveGrokCacheIdentity(c, grokIntentBody, promptCacheKey, upstreamModel)
-		patchedBody, patchErr := patchGrokResponsesBody(grokIntentBody, upstreamModel)
+		var patchErr error
+		responsesBody, grokCacheIdentity, patchErr = prepareGrokMessagesResponsesBody(c, responsesBody, promptCacheKey, upstreamModel, account)
 		if patchErr != nil {
 			return nil, patchErr
-		}
-		responsesBody, patchErr = applyGrokResponsesCacheIdentity(patchedBody, grokIntentBody, grokCacheIdentity, account.IsGrokOAuth())
-		if patchErr != nil {
-			return nil, fmt.Errorf("apply grok prompt cache identity: %w", patchErr)
-		}
-		responsesBody, patchErr = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, grokIntentBody, account, grokCacheIdentity)
-		if patchErr != nil {
-			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", patchErr)
 		}
 	}
 
@@ -508,6 +499,28 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 
 	return result, handleErr
+}
+
+// prepareGrokMessagesResponsesBody owns the ordering-sensitive Messages bridge
+// normalization. Explicit session seeds remain highest priority; otherwise the
+// fallback identity is derived only after Grok has removed or normalized fields,
+// so it represents the reusable prefix xAI actually receives.
+func prepareGrokMessagesResponsesBody(c *gin.Context, body []byte, promptCacheKey, upstreamModel string, account *Account) ([]byte, string, error) {
+	intentBody := body
+	patchedBody, err := patchGrokResponsesBody(intentBody, upstreamModel)
+	if err != nil {
+		return nil, "", err
+	}
+	identity := resolveGrokCacheIdentity(c, patchedBody, promptCacheKey, upstreamModel)
+	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, intentBody, identity, account != nil && account.IsGrokOAuth())
+	if err != nil {
+		return nil, "", fmt.Errorf("apply grok prompt cache identity: %w", err)
+	}
+	patchedBody, err = applyGrokFreeMessagesFunctionToolCacheRoute(patchedBody, intentBody, account, identity)
+	if err != nil {
+		return nil, "", fmt.Errorf("apply grok Free function-tool cache route: %w", err)
+	}
+	return patchedBody, identity, nil
 }
 
 func ensureCodexOAuthInstructionsField(reqBody map[string]any) {
@@ -867,8 +880,11 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	var firstTokenMs *int
 	firstChunk := true
 	clientDisconnected := false
-	clientOutputStarted := false
-	var streamFailoverErr error
+	// modelOutputStarted tracks converted upstream model events only. Transport
+	// keepalive pings may commit bytes downstream but are not model output and
+	// therefore must not suppress safe pre-output failover.
+	modelOutputStarted := false
+	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
 	searchCount := 0
 	streamSearchSeen := make(map[string]struct{})
@@ -982,8 +998,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				// Once Anthropic output has started, switching accounts would splice
 				// two model streams together. Surface a proper Anthropic error event
 				// instead of returning a failover error that the handler cannot retry.
-				if !clientOutputStarted && openAIStreamFailedEventShouldFailover(payloadBytes, message) {
+				if !modelOutputStarted && openAIStreamFailedEventShouldFailover(payloadBytes, message) {
 					streamFailoverErr = s.newOpenAIStreamFailoverError(c, account, false, requestID, payloadBytes, message, resp.Header)
+					streamFailoverErr.SafeToFailoverAfterWrite = true
 					return true
 				}
 				message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payloadBytes, message)
@@ -1000,9 +1017,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					MarkResponseCommitted(c)
 				}
 				if !clientDisconnected {
-					if !clientOutputStarted {
+					if !modelOutputStarted {
 						writeAnthropicError(c, errStatus, errType, errMsg)
-						clientOutputStarted = true
+						modelOutputStarted = true
 					} else {
 						writeStreamHeaders()
 						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(errType, errMsg)); err == nil {
@@ -1035,7 +1052,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					)
 					break
 				}
-				clientOutputStarted = true
+				modelOutputStarted = true
 			}
 		}
 		if len(events) > 0 && !clientDisconnected {
@@ -1066,7 +1083,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					)
 					break
 				}
-				clientOutputStarted = true
+				modelOutputStarted = true
 			}
 			if !clientDisconnected {
 				c.Writer.Flush()
@@ -1090,8 +1107,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			return result, fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
 		message := "OpenAI messages stream ended before a terminal event"
-		if !clientOutputStarted {
-			return result, s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, message)
+		if !modelOutputStarted {
+			failoverErr := s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, message)
+			failoverErr.SafeToFailoverAfterWrite = true
+			return result, failoverErr
 		}
 		s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, "stream_missing_terminal", message)
 		return result, fmt.Errorf("stream usage incomplete: missing terminal event")
@@ -1245,7 +1264,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				clientDisconnected = true
 				continue
 			}
-			clientOutputStarted = true
 			c.Writer.Flush()
 		}
 	}

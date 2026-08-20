@@ -138,7 +138,7 @@ func TestResolveGrokCacheIdentityIsolatesAPIKeyAndMappedModel(t *testing.T) {
 	require.NotEqual(t, base, otherModel)
 }
 
-func TestResolveGrokCacheIdentityUsesAndIsolatesNativeConversationHeader(t *testing.T) {
+func TestResolveGrokCacheIdentityPreservesNativeConversationHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c := newGrokCacheTestContext(301)
 	c.Request.Header.Set(grokConversationIDHeader, "raw-native-conversation")
@@ -150,11 +150,10 @@ func TestResolveGrokCacheIdentityUsesAndIsolatesNativeConversationHeader(t *test
 
 	require.Equal(t, "raw-native-conversation", (&OpenAIGatewayService{}).ExtractSessionID(c, body1))
 	require.Equal(t, first, second)
-	require.NotEqual(t, "raw-native-conversation", first)
-	require.NotContains(t, first, "raw-native-conversation")
+	require.Equal(t, "raw-native-conversation", first)
 }
 
-func TestResolveGrokCacheIdentityExplicitHeaderPriority(t *testing.T) {
+func TestResolveGrokCacheIdentityBodyPromptCacheKeyHasNativePriority(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"grok","prompt_cache_key":"body-key","input":"hi"}`)
 	c := newGrokCacheTestContext(401)
@@ -163,11 +162,7 @@ func TestResolveGrokCacheIdentityExplicitHeaderPriority(t *testing.T) {
 	c.Request.Header.Set("session_id", "session-key")
 
 	got := resolveGrokCacheIdentity(c, body, "explicit-argument", "grok-4.5")
-	onlySession := newGrokCacheTestContext(401)
-	onlySession.Request.Header.Set("session_id", "session-key")
-	want := resolveGrokCacheIdentity(onlySession, []byte(`{"model":"grok","input":"unrelated"}`), "", "grok-4.5")
-
-	require.Equal(t, want, got)
+	require.Equal(t, "body-key", got)
 }
 
 func TestResolveGrokCacheIdentityIDEHeaderPriority(t *testing.T) {
@@ -190,10 +185,7 @@ func TestResolveGrokCacheIdentityIDEHeaderPriority(t *testing.T) {
 	}
 	for _, header := range headers {
 		got := resolveGrokCacheIdentity(c, body, "explicit-argument", "grok-4.5")
-		onlyCurrent := newGrokCacheTestContext(402)
-		onlyCurrent.Request.Header.Set(header.name, header.value)
-		want := resolveGrokCacheIdentity(onlyCurrent, []byte(`{"model":"grok","input":"unrelated"}`), "", "grok-4.5")
-		require.Equal(t, want, got, header.name)
+		require.Equal(t, "body-key", got, header.name)
 		c.Request.Header.Del(header.name)
 	}
 }
@@ -201,7 +193,7 @@ func TestResolveGrokCacheIdentityIDEHeaderPriority(t *testing.T) {
 func TestExplicitGrokCacheSeedPriority(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c := newGrokCacheTestContext(403)
-	headers := []struct {
+	bridgeHeaders := []struct {
 		name  string
 		value string
 	}{
@@ -212,19 +204,25 @@ func TestExplicitGrokCacheSeedPriority(t *testing.T) {
 		{name: openCodeSessionIDHeader, value: "opencode-session-id"},
 		{name: openCodeNativeSessionHeader, value: "opencode-native-session"},
 		{name: codeBuddyConversationHeader, value: "codebuddy-conversation"},
-		{name: grokConversationIDHeader, value: "grok-conversation"},
 	}
-	for _, header := range headers {
+	for _, header := range bridgeHeaders {
 		c.Request.Header.Set(header.name, header.value)
 	}
+	c.Request.Header.Set(grokConversationIDHeader, "grok-conversation")
+	c.Request.Header.Set(grokSessionIDHeader, "grok-session")
 
 	body := []byte(`{"model":"grok","prompt_cache_key":"body-key","input":"hi"}`)
-	for _, header := range headers {
+	require.Equal(t, "body-key", explicitGrokCacheSeed(c, body, "explicit-argument"))
+	body = []byte(`{"model":"grok","input":"hi"}`)
+	require.Equal(t, "grok-conversation", explicitGrokCacheSeed(c, body, "explicit-argument"))
+	c.Request.Header.Del(grokConversationIDHeader)
+	require.Equal(t, "grok-session", explicitGrokCacheSeed(c, body, "explicit-argument"))
+	c.Request.Header.Del(grokSessionIDHeader)
+	for _, header := range bridgeHeaders {
 		require.Equal(t, header.value, explicitGrokCacheSeed(c, body, "explicit-argument"), header.name)
 		c.Request.Header.Del(header.name)
 	}
-	require.Equal(t, "body-key", explicitGrokCacheSeed(c, body, "explicit-argument"))
-	require.Equal(t, "explicit-argument", explicitGrokCacheSeed(c, []byte(`{"model":"grok"}`), "explicit-argument"))
+	require.Equal(t, "explicit-argument", explicitGrokCacheSeed(c, body, "explicit-argument"))
 }
 
 func TestResolveGrokCacheIdentityIDEHeadersAreStableIsolatedAndOpaque(t *testing.T) {
@@ -245,8 +243,8 @@ func TestResolveGrokCacheIdentityIDEHeadersAreStableIsolatedAndOpaque(t *testing
 			apiKeyID := int64(800 + index)
 			c := newGrokCacheTestContext(apiKeyID)
 			c.Request.Header.Set(tt.header, rawSession)
-			firstBody := []byte(`{"model":"grok","prompt_cache_key":"turn-one-body-key","input":"first turn"}`)
-			secondBody := []byte(`{"model":"grok","prompt_cache_key":"turn-two-body-key","input":"different second turn"}`)
+			firstBody := []byte(`{"model":"grok","input":"first turn"}`)
+			secondBody := []byte(`{"model":"grok","input":"different second turn"}`)
 
 			first := resolveGrokCacheIdentity(c, firstBody, "first-explicit-key", "grok-4.5")
 			second := resolveGrokCacheIdentity(c, secondBody, "second-explicit-key", "grok-4.5")
@@ -283,7 +281,7 @@ func TestOpenCodeResponsesHeaderAndBodyCacheSignalsConverge(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, second, gjson.GetBytes(patched, "prompt_cache_key").String())
 	headers := make(http.Header)
-	applyGrokCacheHeaders(headers, second)
+	applyGrokNativeRequestHeaders(headers, nil, second, nil)
 	require.Equal(t, second, headers.Get(grokConversationIDHeader))
 	require.NotContains(t, string(patched), rawSession)
 }
@@ -325,7 +323,7 @@ func TestGrokConversationHeaderIsScopedToGrokRequestScheduling(t *testing.T) {
 
 	grokContext := newGrokCacheTestContext(601)
 	grokContext.Request.Header.Set(grokConversationIDHeader, "native-grok-session")
-	require.Equal(t, "native-grok-session", (&OpenAIGatewayService{}).ExtractSessionID(grokContext, body))
+	require.Equal(t, "body-session", (&OpenAIGatewayService{}).ExtractSessionID(grokContext, body))
 
 	openAIContext := newGrokCacheTestContext(601)
 	openAIContext.Set("api_key", &APIKey{ID: 601, Group: &Group{Platform: PlatformOpenAI}})
@@ -351,10 +349,11 @@ func TestApplyGrokCacheIdentityWritesResponsesBodyAndHeader(t *testing.T) {
 
 	headers := make(http.Header)
 	headers.Set(grokConversationIDHeader, "spoofed-client-value")
-	applyGrokCacheHeaders(headers, "isolated-id")
+	applyGrokNativeRequestHeaders(headers, nil, "isolated-id", nil)
 	require.Equal(t, "isolated-id", headers.Get(grokConversationIDHeader))
-	applyGrokCacheHeaders(headers, "")
-	require.Empty(t, headers.Get(grokConversationIDHeader))
+	emptyHeaders := make(http.Header)
+	applyGrokNativeRequestHeaders(emptyHeaders, nil, "", nil)
+	require.Empty(t, emptyHeaders.Get(grokConversationIDHeader))
 
 	chatBody, err := stripGrokChatPromptCacheKey(body)
 	require.NoError(t, err)
