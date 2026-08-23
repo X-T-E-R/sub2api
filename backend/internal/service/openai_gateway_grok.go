@@ -74,6 +74,22 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 			return nil, err
 		}
 	}
+	if isGrokResponsesProtocolCompatibilityEnabled(account) {
+		var compatibilityReport GrokResponsesCompatibilityReport
+		patchedBody, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(patchedBody)
+		observeGrokResponsesProtocolCompatibility(c, "http", compatibilityReport, err)
+		if err != nil {
+			param := ""
+			if compatibilityErr, ok := err.(*GrokResponsesCompatibilityError); ok {
+				param = compatibilityErr.Path
+			}
+			setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"type": "invalid_request_error", "message": err.Error(), "param": param,
+			}})
+			return nil, err
+		}
+	}
 	// Derive the identity from the request xAI will actually see. This makes
 	// Codex Responses Lite additional_tools part of the stable tool prefix.
 	cacheIdentity := resolveGrokCacheIdentity(c, patchedBody, "", upstreamModel)

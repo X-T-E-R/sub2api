@@ -1,0 +1,222 @@
+{
+  "model": "grok-4.5",
+  "controls": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [{ "type": "input_text", "text": "synthetic-control-message" }]
+    },
+    {
+      "type": "reasoning",
+      "summary": [],
+      "encrypted_content": "synthetic-reasoning-state"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_synthetic_control",
+      "name": "synthetic_control",
+      "arguments": "{}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_synthetic_control",
+      "output": "synthetic-control-output"
+    }
+  ],
+  "agent_message_variants": [
+    {
+      "name": "child_initial_new_task_plaintext",
+      "source_operation": "spawn_agent direct plaintext",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [{
+          "type": "input_text",
+          "text": "Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\nsynthetic-child-task"
+        }]
+      }
+    },
+    {
+      "name": "child_initial_new_task_encrypted",
+      "source_operation": "spawn_agent encrypted arguments",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"
+          },
+          {
+            "type": "encrypted_content",
+            "encrypted_content": "synthetic-opaque-child-task"
+          }
+        ]
+      }
+    },
+    {
+      "name": "child_final_answer_plaintext",
+      "source_operation": "child completion delivery",
+      "item": {
+        "type": "agent_message",
+        "author": "/root/child",
+        "recipient": "/root",
+        "content": [{
+          "type": "input_text",
+          "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/child\nPayload:\nsynthetic-child-result"
+        }]
+      }
+    },
+    {
+      "name": "send_message_plaintext",
+      "source_operation": "send_message direct plaintext",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [{
+          "type": "input_text",
+          "text": "Message Type: MESSAGE\nTask name: /root/child\nSender: /root\nPayload:\nsynthetic-message"
+        }]
+      }
+    },
+    {
+      "name": "send_message_encrypted",
+      "source_operation": "send_message encrypted arguments",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Message Type: MESSAGE\nTask name: /root/child\nSender: /root\nPayload:\n"
+          },
+          {
+            "type": "encrypted_content",
+            "encrypted_content": "synthetic-opaque-message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "followup_task_plaintext",
+      "source_operation": "followup_task direct plaintext",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [{
+          "type": "input_text",
+          "text": "Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\nsynthetic-followup"
+        }]
+      }
+    },
+    {
+      "name": "followup_task_encrypted",
+      "source_operation": "followup_task encrypted arguments",
+      "item": {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/child",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"
+          },
+          {
+            "type": "encrypted_content",
+            "encrypted_content": "synthetic-opaque-followup"
+          }
+        ]
+      }
+    }
+  ],
+  "tool_modes": [
+    { "name": "absent" },
+    { "name": "null", "value": null },
+    { "name": "empty", "value": [] },
+    {
+      "name": "matching_namespace",
+      "value": [{
+        "type": "namespace",
+        "name": "collaboration",
+        "description": "Synthetic projection of current Codex collaboration tools.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "send_message",
+            "strict": false,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string" },
+                "message": { "type": "string", "encrypted": true }
+              },
+              "required": ["target", "message"],
+              "additionalProperties": false
+            }
+          },
+          {
+            "type": "function",
+            "name": "followup_task",
+            "strict": false,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string" },
+                "message": { "type": "string", "encrypted": true }
+              },
+              "required": ["target", "message"],
+              "additionalProperties": false
+            }
+          }
+        ]
+      }]
+    }
+  ],
+  "schema_cases": [
+    {
+      "name": "root_anyof_object_and_string",
+      "expected_strict_root_object_valid": false,
+      "parameters": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": { "automation_id": { "type": "string" } },
+            "required": ["automation_id"],
+            "additionalProperties": false
+          },
+          { "type": "string" }
+        ]
+      }
+    },
+    {
+      "name": "root_anyof_object_and_null",
+      "expected_strict_root_object_valid": false,
+      "parameters": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": { "automation_id": { "type": "string" } },
+            "required": ["automation_id"],
+            "additionalProperties": false
+          },
+          { "type": "null" }
+        ]
+      }
+    },
+    {
+      "name": "pure_object_control",
+      "expected_strict_root_object_valid": true,
+      "parameters": {
+        "type": "object",
+        "properties": { "automation_id": { "type": "string" } },
+        "required": ["automation_id"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

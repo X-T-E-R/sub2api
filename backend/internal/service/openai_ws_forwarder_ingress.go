@@ -560,6 +560,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					currentBridgePayload.originalModel,
 				)
 				if err != nil {
+					var compatibilityErr *GrokResponsesCompatibilityError
+					if errors.As(err, &compatibilityErr) {
+						return writeGrokResponsesCompatibilityWSClientError(writeClientMessage, err)
+					}
 					return fmt.Errorf("resolve Grok websocket cache identity: %w", err)
 				}
 			}

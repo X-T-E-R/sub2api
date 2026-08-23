@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -321,6 +322,15 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if err != nil {
 			releaseUpstreamCtx()
 			return nil, err
+		}
+		if isGrokResponsesProtocolCompatibilityEnabled(account) {
+			var compatibilityReport GrokResponsesCompatibilityReport
+			body, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(body)
+			observeGrokResponsesProtocolCompatibility(c, "ws_http_bridge", compatibilityReport, err)
+			if err != nil {
+				releaseUpstreamCtx()
+				return nil, writeGrokResponsesCompatibilityWSClientError(writeClientMessage, err)
+			}
 		}
 		grokMixedCacheIntentBody := append([]byte(nil), body...)
 		body, err = applyGrokResponsesCacheIdentity(body, grokIntentSourceBody, grokCacheIdentity, account.IsGrokOAuth())
@@ -680,11 +690,56 @@ func resolveGrokWSCacheIdentity(c *gin.Context, account *Account, seedPayload, c
 		return "", err
 	}
 	upstreamModel := resolveGrokWSUpstreamModel(account, currentPayload, originalModel)
-	body, err = patchGrokResponsesBody(body, upstreamModel)
+	body, _, err = patchGrokResponsesBodyWithClientTools(body, upstreamModel)
 	if err != nil {
 		return "", err
 	}
+	if isGrokResponsesProtocolCompatibilityEnabled(account) {
+		var compatibilityReport GrokResponsesCompatibilityReport
+		body, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(body)
+		if err != nil {
+			observeGrokResponsesProtocolCompatibility(c, "ws_first_identity", compatibilityReport, err)
+			return "", err
+		}
+	}
 	return resolveGrokCacheIdentity(c, body, "", upstreamModel), nil
+}
+
+func writeGrokResponsesCompatibilityWSClientError(writeClientMessage func([]byte) error, err error) error {
+	var compatibilityErr *GrokResponsesCompatibilityError
+	if !errors.As(err, &compatibilityErr) || compatibilityErr == nil {
+		return err
+	}
+	if writeClientMessage != nil {
+		_ = writeClientMessage(buildGrokResponsesCompatibilityWSErrorEvent(compatibilityErr))
+	}
+	reason := fmt.Sprintf("invalid_request_error at %s: %s", compatibilityErr.Path, compatibilityErr.Reason)
+	return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, reason, compatibilityErr)
+}
+
+func buildGrokResponsesCompatibilityWSErrorEvent(err *GrokResponsesCompatibilityError) []byte {
+	if err == nil {
+		return []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_request_error","message":"invalid Grok Responses request"}}`)
+	}
+	payload := struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+		Error  struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Param   string `json:"param"`
+		} `json:"error"`
+	}{Type: "error", Status: http.StatusBadRequest}
+	payload.Error.Type = "invalid_request_error"
+	payload.Error.Code = err.Code
+	payload.Error.Message = fmt.Sprintf("%s at %s: %s", err.Code, err.Path, err.Reason)
+	payload.Error.Param = err.Path
+	encoded, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_request_error","message":"invalid Grok Responses request"}}`)
+	}
+	return encoded
 }
 
 func resolveGrokWSUpstreamModel(account *Account, body []byte, originalModel string) string {

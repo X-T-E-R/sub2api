@@ -1613,6 +1613,18 @@ func TestShouldReportOpenAIWSProxyAccountFailure(t *testing.T) {
 		require.True(t, shouldReportOpenAIWSProxyAccountFailure(err))
 	})
 
+	t.Run("Grok compatibility client error does not penalize account", func(t *testing.T) {
+		compatibilityErr := &service.GrokResponsesCompatibilityError{
+			Code: "invalid_client_tool_schema", Path: "tools[2].parameters", Reason: "missing_ref",
+		}
+		err := service.NewOpenAIWSClientCloseError(
+			coderws.StatusPolicyViolation,
+			"invalid_request_error at tools[2].parameters: missing_ref",
+			compatibilityErr,
+		)
+		require.False(t, shouldReportOpenAIWSProxyAccountFailure(err))
+	})
+
 	t.Run("generic proxy failure still penalizes account", func(t *testing.T) {
 		require.True(t, shouldReportOpenAIWSProxyAccountFailure(errors.New("upstream websocket read failed")))
 	})

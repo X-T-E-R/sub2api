@@ -58,7 +58,11 @@ func newOpenAIWSUnsupportedModelSwitchError(model string) error {
 }
 
 func shouldReportOpenAIWSProxyAccountFailure(err error) bool {
-	return err != nil && !errors.Is(err, errOpenAIWSUnsupportedModelSwitch)
+	if err == nil || errors.Is(err, errOpenAIWSUnsupportedModelSwitch) {
+		return false
+	}
+	var compatibilityErr *service.GrokResponsesCompatibilityError
+	return !errors.As(err, &compatibilityErr)
 }
 
 func openAIWSTurnBillingModel(result *service.OpenAIForwardResult, mapping service.ChannelMappingResult, requestedModel, upstreamModel string) string {

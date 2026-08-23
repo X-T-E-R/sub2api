@@ -2386,6 +2386,7 @@ func (h *GatewayHandler) maybeLogCompatibilityFallbackMetrics(reqLog *zap.Logger
 		zap.Int64("session_hash_legacy_dual_write_total", metrics.SessionHashLegacyDualWriteTotal),
 		zap.Float64("session_hash_legacy_read_hit_rate", metrics.SessionHashLegacyReadHitRate),
 		zap.Int64("metadata_legacy_fallback_total", metrics.MetadataLegacyFallbackTotal),
+		zap.Any("grok_responses_protocol", metrics.GrokResponsesProtocol),
 	)
 }
 

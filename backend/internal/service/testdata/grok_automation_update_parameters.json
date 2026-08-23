@@ -1,0 +1,399 @@
+{
+  "$defs": {
+    "__schema0": {
+      "type": "object",
+      "required": [
+        "mode",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "mode": {
+          "enum": [
+            "view"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema1": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema2": {
+      "type": "string"
+    },
+    "__schema3": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/__schema4"
+        },
+        {
+          "$ref": "#/$defs/__schema17"
+        }
+      ]
+    },
+    "__schema4": {
+      "type": "object",
+      "required": [
+        "name",
+        "prompt",
+        "rrule",
+        "status",
+        "kind",
+        "projectId",
+        "model",
+        "reasoningEffort",
+        "mode",
+        "executionEnvironment"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/__schema11"
+        },
+        "mode": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "name": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "model": {
+          "$ref": "#/$defs/__schema14"
+        },
+        "rrule": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "prompt": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "projectId": {
+          "$ref": "#/$defs/__schema12"
+        },
+        "destination": {
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "$ref": "#/$defs/__schema15"
+        },
+        "notificationPolicy": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "executionEnvironment": {
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema5": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema6": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema7": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema8": {
+      "enum": [
+        "ACTIVE",
+        "PAUSED"
+      ],
+      "type": "string"
+    },
+    "__schema9": {
+      "$ref": "#/$defs/__schema10"
+    },
+    "__schema10": {
+      "anyOf": [
+        {
+          "enum": [
+            "failed_runs_only"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema11": {
+      "enum": [
+        "cron"
+      ],
+      "type": "string"
+    },
+    "__schema12": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/__schema13"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema13": {
+      "type": "string"
+    },
+    "__schema14": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema15": {
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "type": "string"
+    },
+    "__schema16": {
+      "enum": [
+        "create",
+        "suggested_create"
+      ],
+      "type": "string"
+    },
+    "__schema17": {
+      "type": "object",
+      "required": [
+        "name",
+        "prompt",
+        "rrule",
+        "status",
+        "kind",
+        "mode"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/__schema18"
+        },
+        "mode": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "name": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "rrule": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "prompt": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "destination": {
+          "$ref": "#/$defs/__schema19"
+        },
+        "targetThreadId": {
+          "$ref": "#/$defs/__schema20"
+        },
+        "notificationPolicy": {
+          "$ref": "#/$defs/__schema9"
+        }
+      },
+      "additionalProperties": false
+    },
+    "__schema18": {
+      "enum": [
+        "heartbeat"
+      ],
+      "type": "string"
+    },
+    "__schema19": {
+      "enum": [
+        "local",
+        "thread"
+      ],
+      "type": "string"
+    },
+    "__schema20": {
+      "$ref": "#/$defs/__schema2",
+      "type": "string"
+    },
+    "__schema21": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "prompt",
+            "rrule",
+            "status",
+            "kind",
+            "projectId",
+            "model",
+            "reasoningEffort",
+            "mode",
+            "id",
+            "executionEnvironment"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/__schema1"
+            },
+            "kind": {
+              "$ref": "#/$defs/__schema11"
+            },
+            "mode": {
+              "$ref": "#/$defs/__schema23"
+            },
+            "name": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "model": {
+              "$ref": "#/$defs/__schema14"
+            },
+            "rrule": {
+              "$ref": "#/$defs/__schema22"
+            },
+            "prompt": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "status": {
+              "$ref": "#/$defs/__schema8"
+            },
+            "projectId": {
+              "$ref": "#/$defs/__schema12"
+            },
+            "destination": {
+              "enum": [
+                "local",
+                "worktree"
+              ],
+              "type": "string"
+            },
+            "reasoningEffort": {
+              "$ref": "#/$defs/__schema15"
+            },
+            "notificationPolicy": {
+              "$ref": "#/$defs/__schema9"
+            },
+            "executionEnvironment": {
+              "enum": [
+                "worktree",
+                "local"
+              ],
+              "type": "string"
+            },
+            "localEnvironmentConfigPath": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "prompt",
+            "rrule",
+            "status",
+            "kind",
+            "mode",
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/__schema1"
+            },
+            "kind": {
+              "$ref": "#/$defs/__schema18"
+            },
+            "mode": {
+              "$ref": "#/$defs/__schema23"
+            },
+            "name": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "rrule": {
+              "$ref": "#/$defs/__schema22"
+            },
+            "prompt": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "status": {
+              "$ref": "#/$defs/__schema8"
+            },
+            "destination": {
+              "$ref": "#/$defs/__schema19"
+            },
+            "targetThreadId": {
+              "$ref": "#/$defs/__schema20"
+            },
+            "notificationPolicy": {
+              "$ref": "#/$defs/__schema9"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "__schema22": {
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema23": {
+      "enum": [
+        "update",
+        "suggested_update"
+      ],
+      "type": "string"
+    },
+    "__schema24": {
+      "type": "object",
+      "required": [
+        "mode",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/__schema1"
+        },
+        "mode": {
+          "enum": [
+            "delete"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/__schema0"
+    },
+    {
+      "$ref": "#/$defs/__schema3"
+    },
+    {
+      "$ref": "#/$defs/__schema21"
+    },
+    {
+      "$ref": "#/$defs/__schema24"
+    }
+  ]
+}

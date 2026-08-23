@@ -350,6 +350,8 @@ type OpenAICompatibilityFallbackMetricsSnapshot struct {
 	MetadataLegacyFallbackSingleAccountRetryTotal  int64 `json:"metadata_legacy_fallback_single_account_retry_total"`
 	MetadataLegacyFallbackAccountSwitchCountTotal  int64 `json:"metadata_legacy_fallback_account_switch_count_total"`
 	MetadataLegacyFallbackTotal                    int64 `json:"metadata_legacy_fallback_total"`
+
+	GrokResponsesProtocol GrokResponsesCompatibilityMetricsSnapshot `json:"grok_responses_protocol"`
 }
 
 type openAIWSRetryMetrics struct {
@@ -1021,6 +1023,7 @@ func SnapshotOpenAICompatibilityFallbackMetrics() OpenAICompatibilityFallbackMet
 		MetadataLegacyFallbackSingleAccountRetryTotal:  singleAccountRetry,
 		MetadataLegacyFallbackAccountSwitchCountTotal:  accountSwitchCount,
 		MetadataLegacyFallbackTotal:                    metadataFallbackTotal,
+		GrokResponsesProtocol:                          SnapshotGrokResponsesCompatibilityMetrics(),
 	}
 }
 
