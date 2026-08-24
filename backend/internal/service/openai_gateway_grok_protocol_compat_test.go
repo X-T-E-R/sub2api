@@ -91,15 +91,13 @@ func TestNormalizeGrokResponsesProtocolCompatibilityStaticSchemaControls(t *test
 	for _, schemaFixture := range fixtures.SchemaCases {
 		t.Run(schemaFixture.Name, func(t *testing.T) {
 			body := []byte(`{"model":"grok-4.5","input":[],"tools":[{"type":"function","name":"schema_control","strict":true,"parameters":` + string(schemaFixture.Parameters) + `}]}`)
-			patched, _, err := patchGrokResponsesBodyWithClientTools(body, fixtures.Model)
-			require.NoError(t, err)
-			normalized, report, err := normalizeGrokResponsesProtocolCompatibility(patched)
+			patched, _, report, err := patchGrokResponsesBodyWithClientToolsCompatibility(body, fixtures.Model, true)
 			require.NoError(t, err)
 			require.NotEmpty(t, report.Schemas)
-			parameters := gjson.GetBytes(normalized, "tools.0.parameters")
+			parameters := gjson.GetBytes(patched, "tools.0.parameters")
 			require.Equal(t, "object", parameters.Get("type").String())
 			assertNoGrokRootRefOrNull(t, parameters.Value())
-			require.Equal(t, normalized, buildGrokCompatibilityRequest(t, normalized))
+			require.Equal(t, patched, buildGrokCompatibilityRequest(t, patched))
 		})
 	}
 }
@@ -160,7 +158,7 @@ func TestNormalizeGrokResponsesProtocolCompatibilityKeepsMultipleAgentPositionsA
 func TestNormalizeGrokResponsesProtocolCompatibilitySchemaMatrix(t *testing.T) {
 	pureObject := []byte("{\n \"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false\n}")
 	pureBody := []byte(`{"tools":[{"type":"function","name":"pure","strict":true,"parameters":` + string(pureObject) + `}]}`)
-	pureNormalized, pureReport, err := normalizeGrokResponsesProtocolCompatibility(pureBody)
+	pureNormalized, pureReport, err := sanitizeGrokResponsesTools(pureBody, true)
 	require.NoError(t, err)
 	require.Equal(t, pureBody, pureNormalized)
 	require.Equal(t, 1, pureReport.SchemaUnchanged)
@@ -194,7 +192,7 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaMatrix(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			body := []byte(`{"tools":[{"type":"function","name":"schema_a","strict":true,"parameters":` + testCase.schema + `}]}`)
-			normalized, report, err := normalizeGrokResponsesProtocolCompatibility(body)
+			normalized, report, err := sanitizeGrokResponsesTools(body, true)
 			require.NoError(t, err)
 			require.Len(t, report.Schemas, 1)
 			require.Equal(t, testCase.wantOutcome, report.Schemas[0].Outcome)
@@ -210,7 +208,7 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaMatrix(t *testing.T) {
 				}
 				require.Len(t, branches.Array(), testCase.wantBranchCount)
 			}
-			second, secondReport, err := normalizeGrokResponsesProtocolCompatibility(normalized)
+			second, secondReport, err := sanitizeGrokResponsesTools(normalized, true)
 			require.NoError(t, err)
 			require.Equal(t, normalized, second)
 			require.NotEqual(t, "fallback", compatibilitySingleSchemaOutcome(secondReport))
@@ -219,15 +217,15 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaMatrix(t *testing.T) {
 
 	first := []byte(`{"tools":[{"type":"function","name":"first","strict":true,"parameters":{"type":"string"}}]}`)
 	second := []byte(`{"tools":[{"type":"function","name":"unrelated_name","strict":true,"parameters":{"type":"string"}}]}`)
-	firstNormalized, _, err := normalizeGrokResponsesProtocolCompatibility(first)
+	firstNormalized, _, err := sanitizeGrokResponsesTools(first, true)
 	require.NoError(t, err)
-	secondNormalized, _, err := normalizeGrokResponsesProtocolCompatibility(second)
+	secondNormalized, _, err := sanitizeGrokResponsesTools(second, true)
 	require.NoError(t, err)
 	require.JSONEq(t, gjson.GetBytes(firstNormalized, "tools.0.parameters").Raw, gjson.GetBytes(secondNormalized, "tools.0.parameters").Raw)
 
 	for _, schema := range []string{`{}`, `true`} {
 		body := []byte(`{"tools":[{"type":"function","name":"canonical","strict":true,"parameters":` + schema + `}]}`)
-		normalized, report, err := normalizeGrokResponsesProtocolCompatibility(body)
+		normalized, report, err := sanitizeGrokResponsesTools(body, true)
 		require.NoError(t, err)
 		require.Equal(t, "canonicalized", compatibilitySingleSchemaOutcome(report))
 		require.JSONEq(t, string(permissiveGrokObjectSchema()), gjson.GetBytes(normalized, "tools.0.parameters").Raw)
@@ -238,7 +236,7 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaMatrix(t *testing.T) {
 func TestNormalizeGrokResponsesProtocolCompatibilityCanonicalizesCrossConstraintObjectDomain(t *testing.T) {
 	schema := `{"type":["object","string"],"allOf":[{"type":"object","required":["x"]}],"properties":{"x":{"type":"string","anyOf":[{"type":"string"},{"type":"null"}]}},"additionalProperties":false}`
 	body := []byte(`{"tools":[{"type":"function","name":"cross_constraint","strict":true,"parameters":` + schema + `}]}`)
-	normalized, report, err := normalizeGrokResponsesProtocolCompatibility(body)
+	normalized, report, err := sanitizeGrokResponsesTools(body, true)
 	require.NoError(t, err)
 	require.Equal(t, "canonicalized", compatibilitySingleSchemaOutcome(report))
 	parameters := gjson.GetBytes(normalized, "tools.0.parameters")
@@ -249,7 +247,7 @@ func TestNormalizeGrokResponsesProtocolCompatibilityCanonicalizesCrossConstraint
 	require.False(t, parameters.Get("additionalProperties").Bool())
 }
 
-func TestNormalizeGrokResponsesProtocolCompatibilitySchemaErrorsAreTypedAndAtomic(t *testing.T) {
+func TestGrokResponsesSchemaCompatibilityFallsBackPerToolAndKeepsAgentBoundary(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema string
@@ -266,18 +264,34 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaErrorsAreTypedAndAtomi
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			body := []byte(`{"input":[{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"must-not-leak"}]}],"tools":[{"type":"function","name":"broken","parameters":` + testCase.schema + `}]}`)
+			body := []byte(`{"input":[{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"must-not-leak"}]}],"tools":[{"type":"function","name":"good","description":"keep-good","strict":true,"parameters":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"],"additionalProperties":false},"x_outer":1},{"type":"function","name":"broken","description":"keep-bad","strict":true,"parameters":` + testCase.schema + `,"x_outer":2},{"type":"web_search","x_outer":3},{"type":"function","name":"after","strict":true,"parameters":{"type":"object","properties":{}}}]}`)
 			original := append([]byte(nil), body...)
-			normalized, report, err := normalizeGrokResponsesProtocolCompatibility(body)
-			require.Nil(t, normalized)
+			normalized, report, err := sanitizeGrokResponsesTools(body, true)
+			require.NoError(t, err)
 			require.Equal(t, original, body)
-			require.Equal(t, 1, report.AgentItems)
-			require.Equal(t, 1, report.SchemaErrors)
-			var compatibilityErr *GrokResponsesCompatibilityError
-			require.ErrorAs(t, err, &compatibilityErr)
-			require.Equal(t, "invalid_client_tool_schema", compatibilityErr.Code)
-			require.Equal(t, testCase.reason, compatibilityErr.Reason)
-			require.NotContains(t, err.Error(), "must-not-leak")
+			require.Equal(t, "agent_message", gjson.GetBytes(normalized, "input.0.type").String(), "shared schema stage must not project agent items")
+			require.Len(t, gjson.GetBytes(normalized, "tools").Array(), 4)
+			require.Equal(t, "good", gjson.GetBytes(normalized, "tools.0.name").String())
+			require.Equal(t, "broken", gjson.GetBytes(normalized, "tools.1.name").String())
+			require.Equal(t, "web_search", gjson.GetBytes(normalized, "tools.2.type").String())
+			require.Equal(t, "after", gjson.GetBytes(normalized, "tools.3.name").String())
+			require.Equal(t, "keep-bad", gjson.GetBytes(normalized, "tools.1.description").String())
+			require.Equal(t, int64(2), gjson.GetBytes(normalized, "tools.1.x_outer").Int())
+			require.JSONEq(t, string(permissiveGrokObjectSchema()), gjson.GetBytes(normalized, "tools.1.parameters").Raw)
+			require.False(t, gjson.GetBytes(normalized, "tools.1.strict").Bool())
+			require.Equal(t, "x", gjson.GetBytes(normalized, "tools.0.parameters.required.0").String())
+			require.True(t, gjson.GetBytes(normalized, "tools.3.strict").Bool(), "later valid tool must still be processed independently")
+			require.Equal(t, 1, report.SchemaFallback)
+			require.Zero(t, report.SchemaErrors)
+			require.Len(t, report.Schemas, 3)
+			require.Equal(t, testCase.reason, report.Schemas[1].Reason)
+			require.NotContains(t, report.Schemas[1].Fingerprint, "must-not-leak")
+
+			projected, agentReport, err := normalizeGrokResponsesProtocolCompatibility(normalized)
+			require.NoError(t, err)
+			require.Equal(t, 1, agentReport.AgentItems)
+			require.Empty(t, agentReport.Schemas)
+			require.Equal(t, "message", gjson.GetBytes(projected, "input.0.type").String())
 		})
 	}
 }
@@ -331,34 +345,41 @@ func TestNormalizeGrokResponsesProtocolCompatibilitySchemaBudgets(t *testing.T) 
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, _, _, _, err := normalizeGrokFunctionParametersWithLimits([]byte(testCase.schema), "tools[2].parameters", testCase.limits())
-			var compatibilityErr *GrokResponsesCompatibilityError
-			require.ErrorAs(t, err, &compatibilityErr)
-			require.Equal(t, "invalid_client_tool_schema", compatibilityErr.Code)
-			require.Equal(t, testCase.reason, compatibilityErr.Reason)
-			require.True(t, strings.HasPrefix(compatibilityErr.Path, "tools[2].parameters"))
+			result, changed, outcome, reason, err := normalizeGrokFunctionParametersWithLimits([]byte(testCase.schema), "tools[2].parameters", testCase.limits())
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.Equal(t, "fallback", outcome)
+			require.Equal(t, testCase.reason, reason)
+			require.JSONEq(t, string(permissiveGrokObjectSchema()), string(result))
 		})
 	}
 
 	adversarial := grokCompatibilityDoublingDAGSchema(t, 10)
 	require.Less(t, len(adversarial), 4096, "adversarial input must stay small")
-	_, _, _, _, err := normalizeGrokFunctionParameters([]byte(adversarial), "tools[0].parameters")
-	var compatibilityErr *GrokResponsesCompatibilityError
-	require.ErrorAs(t, err, &compatibilityErr)
-	require.Equal(t, "compatibility_ref_limit_exceeded", compatibilityErr.Reason)
+	result, _, outcome, reason, err := normalizeGrokFunctionParameters([]byte(adversarial), "tools[0].parameters")
+	require.NoError(t, err)
+	require.Equal(t, "fallback", outcome)
+	require.Equal(t, "compatibility_ref_limit_exceeded", reason)
+	require.JSONEq(t, string(permissiveGrokObjectSchema()), string(result))
+
+	result, _, outcome, reason, err = normalizeGrokFunctionParameters([]byte(`{"type":"object"} trailing`), "tools[0].parameters")
+	require.NoError(t, err)
+	require.Equal(t, "fallback", outcome)
+	require.Equal(t, "malformed_schema", reason)
+	require.JSONEq(t, string(permissiveGrokObjectSchema()), string(result))
 }
 
 func TestNormalizeGrokResponsesProtocolCompatibilityAutomationUpdateSemantics(t *testing.T) {
 	rawSchema, err := os.ReadFile(filepath.Join("testdata", "grok_automation_update_parameters.json"))
 	require.NoError(t, err)
 	body := []byte(`{"tools":[{"type":"function","name":"automation_update","strict":true,"parameters":` + string(rawSchema) + `}]}`)
-	normalizedBody, report, err := normalizeGrokResponsesProtocolCompatibility(body)
+	normalizedBody, report, err := sanitizeGrokResponsesTools(body, true)
 	require.NoError(t, err)
 	require.Len(t, report.Schemas, 1)
 	require.Equal(t, "inlined", report.Schemas[0].Outcome)
 	require.NotZero(t, report.Schemas[0].SizeDeltaByte)
 	normalizedRaw := []byte(gjson.GetBytes(normalizedBody, "tools.0.parameters").Raw)
-	secondBody, secondReport, err := normalizeGrokResponsesProtocolCompatibility(normalizedBody)
+	secondBody, secondReport, err := sanitizeGrokResponsesTools(normalizedBody, true)
 	require.NoError(t, err)
 	require.Equal(t, normalizedBody, secondBody)
 	require.Equal(t, "unchanged", compatibilitySingleSchemaOutcome(secondReport))
@@ -420,9 +441,13 @@ func TestGrokResponsesProtocolCompatibilityKillSwitchAndCacheProjection(t *testi
 	c.Set("api_key", &APIKey{ID: 42})
 	bodyA := []byte(`{"model":"grok-4.5","tools":[{"type":"function","name":"f","strict":true,"parameters":{"type":"string"}}],"input":[{"type":"agent_message","author":"/root/a","recipient":"/root","content":[{"type":"input_text","text":"one"}]}]}`)
 	bodyB := []byte(`{"model":"grok-4.5","tools":[{"type":"function","name":"f","strict":true,"parameters":{"type":"object","properties":{"x":{"type":"string"}}}}],"input":[{"type":"agent_message","author":"/root/b","recipient":"/root","content":[{"type":"input_text","text":"two"}]}]}`)
-	normalizedA, _, err := normalizeGrokResponsesProtocolCompatibility(bodyA)
+	normalizedA, _, err := patchGrokResponsesBodyWithCompatibility(bodyA, "grok-4.5", true)
 	require.NoError(t, err)
-	normalizedB, _, err := normalizeGrokResponsesProtocolCompatibility(bodyB)
+	normalizedA, _, err = normalizeGrokResponsesProtocolCompatibility(normalizedA)
+	require.NoError(t, err)
+	normalizedB, _, err := patchGrokResponsesBodyWithCompatibility(bodyB, "grok-4.5", true)
+	require.NoError(t, err)
+	normalizedB, _, err = normalizeGrokResponsesProtocolCompatibility(normalizedB)
 	require.NoError(t, err)
 	identityA := resolveGrokCacheIdentity(c, normalizedA, "", "grok-4.5")
 	identityB := resolveGrokCacheIdentity(c, normalizedB, "", "grok-4.5")
@@ -445,9 +470,11 @@ func TestResolveGrokWSCacheIdentityUsesNormalizedEffectiveSeed(t *testing.T) {
 	require.NotEmpty(t, actual)
 	effective, err := prepareOpenAIWSHTTPBridgeBody(seed)
 	require.NoError(t, err)
-	effective, _, err = patchGrokResponsesBodyWithClientTools(effective, "grok-4.5")
+	preCompatibility, _, _, err := patchGrokResponsesBodyWithClientToolsCompatibility(effective, "grok-4.5", false)
 	require.NoError(t, err)
-	preCompatibilityIdentity := resolveGrokCacheIdentity(c, effective, "", "grok-4.5")
+	preCompatibilityIdentity := resolveGrokCacheIdentity(c, preCompatibility, "", "grok-4.5")
+	effective, _, _, err = patchGrokResponsesBodyWithClientToolsCompatibility(effective, "grok-4.5", true)
+	require.NoError(t, err)
 	effective, _, err = normalizeGrokResponsesProtocolCompatibility(effective)
 	require.NoError(t, err)
 	want := resolveGrokCacheIdentity(c, effective, "", "grok-4.5")
@@ -594,7 +621,7 @@ func TestProxyOpenAIWSHTTPBridgeTurnCompatibilityErrorIsLocalClientError(t *test
 	require.Equal(t, before.CompatibilityTotal["agent:error"]+1, after.CompatibilityTotal["agent:error"], "effective-body compatibility error must be observed exactly once")
 }
 
-func TestResolveGrokWSCacheIdentityCompatibilityErrorIsObservedAndTranslatable(t *testing.T) {
+func TestResolveGrokWSCacheIdentitySchemaFallbackIsStableAndNotDoubleObserved(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	before := snapshotGrokResponsesCompatibilityMetrics()
 	recorder := httptest.NewRecorder()
@@ -605,27 +632,23 @@ func TestResolveGrokWSCacheIdentityCompatibilityErrorIsObservedAndTranslatable(t
 	seed := []byte(`{"type":"response.create","generate":true,"model":"grok","input":[],"tools":[{"type":"function","name":"broken","parameters":{"$ref":"#/$defs/missing","$defs":{"secret-schema":"must-not-leak"}}}]}`)
 
 	identity, err := resolveGrokWSCacheIdentity(c, account, seed, seed, "grok")
-	require.Empty(t, identity)
-	var compatibilityErr *GrokResponsesCompatibilityError
-	require.ErrorAs(t, err, &compatibilityErr)
-	require.Equal(t, "tools[0].parameters.$ref", compatibilityErr.Path)
+	require.NoError(t, err)
+	require.NotEmpty(t, identity)
+	secondIdentity, err := resolveGrokWSCacheIdentity(c, account, seed, seed, "grok")
+	require.NoError(t, err)
+	require.Equal(t, identity, secondIdentity)
 	afterResolve := snapshotGrokResponsesCompatibilityMetrics()
-	require.Equal(t, before.CompatibilityTotal["schema:error"]+1, afterResolve.CompatibilityTotal["schema:error"], "first-identity compatibility error must be observed exactly once")
-	require.Equal(t, before.ErrorTotal["missing_ref"]+1, afterResolve.ErrorTotal["missing_ref"])
+	require.Equal(t, before.CompatibilityTotal["schema:fallback"], afterResolve.CompatibilityTotal["schema:fallback"], "successful first-identity projection must not observe schema outcomes")
+	require.Equal(t, before.FallbackTotal["missing_ref"], afterResolve.FallbackTotal["missing_ref"])
 
-	var events [][]byte
-	translated := writeGrokResponsesCompatibilityWSClientError(func(message []byte) error {
-		events = append(events, append([]byte(nil), message...))
-		return nil
-	}, err)
-	var closeErr *OpenAIWSClientCloseError
-	require.ErrorAs(t, translated, &closeErr)
-	require.Equal(t, coderws.StatusPolicyViolation, closeErr.StatusCode())
-	require.Len(t, events, 1)
-	require.Equal(t, "tools[0].parameters.$ref", gjson.GetBytes(events[0], "error.param").String())
-	require.NotContains(t, string(events[0]), "must-not-leak")
-	afterTranslate := snapshotGrokResponsesCompatibilityMetrics()
-	require.Equal(t, afterResolve.CompatibilityTotal["schema:error"], afterTranslate.CompatibilityTotal["schema:error"], "translation must not double-observe")
+	prepared, err := prepareOpenAIWSHTTPBridgeBody(seed)
+	require.NoError(t, err)
+	patched, _, report, err := patchGrokResponsesBodyWithClientToolsCompatibility(prepared, "grok-4.5", true)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.SchemaFallback)
+	require.Equal(t, "missing_ref", report.Schemas[0].Reason)
+	require.JSONEq(t, string(permissiveGrokObjectSchema()), gjson.GetBytes(patched, "tools.0.parameters").Raw)
+	require.False(t, bytes.Contains(patched, []byte("must-not-leak")), "fallback body must remove the incompatible schema payload")
 }
 
 func TestForwardGrokResponsesProtocolCompatibilityRejectsBeforeEgress(t *testing.T) {
@@ -646,26 +669,26 @@ func TestForwardGrokResponsesProtocolCompatibilityRejectsBeforeEgress(t *testing
 	require.NotContains(t, recorder.Body.String(), "private")
 }
 
-func TestForwardGrokResponsesProtocolCompatibilitySchemaErrorUsesExactParam(t *testing.T) {
+func TestForwardGrokResponsesProtocolCompatibilitySchemaFallbackReachesEgress(t *testing.T) {
 	body := []byte(`{"model":"grok","input":[],"tools":[{"type":"web_search"},{"type":"x_search"},{"type":"function","name":"broken","parameters":{"$ref":"#/$defs/missing","$defs":{}}}]}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
-	upstream := &httpUpstreamRecorder{}
+	upstream := &httpUpstreamRecorder{resp: grokCompatibilityStreamingResponse("resp_schema_fallback")}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	account := &Account{ID: 805, Platform: PlatformGrok, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key", "base_url": "https://grok.example.test/v1"}}
 
 	result, err := svc.forwardGrokResponses(context.Background(), c, account, body, "grok", false, time.Now())
-	require.Nil(t, result)
-	require.Error(t, err)
-	require.Empty(t, upstream.requests)
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
-	require.Equal(t, "tools[2].parameters.$ref", gjson.Get(recorder.Body.String(), "error.param").String())
-	require.NotContains(t, recorder.Body.String(), string(gjson.GetBytes(body, "tools.2.parameters").Raw))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.requests, 1)
+	require.JSONEq(t, string(permissiveGrokObjectSchema()), gjson.GetBytes(upstream.lastBody, "tools.2.parameters").Raw)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "tools.2.strict").Bool())
+	require.NotContains(t, string(upstream.lastBody), string(gjson.GetBytes(body, "tools.2.parameters").Raw))
 }
 
 func TestForwardGrokResponsesProtocolCompatibilityKillSwitchSkipsOnlyNewStage(t *testing.T) {
-	body := []byte(`{"model":"grok","stream":true,"input":[{"type":"agent_message","author":"/root","recipient":"/root","content":[{"type":"input_text","text":"rollback"}]}]}`)
+	body := []byte(`{"model":"grok","stream":true,"input":[{"type":"agent_message","author":"/root","recipient":"/root","content":[{"type":"input_text","text":"rollback"}]}],"tools":[{"type":"function","name":"rollback_tool","strict":true,"parameters":{"$ref":"#/$defs/missing","$defs":{}}}]}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
@@ -681,13 +704,18 @@ func TestForwardGrokResponsesProtocolCompatibilityKillSwitchSkipsOnlyNewStage(t 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "agent_message", gjson.GetBytes(upstream.lastBody, "input.0.type").String())
+	require.Equal(t, "#/$defs/missing", gjson.GetBytes(upstream.lastBody, "tools.0.parameters.$ref").String())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "tools.0.strict").Bool())
 	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String(), "existing Grok base patch remains active")
 }
 
 func TestObserveGrokResponsesProtocolCompatibilityIsStructuredAndPayloadFree(t *testing.T) {
 	body := []byte(`{"authorization":"secret-auth-value","input":[{"type":"agent_message","author":"secret-author","recipient":"secret-recipient","content":[{"type":"encrypted_content","encrypted_content":"secret-message"}]}],"tools":[{"type":"function","name":"schema_tool","description":"secret-description","strict":true,"parameters":{"anyOf":[{"type":"object"},{"type":"string"}],"title":"secret-schema-title"}}]}`)
-	_, report, err := normalizeGrokResponsesProtocolCompatibility(body)
+	schemaBody, schemaReport, err := sanitizeGrokResponsesTools(body, true)
 	require.NoError(t, err)
+	_, agentReport, err := normalizeGrokResponsesProtocolCompatibility(schemaBody)
+	require.NoError(t, err)
+	report := mergeGrokResponsesCompatibilityReports(schemaReport, agentReport)
 	before := snapshotGrokResponsesCompatibilityMetrics()
 	var logs bytes.Buffer
 	previous := slog.Default()
@@ -703,6 +731,8 @@ func TestObserveGrokResponsesProtocolCompatibilityIsStructuredAndPayloadFree(t *
 	require.Equal(t, before.SchemaSizeDelta.Buckets["decrease"]+1, after.SchemaSizeDelta.Buckets["decrease"])
 	require.Contains(t, logs.String(), `"reason":"mixed_non_object_root"`)
 	require.Contains(t, logs.String(), `"schema_sha256":`)
+	require.Contains(t, logs.String(), `"version":"v2"`)
+	require.Contains(t, logs.String(), `"transport":"unit"`)
 	for _, secret := range []string{"secret-auth-value", "secret-author", "secret-recipient", "secret-message", "secret-description", "secret-schema-title", "schema_tool"} {
 		require.NotContains(t, logs.String(), secret)
 	}

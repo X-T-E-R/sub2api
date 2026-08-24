@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -18,9 +19,10 @@ import (
 )
 
 const (
-	grokResponsesProtocolCompatibilityVersion  = "v1"
+	grokResponsesProtocolCompatibilityVersion  = "v2"
 	grokResponsesProtocolCompatibilityExtraKey = "grok_responses_protocol_compat_v1"
 	grokAgentMessageProvenancePrefix           = "[Message authored by another agent; not a human request or approval.]\nProvenance: "
+	grokMissingParametersFingerprintSentinel   = "grok-responses-missing-parameters:v2"
 
 	GrokResponsesCompatibilityTotalMetricName      = "grok_responses_compat_total"
 	GrokResponsesSchemaFallbackTotalMetricName     = "grok_responses_schema_fallback_total"
@@ -175,10 +177,11 @@ func isGrokResponsesProtocolCompatibilityEnabled(account *Account) bool {
 	return !ok || value
 }
 
-// normalizeGrokResponsesProtocolCompatibility performs the provider-specific
-// projection after client-tool discovery/lowering and Grok base sanitation.
-// It is copy-on-write: failures return no candidate body and do not mutate the
-// caller-owned bytes.
+// normalizeGrokResponsesProtocolCompatibility performs the Native/WS-only
+// agent_message projection after shared Grok base and tool sanitation. Function
+// schema compatibility is owned exclusively by sanitizeGrokResponsesTools.
+// This helper is copy-on-write: failures return no candidate body and do not
+// mutate the caller-owned bytes.
 func normalizeGrokResponsesProtocolCompatibility(body []byte) ([]byte, GrokResponsesCompatibilityReport, error) {
 	var report GrokResponsesCompatibilityReport
 	if !json.Valid(body) {
@@ -197,21 +200,32 @@ func normalizeGrokResponsesProtocolCompatibility(body []byte) ([]byte, GrokRespo
 		}
 	}
 
-	normalizedTools, toolsChanged, err := normalizeGrokFunctionToolSchemas(gjson.GetBytes(body, "tools"), &report)
-	if err != nil {
-		return nil, report, err
-	}
-	if toolsChanged {
-		candidate, err = sjson.SetRawBytes(candidate, "tools", normalizedTools)
-		if err != nil {
-			return nil, report, &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: "tools", Reason: "encode_failed"}
-		}
-	}
-
-	if !inputChanged && !toolsChanged {
+	if !inputChanged {
 		return body, report, nil
 	}
 	return candidate, report, nil
+}
+
+func mergeGrokResponsesCompatibilityReports(reports ...GrokResponsesCompatibilityReport) GrokResponsesCompatibilityReport {
+	var merged GrokResponsesCompatibilityReport
+	for _, report := range reports {
+		merged.AgentItems += report.AgentItems
+		merged.AgentParts += report.AgentParts
+		merged.AgentPlaintext += report.AgentPlaintext
+		merged.AgentEncrypted += report.AgentEncrypted
+		merged.AgentMixed += report.AgentMixed
+		merged.AgentEmpty += report.AgentEmpty
+		merged.AgentErrors += report.AgentErrors
+		merged.SchemaUnchanged += report.SchemaUnchanged
+		merged.SchemaInlined += report.SchemaInlined
+		merged.SchemaNullPruned += report.SchemaNullPruned
+		merged.SchemaObjectUnion += report.SchemaObjectUnion
+		merged.SchemaCanonicalized += report.SchemaCanonicalized
+		merged.SchemaFallback += report.SchemaFallback
+		merged.SchemaErrors += report.SchemaErrors
+		merged.Schemas = append(merged.Schemas, report.Schemas...)
+	}
+	return merged
 }
 
 type grokAgentMessageProvenance struct {
@@ -433,14 +447,23 @@ func normalizeGrokFunctionToolSchemas(tools gjson.Result, report *GrokResponsesC
 			continue
 		}
 		parameters := rawTool.Get("parameters")
-		if !parameters.Exists() {
-			normalized = append(normalized, json.RawMessage(rawTool.Raw))
-			continue
-		}
+		parametersMissing := !parameters.Exists()
 		originalParameters := []byte(parameters.Raw)
 		strictBefore := rawTool.Get("strict").Bool()
 		result, schemaChanged, outcome, reason, err := normalizeGrokFunctionParameters(originalParameters, fmt.Sprintf("tools[%d].parameters", index))
 		fingerprint := grokSchemaFingerprint(originalParameters)
+		if parametersMissing {
+			result = permissiveGrokObjectSchema()
+			schemaChanged = true
+			outcome = "fallback"
+			reason = "missing_parameters"
+			fingerprint = grokMissingParametersFingerprint()
+		} else if parameters.Type == gjson.Null {
+			result = permissiveGrokObjectSchema()
+			schemaChanged = true
+			outcome = "fallback"
+			reason = "null_parameters"
+		}
 		if err != nil {
 			report.SchemaErrors++
 			report.Schemas = append(report.Schemas, GrokResponsesCompatibilitySchemaResult{
@@ -458,7 +481,7 @@ func normalizeGrokFunctionToolSchemas(tools gjson.Result, report *GrokResponsesC
 			if setErr != nil {
 				return nil, false, &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: fmt.Sprintf("tools[%d].parameters", index), Reason: "encode_failed"}
 			}
-			if outcome == "fallback" && strictBefore {
+			if outcome == "fallback" {
 				toolBytes, setErr = sjson.SetBytes(toolBytes, "strict", false)
 				if setErr != nil {
 					return nil, false, &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: fmt.Sprintf("tools[%d].strict", index), Reason: "encode_failed"}
@@ -503,6 +526,15 @@ func normalizeGrokFunctionParameters(raw []byte, path string) ([]byte, bool, str
 }
 
 func normalizeGrokFunctionParametersWithLimits(raw []byte, path string, limits grokSchemaCompatibilityLimits) ([]byte, bool, string, string, error) {
+	result, changed, outcome, reason, err := tryNormalizeGrokFunctionParametersWithLimits(raw, path, limits)
+	if err == nil || compatibilityErrorReason(err) == "encode_failed" {
+		return result, changed, outcome, reason, err
+	}
+	fallback := permissiveGrokObjectSchema()
+	return fallback, !bytes.Equal(raw, fallback), "fallback", compatibilityErrorReason(err), nil
+}
+
+func tryNormalizeGrokFunctionParametersWithLimits(raw []byte, path string, limits grokSchemaCompatibilityLimits) ([]byte, bool, string, string, error) {
 	if limits.maxInputBytes > 0 && len(raw) > limits.maxInputBytes {
 		return nil, false, "error", "compatibility_input_size_limit_exceeded", &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: path, Reason: "compatibility_input_size_limit_exceeded"}
 	}
@@ -510,6 +542,10 @@ func normalizeGrokFunctionParametersWithLimits(raw []byte, path string, limits g
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&document); err != nil {
+		return nil, false, "error", "malformed_schema", &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: path, Reason: "malformed_schema"}
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, false, "error", "malformed_schema", &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: path, Reason: "malformed_schema"}
 	}
 	if boolean, ok := document.(bool); ok {
@@ -1089,6 +1125,11 @@ func grokSchemaFingerprint(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func grokMissingParametersFingerprint() string {
+	sum := sha256.Sum256([]byte(grokMissingParametersFingerprintSentinel))
+	return hex.EncodeToString(sum[:])
+}
+
 func compatibilityErrorReason(err error) string {
 	if err == nil {
 		return ""
@@ -1104,7 +1145,7 @@ func canonicalGrokCompatibilityMetricReason(reason string) string {
 	switch reason {
 	case "mixed_non_object_root", "non_object_root", "null_only_root",
 		"invalid_json", "malformed_object", "expected_string", "expected_array", "unsupported_content_type",
-		"malformed_schema", "false_schema", "expected_schema_object", "malformed_schema_node", "dynamic_ref_unsupported",
+		"missing_parameters", "null_parameters", "malformed_schema", "false_schema", "expected_schema_object", "malformed_schema_node", "dynamic_ref_unsupported",
 		"schema_scope_unsupported", "malformed_ref", "external_ref_unsupported", "cyclic_ref", "missing_ref",
 		"malformed_combinator", "malformed_type", "malformed_enum", "unsatisfiable_root", "encode_failed",
 		"compatibility_input_size_limit_exceeded", "compatibility_depth_limit_exceeded", "compatibility_work_limit_exceeded",

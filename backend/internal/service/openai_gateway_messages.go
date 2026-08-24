@@ -507,7 +507,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 // so it represents the reusable prefix xAI actually receives.
 func prepareGrokMessagesResponsesBody(c *gin.Context, body []byte, promptCacheKey, upstreamModel string, account *Account) ([]byte, string, error) {
 	intentBody := body
-	patchedBody, err := patchGrokResponsesBody(intentBody, upstreamModel)
+	compatibilityEnabled := isGrokResponsesProtocolCompatibilityEnabled(account)
+	patchedBody, schemaReport, err := patchGrokResponsesBodyWithCompatibility(intentBody, upstreamModel, compatibilityEnabled)
+	if compatibilityEnabled {
+		observeGrokResponsesProtocolCompatibility(c, "messages_http", schemaReport, err)
+	}
 	if err != nil {
 		return nil, "", err
 	}

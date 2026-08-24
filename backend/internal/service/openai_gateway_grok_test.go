@@ -415,7 +415,7 @@ func TestSanitizeGrokResponsesToolsKeepsToolChoiceOnlyWithSupportedTools(t *test
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			patched, err := sanitizeGrokResponsesTools([]byte(tt.body))
+			patched, _, err := sanitizeGrokResponsesTools([]byte(tt.body), true)
 			require.NoError(t, err)
 			require.True(t, json.Valid(patched))
 			require.Equal(t, tt.wantTools, gjson.GetBytes(patched, "tools").Exists())

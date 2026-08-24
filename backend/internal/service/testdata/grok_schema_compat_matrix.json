@@ -1,0 +1,98 @@
+{
+  "model": "grok-4.5",
+  "cases": [
+    {
+      "name": "kiki_like_pure_object_control",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "required": ["target", "message"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "root_anyof_object_string",
+      "schema": {
+        "anyOf": [
+          { "type": "object", "properties": { "query": { "type": "string" } } },
+          { "type": "string" }
+        ]
+      }
+    },
+    {
+      "name": "root_anyof_object_null",
+      "schema": {
+        "anyOf": [
+          { "type": "object", "properties": { "query": { "type": "string" } } },
+          { "type": "null" }
+        ]
+      }
+    },
+    {
+      "name": "local_ref_object_oneof",
+      "schema": {
+        "$defs": {
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+              },
+              {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+              }
+            ]
+          }
+        },
+        "$ref": "#/$defs/payload"
+      }
+    },
+    {
+      "name": "cyclic_local_ref",
+      "schema": {
+        "$defs": { "node": { "$ref": "#/$defs/node" } },
+        "$ref": "#/$defs/node"
+      }
+    },
+    {
+      "name": "missing_local_ref",
+      "schema": {
+        "$defs": {},
+        "$ref": "#/$defs/missing"
+      }
+    },
+    {
+      "name": "external_ref",
+      "schema": {
+        "$ref": "https://schemas.example.invalid/tool.json"
+      }
+    },
+    {
+      "name": "false_schema",
+      "schema": false
+    },
+    {
+      "name": "malformed_combinator",
+      "schema": {
+        "type": "object",
+        "anyOf": { "type": "object" }
+      }
+    },
+    {
+      "name": "malformed_ref_value",
+      "schema": {
+        "$ref": 42
+      }
+    },
+    {
+      "name": "json_string_schema",
+      "schema": "not-a-schema-object"
+    }
+  ]
+}

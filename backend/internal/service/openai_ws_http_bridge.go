@@ -318,14 +318,21 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	var upstreamReq *http.Request
 	if account.Platform == PlatformGrok {
 		upstreamModel := resolveGrokWSUpstreamModel(account, body, originalModel)
-		body, err = patchGrokResponsesBody(body, upstreamModel)
+		compatibilityEnabled := isGrokResponsesProtocolCompatibilityEnabled(account)
+		var schemaReport GrokResponsesCompatibilityReport
+		body, schemaReport, err = patchGrokResponsesBodyWithCompatibility(body, upstreamModel, compatibilityEnabled)
 		if err != nil {
+			if compatibilityEnabled && compatibilityErrorReason(err) != "" {
+				observeGrokResponsesProtocolCompatibility(c, "ws_http_bridge", schemaReport, err)
+				err = writeGrokResponsesCompatibilityWSClientError(writeClientMessage, err)
+			}
 			releaseUpstreamCtx()
 			return nil, err
 		}
-		if isGrokResponsesProtocolCompatibilityEnabled(account) {
-			var compatibilityReport GrokResponsesCompatibilityReport
-			body, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(body)
+		if compatibilityEnabled {
+			var agentReport GrokResponsesCompatibilityReport
+			body, agentReport, err = normalizeGrokResponsesProtocolCompatibility(body)
+			compatibilityReport := mergeGrokResponsesCompatibilityReports(schemaReport, agentReport)
 			observeGrokResponsesProtocolCompatibility(c, "ws_http_bridge", compatibilityReport, err)
 			if err != nil {
 				releaseUpstreamCtx()
@@ -690,14 +697,20 @@ func resolveGrokWSCacheIdentity(c *gin.Context, account *Account, seedPayload, c
 		return "", err
 	}
 	upstreamModel := resolveGrokWSUpstreamModel(account, currentPayload, originalModel)
-	body, _, err = patchGrokResponsesBodyWithClientTools(body, upstreamModel)
+	compatibilityEnabled := isGrokResponsesProtocolCompatibilityEnabled(account)
+	var schemaReport GrokResponsesCompatibilityReport
+	body, _, schemaReport, err = patchGrokResponsesBodyWithClientToolsCompatibility(body, upstreamModel, compatibilityEnabled)
 	if err != nil {
+		if compatibilityEnabled && compatibilityErrorReason(err) != "" {
+			observeGrokResponsesProtocolCompatibility(c, "ws_first_identity", schemaReport, err)
+		}
 		return "", err
 	}
-	if isGrokResponsesProtocolCompatibilityEnabled(account) {
-		var compatibilityReport GrokResponsesCompatibilityReport
-		body, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(body)
+	if compatibilityEnabled {
+		var agentReport GrokResponsesCompatibilityReport
+		body, agentReport, err = normalizeGrokResponsesProtocolCompatibility(body)
 		if err != nil {
+			compatibilityReport := mergeGrokResponsesCompatibilityReports(schemaReport, agentReport)
 			observeGrokResponsesProtocolCompatibility(c, "ws_first_identity", compatibilityReport, err)
 			return "", err
 		}

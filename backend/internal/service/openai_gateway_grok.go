@@ -56,8 +56,12 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	if isGrokImageGenerationModel(upstreamModel) {
 		return nil, fmt.Errorf("model %s is an image model and is not available on the Responses endpoint; use /v1/images/generations instead", upstreamModel)
 	}
-	patchedBody, clientToolMapping, err := patchGrokResponsesBodyWithClientTools(body, upstreamModel)
+	compatibilityEnabled := isGrokResponsesProtocolCompatibilityEnabled(account)
+	patchedBody, clientToolMapping, schemaReport, err := patchGrokResponsesBodyWithClientToolsCompatibility(body, upstreamModel, compatibilityEnabled)
 	if err != nil {
+		if compatibilityEnabled && compatibilityErrorReason(err) != "" {
+			observeGrokResponsesProtocolCompatibility(c, "native_http", schemaReport, err)
+		}
 		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 			"type": "invalid_request_error", "message": err.Error(), "param": "tools",
@@ -74,10 +78,11 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 			return nil, err
 		}
 	}
-	if isGrokResponsesProtocolCompatibilityEnabled(account) {
-		var compatibilityReport GrokResponsesCompatibilityReport
-		patchedBody, compatibilityReport, err = normalizeGrokResponsesProtocolCompatibility(patchedBody)
-		observeGrokResponsesProtocolCompatibility(c, "http", compatibilityReport, err)
+	if compatibilityEnabled {
+		var agentReport GrokResponsesCompatibilityReport
+		patchedBody, agentReport, err = normalizeGrokResponsesProtocolCompatibility(patchedBody)
+		compatibilityReport := mergeGrokResponsesCompatibilityReports(schemaReport, agentReport)
+		observeGrokResponsesProtocolCompatibility(c, "native_http", compatibilityReport, err)
 		if err != nil {
 			param := ""
 			if compatibilityErr, ok := err.(*GrokResponsesCompatibilityError); ok {
@@ -431,51 +436,62 @@ func trimGrokInvalidEncryptedContentRetryBody(body []byte) ([]byte, bool, error)
 }
 
 func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {
-	return patchGrokResponsesBodyBase(body, upstreamModel)
+	patched, _, err := patchGrokResponsesBodyWithCompatibility(body, upstreamModel, true)
+	return patched, err
 }
 
 func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	patched, mapping, _, err := patchGrokResponsesBodyWithClientToolsCompatibility(body, upstreamModel, true)
+	return patched, mapping, err
+}
+
+func patchGrokResponsesBodyWithCompatibility(body []byte, upstreamModel string, compatibilityEnabled bool) ([]byte, GrokResponsesCompatibilityReport, error) {
+	return patchGrokResponsesBodyBase(body, upstreamModel, compatibilityEnabled)
+}
+
+func patchGrokResponsesBodyWithClientToolsCompatibility(body []byte, upstreamModel string, compatibilityEnabled bool) ([]byte, apicompat.ResponsesClientToolMapping, GrokResponsesCompatibilityReport, error) {
 	if !json.Valid(body) {
-		return nil, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("invalid json request body")
+		return nil, apicompat.ResponsesClientToolMapping{}, GrokResponsesCompatibilityReport{}, fmt.Errorf("invalid json request body")
 	}
 	promoted, err := sanitizeGrokResponsesInput(body)
 	if err != nil {
-		return nil, apicompat.ResponsesClientToolMapping{}, err
+		return nil, apicompat.ResponsesClientToolMapping{}, GrokResponsesCompatibilityReport{}, err
 	}
 	adapted, mapping, err := adaptGrokResponsesClientTools(promoted)
 	if err != nil {
-		return nil, apicompat.ResponsesClientToolMapping{}, err
+		return nil, apicompat.ResponsesClientToolMapping{}, GrokResponsesCompatibilityReport{}, err
 	}
-	patched, err := patchGrokResponsesBodyBase(adapted, upstreamModel)
+	patched, report, err := patchGrokResponsesBodyBase(adapted, upstreamModel, compatibilityEnabled)
 	if err != nil {
-		return nil, apicompat.ResponsesClientToolMapping{}, err
+		return nil, apicompat.ResponsesClientToolMapping{}, report, err
 	}
-	return patched, mapping, nil
+	return patched, mapping, report, nil
 }
 
-func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, error) {
+func patchGrokResponsesBodyBase(body []byte, upstreamModel string, compatibilityEnabled bool) ([]byte, GrokResponsesCompatibilityReport, error) {
+	var report GrokResponsesCompatibilityReport
 	if !json.Valid(body) {
-		return nil, fmt.Errorf("invalid json request body")
+		return nil, report, fmt.Errorf("invalid json request body")
 	}
 	// sjson may reuse the input backing array; keep the caller's request bytes
 	// unchanged because the same body can be inspected for billing/retry paths.
 	out, err := sjson.SetBytes(append([]byte(nil), body...), "model", upstreamModel)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = normalizeGrokResponsesReasoningEffort(out, upstreamModel)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = sanitizeGrokResponsesModelCapabilities(out, upstreamModel)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	for _, unsupportedField := range []string{"prompt_cache_retention", "safety_identifier"} {
 		if gjson.GetBytes(out, unsupportedField).Exists() {
 			out, err = sjson.DeleteBytes(out, unsupportedField)
 			if err != nil {
-				return nil, err
+				return nil, report, err
 			}
 		}
 	}
@@ -484,7 +500,7 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 			if gjson.GetBytes(out, unsupportedField).Exists() {
 				out, err = sjson.DeleteBytes(out, unsupportedField)
 				if err != nil {
-					return nil, err
+					return nil, report, err
 				}
 			}
 		}
@@ -494,36 +510,36 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 			if gjson.GetBytes(out, unsupportedField).Exists() {
 				out, err = sjson.DeleteBytes(out, unsupportedField)
 				if err != nil {
-					return nil, err
+					return nil, report, err
 				}
 			}
 		}
 	}
 	out, err = sanitizeGrokResponsesUnsupportedFields(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = convertOpenAICompactInputsForGrok(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = sanitizeGrokResponsesInput(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = stripRedundantGrokViewImageTool(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	out, err = sanitizeGrokReasoningNullContent(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
-	out, err = sanitizeGrokResponsesTools(out)
+	out, report, err = sanitizeGrokResponsesTools(out, compatibilityEnabled)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
-	return out, nil
+	return out, report, nil
 }
 
 // xAI's Grok 4.20 family and newer models do not support OpenAI's logprobs
@@ -906,16 +922,18 @@ var grokResponsesSupportedToolTypes = map[string]struct{}{
 	"x_search":           {},
 }
 
-func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
+func sanitizeGrokResponsesTools(body []byte, compatibilityEnabled bool) ([]byte, GrokResponsesCompatibilityReport, error) {
+	var report GrokResponsesCompatibilityReport
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() {
 		if gjson.GetBytes(body, "tool_choice").Exists() {
-			return sjson.DeleteBytes(body, "tool_choice")
+			patched, err := sjson.DeleteBytes(body, "tool_choice")
+			return patched, report, err
 		}
-		return body, nil
+		return body, report, nil
 	}
 	if !tools.IsArray() {
-		return body, nil
+		return body, report, nil
 	}
 
 	rawTools := tools.Array()
@@ -925,20 +943,37 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		toolType := strings.TrimSpace(tool.Get("type").String())
 		if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
 			raw := json.RawMessage(tool.Raw)
-			if toolType == "function" && (!tool.Get("parameters").Exists() || tool.Get("parameters").Type == gjson.Null) {
+			if !compatibilityEnabled && toolType == "function" && (!tool.Get("parameters").Exists() || tool.Get("parameters").Type == gjson.Null) {
 				var payload map[string]any
 				if err := json.Unmarshal(raw, &payload); err != nil {
-					return nil, err
+					return nil, report, err
 				}
 				payload["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 				encoded, err := json.Marshal(payload)
 				if err != nil {
-					return nil, err
+					return nil, report, err
 				}
 				raw = encoded
 				toolsChanged = true
 			}
 			filteredTools = append(filteredTools, raw)
+		}
+	}
+	if compatibilityEnabled && len(filteredTools) > 0 {
+		encoded, err := json.Marshal(filteredTools)
+		if err != nil {
+			return nil, report, err
+		}
+		normalized, schemaChanged, err := normalizeGrokFunctionToolSchemas(gjson.ParseBytes(encoded), &report)
+		if err != nil {
+			return nil, report, err
+		}
+		if schemaChanged {
+			if err := json.Unmarshal(normalized, &filteredTools); err != nil {
+				report.SchemaErrors++
+				return nil, report, &GrokResponsesCompatibilityError{Code: "invalid_client_tool_schema", Path: "tools", Reason: "encode_failed"}
+			}
+			toolsChanged = true
 		}
 	}
 
@@ -950,26 +985,26 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 			var encoded []byte
 			encoded, err = json.Marshal(filteredTools)
 			if err != nil {
-				return nil, err
+				return nil, report, err
 			}
 			body, err = sjson.SetRawBytes(body, "tools", encoded)
 		}
 		if err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
 
 	toolChoice := gjson.GetBytes(body, "tool_choice")
 	if !toolChoice.Exists() {
-		return body, nil
+		return body, report, nil
 	}
 	if shouldDropGrokToolChoice(toolChoice, filteredTools) {
 		body, err = sjson.DeleteBytes(body, "tool_choice")
 		if err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
-	return body, nil
+	return body, report, nil
 }
 
 func shouldDropGrokToolChoice(toolChoice gjson.Result, tools []json.RawMessage) bool {

@@ -150,9 +150,39 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "unsupported_tool_type",
 		},
 		{
-			name:   "missing tool schema falls back",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
-			reason: "invalid_tool_function_parameters",
+			name: "missing tool schema reaches shared stage",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
+			want: true,
+		},
+		{
+			name: "null tool schema reaches shared stage",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":null}}]}`,
+			want: true,
+		},
+		{
+			name: "primitive tool schema reaches shared stage",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":false}}]}`,
+			want: true,
+		},
+		{
+			name: "malformed schema keywords reach shared stage",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"oneOf":[]}}}]}`,
+			want: true,
+		},
+		{
+			name:   "invalid tool description still falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","description":7,"parameters":false}}]}`,
+			reason: "invalid_tool_function_description",
+		},
+		{
+			name:   "invalid tool strict still falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":false,"strict":"true"}}]}`,
+			reason: "invalid_tool_function_strict",
+		},
+		{
+			name:   "unsafe function envelope still falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":false,"x_unsafe":true}}]}`,
+			reason: "unsafe_tool_function_field_x_unsafe",
 		},
 		{
 			name:   "named tool choice falls back",
@@ -475,8 +505,10 @@ func TestForwardGrokChatViaResponsesTraeCompatibilityFieldsKeepCacheRoute(t *tes
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 	require.Equal(t, 12288, result.Usage.CacheReadInputTokens)
-	require.Equal(t, extendedTurnIdentity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.Equal(t, extendedTurnIdentity, upstream.lastReq.Header.Get(grokConversationIDHeader))
+	providerIdentity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
+	require.NotEmpty(t, providerIdentity)
+	require.NotEqual(t, extendedTurnIdentity, providerIdentity, "raw Chat identity is admission-only; provider identity is derived after conversion/base/schema")
+	require.Equal(t, providerIdentity, upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Equal(t, "Return concise JSON", gjson.GetBytes(upstream.lastBody, "instructions").String())
 	require.Equal(t, "json_object", gjson.GetBytes(upstream.lastBody, "text.format.type").String())
 	require.Equal(t, "priority", gjson.GetBytes(upstream.lastBody, "service_tier").String())

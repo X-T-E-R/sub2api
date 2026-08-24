@@ -47,6 +47,10 @@ var grokChatResponsesBridgeTopLevelFields = map[string]struct{}{
 // Everything else stays on raw Chat Completions rather than being silently
 // dropped or rewritten.
 func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
+	return grokChatResponsesBridgeEligibilityWithCompatibility(body, true)
+}
+
+func grokChatResponsesBridgeEligibilityWithCompatibility(body []byte, compatibilityEnabled bool) (bool, string) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil || root == nil {
 		return false, "invalid_json"
@@ -80,7 +84,7 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 		}
 	}
 	if raw, exists := root["tools"]; exists {
-		if ok, reason := grokChatFunctionDeclarationsBridgeable(raw); !ok {
+		if ok, reason := grokChatFunctionDeclarationsBridgeable(raw, compatibilityEnabled); !ok {
 			return false, reason
 		}
 	}
@@ -249,7 +253,7 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 	return true, ""
 }
 
-func grokChatFunctionDeclarationsBridgeable(raw json.RawMessage) (bool, string) {
+func grokChatFunctionDeclarationsBridgeable(raw json.RawMessage, compatibilityEnabled bool) (bool, string) {
 	if strings.TrimSpace(string(raw)) == "null" {
 		return true, ""
 	}
@@ -297,9 +301,14 @@ func grokChatFunctionDeclarationsBridgeable(raw json.RawMessage) (bool, string) 
 				return false, "invalid_tool_function_description"
 			}
 		}
-		var parameters map[string]json.RawMessage
-		if rawParameters, exists := function["parameters"]; !exists || json.Unmarshal(rawParameters, &parameters) != nil || parameters == nil {
-			return false, "invalid_tool_function_parameters"
+		// With compatibility enabled, parameters is schema-opaque at admission
+		// and the shared Responses sanitizer owns fallback after conversion. The
+		// account rollback switch restores the predecessor object-shape gate.
+		if !compatibilityEnabled {
+			var parameters map[string]json.RawMessage
+			if rawParameters, exists := function["parameters"]; !exists || json.Unmarshal(rawParameters, &parameters) != nil || parameters == nil {
+				return false, "invalid_tool_function_parameters"
+			}
 		}
 		if rawStrict, exists := function["strict"]; exists {
 			var strict bool
@@ -531,13 +540,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	clientStream := chatReq.Stream
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
-	cacheIdentity := resolveGrokCacheIdentity(c, body, promptCacheKey, upstreamModel)
+	preflightIdentity := resolveGrokCacheIdentity(c, body, promptCacheKey, upstreamModel)
 	// Image inputs must go through the Responses bridge: the raw Chat
 	// Completions path cannot forward image_url parts to Grok's native vision
 	// for non-composer models, so they would be silently dropped. Route them to
 	// Responses even when no prompt-cache identity is available.
 	hasImageInput := openAIJSONValueMayContainImageInput(gjson.GetBytes(body, "messages"))
-	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) && (!hasImageInput || !grokChatResponsesBridgeModel(upstreamModel)) {
+	if !grokChatResponsesRuntimeEligible(upstreamModel, preflightIdentity) && (!hasImageInput || !grokChatResponsesBridgeModel(upstreamModel)) {
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
@@ -547,6 +556,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 	responsesReq.Model = upstreamModel
 	responsesReq.Stream = true
+	// ChatCompletionsRequest does not own this Grok bridge extension. Preserve
+	// the explicit client key in the converted Responses intent so the final
+	// post-schema resolver can retain native prompt_cache_key priority without
+	// reusing the raw Chat preflight identity.
+	if nativeCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); nativeCacheKey != "" {
+		responsesReq.PromptCacheKey = nativeCacheKey
+	}
 	// Keep Chat and native Responses paths aligned for OpenAI-compatible
 	// service_tier aliases (for example, "fast" -> "priority"). Unknown
 	// values are omitted by the shared normalizer instead of reaching xAI.
@@ -567,10 +583,15 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("normalize grok responses bridge cache intent: %w", err)
 	}
-	responsesBody, err = patchGrokResponsesBody(responsesBody, upstreamModel)
+	compatibilityEnabled := isGrokResponsesProtocolCompatibilityEnabled(account)
+	responsesBody, schemaReport, err := patchGrokResponsesBodyWithCompatibility(responsesBody, upstreamModel, compatibilityEnabled)
+	if compatibilityEnabled {
+		observeGrokResponsesProtocolCompatibility(c, "chat_responses_bridge", schemaReport, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("patch grok responses bridge request: %w", err)
 	}
+	cacheIdentity := resolveGrokCacheIdentity(c, responsesBody, promptCacheKey, upstreamModel)
 	responsesBody, err = applyGrokResponsesCacheIdentity(responsesBody, intentBody, cacheIdentity, true)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
