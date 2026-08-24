@@ -520,7 +520,7 @@ func patchGrokResponsesBodyWithClientToolsCompat(body []byte, upstreamModel stri
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}
-	adapted, mapping, err := adaptGrokResponsesClientTools(promoted)
+	adapted, mapping, err := adaptGrokResponsesClientToolsWithCompat(promoted, protocolCompat)
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}

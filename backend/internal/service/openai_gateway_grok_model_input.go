@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -56,10 +57,14 @@ func sanitizeGrokResponsesModelInputWithCompat(body []byte, protocolCompat bool)
 		role := strings.ToLower(strings.TrimSpace(grokStringValue(item["role"])))
 		if role == "tool" || role == "function" || isGrokReplayOutputType(itemType) {
 			output := firstNonNilGrokJSONValue(item["output"], item["content"], item["results"])
+			normalizedOutput := any(grokModelInputString(output, "(empty)"))
+			if protocolCompat && isGrokToolOutputContentArray(output) {
+				normalizedOutput = output
+			}
 			filtered = append(filtered, map[string]any{
 				"type":    "function_call_output",
 				"call_id": outputIDs[index],
-				"output":  grokModelInputString(output, "(empty)"),
+				"output":  normalizedOutput,
 			})
 			continue
 		}
@@ -163,6 +168,93 @@ func sanitizeGrokResponsesModelInputWithCompat(body []byte, protocolCompat bool)
 		return nil, fmt.Errorf("set Grok Responses model input: %w", err)
 	}
 	return updated, nil
+}
+
+func isGrokToolOutputContentArray(output any) bool {
+	parts, ok := output.([]any)
+	if !ok || len(parts) == 0 {
+		return false
+	}
+	for _, rawPart := range parts {
+		part, ok := rawPart.(map[string]any)
+		if !ok {
+			return false
+		}
+		partType, ok := part["type"].(string)
+		if !ok {
+			return false
+		}
+		switch partType {
+		case "input_text":
+			if _, ok := part["text"].(string); !ok {
+				return false
+			}
+		case "input_image":
+			if !isGrokToolOutputInputImagePart(part) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isGrokToolOutputInputImagePart(part map[string]any) bool {
+	if _, exists := part["file_data"]; exists {
+		return false
+	}
+	if _, exists := part["file_url"]; exists {
+		return false
+	}
+	imageURL, hasImageURL := part["image_url"]
+	fileID, hasFileID := part["file_id"]
+	if hasImageURL == hasFileID {
+		return false
+	}
+	if hasImageURL {
+		value, ok := imageURL.(string)
+		if !ok || !isGrokToolOutputImageURL(value) {
+			return false
+		}
+	}
+	if hasFileID {
+		value, ok := fileID.(string)
+		if !ok || value == "" || value != strings.TrimSpace(value) {
+			return false
+		}
+	}
+	if rawDetail, exists := part["detail"]; exists {
+		detail, ok := rawDetail.(string)
+		if !ok {
+			return false
+		}
+		switch detail {
+		case "auto", "low", "high":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isGrokToolOutputImageURL(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || isEmptyBase64DataURI(value) {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return parsed.Host != ""
+	case "data":
+		const imageDataPrefix = "data:image/"
+		return len(value) >= len(imageDataPrefix) && strings.EqualFold(value[:len(imageDataPrefix)], imageDataPrefix) && strings.Contains(value, ",")
+	default:
+		return false
+	}
 }
 
 const grokAgentMessageMetadataLabel = "[sub2api client-declared inter-agent metadata]"

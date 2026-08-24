@@ -51,7 +51,58 @@ func adaptResponsesClientToolsForFunctionUpstreamWithMapping(
 }
 
 func adaptGrokResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesClientToolMapping, error) {
-	return adaptResponsesClientToolsForFunctionUpstream(body, "Grok")
+	return adaptGrokResponsesClientToolsWithCompat(body, true)
+}
+
+func adaptGrokResponsesClientToolsWithCompat(body []byte, protocolCompat bool) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return adaptGrokResponsesClientToolsWithMapping(body, apicompat.ResponsesClientToolMapping{}, protocolCompat)
+}
+
+func adaptGrokResponsesClientToolsWithMapping(
+	body []byte,
+	inherited apicompat.ResponsesClientToolMapping,
+	protocolCompat bool,
+	inheritedLoweredTools ...[]any,
+) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var requestBody map[string]any
+	if err := decoder.Decode(&requestBody); err != nil {
+		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("decode Grok Responses client tools: %w", err)
+	}
+
+	type protectedOutput struct {
+		item   map[string]any
+		output any
+	}
+	protected := make([]protectedOutput, 0)
+	if protocolCompat {
+		if input, ok := requestBody["input"].([]any); ok {
+			for _, rawItem := range input {
+				item, ok := rawItem.(map[string]any)
+				if !ok || item["type"] != "custom_tool_call_output" || !isGrokToolOutputContentArray(item["output"]) {
+					continue
+				}
+				protected = append(protected, protectedOutput{item: item, output: item["output"]})
+			}
+		}
+	}
+
+	mapping, changed, err := apicompat.AdaptResponsesClientToolsWithInheritedMapping(requestBody, inherited, inheritedLoweredTools...)
+	if err != nil {
+		return body, apicompat.ResponsesClientToolMapping{}, err
+	}
+	for _, saved := range protected {
+		saved.item["output"] = saved.output
+	}
+	if !changed {
+		return body, mapping, nil
+	}
+	rebuilt, err := marshalOpenAIUpstreamJSON(requestBody)
+	if err != nil {
+		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("encode Grok Responses client tools: %w", err)
+	}
+	return rebuilt, mapping, nil
 }
 
 func hasResponsesClientToolMapping(mapping apicompat.ResponsesClientToolMapping) bool {

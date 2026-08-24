@@ -1,0 +1,90 @@
+{
+  "model": "gpt-5.5",
+  "instructions": "You are Codex.",
+  "input": [
+    {
+      "type": "message",
+      "id": "msg_view_image_user",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "please add the screenshot"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "turn_view_image_repro",
+        "create_time": 1787558400
+      }
+    },
+    {
+      "type": "function_call",
+      "id": "fc_view_image_call",
+      "name": "view_image",
+      "arguments": "{\"path\":\"tiny.png\"}",
+      "call_id": "view-image-call"
+    },
+    {
+      "type": "function_call_output",
+      "id": "fco_view_image_call",
+      "call_id": "view-image-call",
+      "output": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg==",
+          "detail": "high"
+        }
+      ],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "turn_view_image_repro",
+        "create_time": 1787558401
+      }
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "view_image",
+      "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Local filesystem path to an image file."
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "high",
+              "original"
+            ],
+            "description": "Image detail level. Defaults to `high`; use `original` to preserve exact resolution."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {
+    "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "codex-view-image-repro",
+  "text": {
+    "verbosity": "low"
+  },
+  "client_metadata": {
+    "x-codex-turn-metadata": "{\"turn_id\":\"codex-view-image-repro\"}"
+  }
+}

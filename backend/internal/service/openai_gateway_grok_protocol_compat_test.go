@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,197 @@ func TestGrokAgentMessageProjectionPreservesBlankAndOpaqueSourceStrings(t *testi
 	require.Equal(t, "kept", standardParts[0].Get("text").String())
 }
 
+const codexViewImageFixtureDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg=="
+
+func TestGrokViewImageToolOutputContentReachesBuiltBody(t *testing.T) {
+	body, err := os.ReadFile("testdata/grok_codex_view_image_second_request.json")
+	require.NoError(t, err)
+	c := newGrokCacheTestContext(9901)
+	hint := captureGrokCacheSeedHint(c, body, "")
+
+	patched, _, err := patchGrokResponsesBodyWithClientToolsCompat(body, "grok-4.6", true)
+	require.NoError(t, err)
+	require.Equal(t, "view_image", gjson.GetBytes(patched, "tools.0.name").String())
+	require.Equal(t, "auto", gjson.GetBytes(patched, "tool_choice").String())
+	require.True(t, gjson.GetBytes(patched, "parallel_tool_calls").Bool())
+	items := gjson.GetBytes(patched, "input").Array()
+	require.Len(t, items, 3)
+	require.Equal(t, "function_call", items[1].Get("type").String())
+	require.Equal(t, "view-image-call", items[1].Get("call_id").String())
+	require.Equal(t, "function_call_output", items[2].Get("type").String())
+	require.Equal(t, "view-image-call", items[2].Get("call_id").String())
+	require.True(t, items[2].Get("output").IsArray())
+	require.Equal(t, "input_image", items[2].Get("output.0.type").String())
+	require.Equal(t, codexViewImageFixtureDataURL, items[2].Get("output.0.image_url").String())
+	require.Equal(t, "high", items[2].Get("output.0.detail").String())
+
+	identity := resolveGrokCacheIdentityFromFinal(c, patched, hint, "grok-4.6")
+	require.NotEmpty(t, identity)
+	finalBody, err := injectGrokCacheIdentity(patched, identity)
+	require.NoError(t, err)
+	require.Equal(t, identity, gjson.GetBytes(finalBody, "prompt_cache_key").String())
+	require.NotEqual(t, "codex-view-image-repro", identity)
+
+	account := healthyGrokOAuthGatewayTestAccount(9901, "access-token")
+	req, err := buildGrokResponsesRequest(context.Background(), nil, account, finalBody, "access-token", "", nil)
+	require.NoError(t, err)
+	builtBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.JSONEq(t, string(finalBody), string(builtBody))
+	require.Equal(t, codexViewImageFixtureDataURL, gjson.GetBytes(builtBody, "input.2.output.0.image_url").String())
+	require.Equal(t, 1, strings.Count(string(builtBody), codexViewImageFixtureDataURL))
+}
+
+func TestGrokToolOutputContentMixedAndEdgeCases(t *testing.T) {
+	tests := []struct {
+		name               string
+		output             string
+		compat             bool
+		wantArray          bool
+		wantOutputContains []string
+	}{
+		{
+			name:   "mixed text and multiple images",
+			output: `[{"type":"input_text","text":"before"},{"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"high"},{"type":"input_text","text":"after"},{"type":"input_image","image_url":"data:image/jpeg;base64,BB==","detail":"low"}]`,
+			compat: true, wantArray: true,
+		},
+		{name: "text content array", output: `[{"type":"input_text","text":"only text"}]`, compat: true, wantArray: true},
+		{name: "file id image content array", output: `[{"type":"input_image","file_id":"file_image_123","detail":"auto"}]`, compat: true, wantArray: true},
+		{name: "https image content array", output: `[{"type":"input_image","image_url":"https://example.test/image.png","detail":"low"}]`, compat: true, wantArray: true},
+		{name: "empty array", output: `[]`, compat: true, wantOutputContains: []string{"[]"}},
+		{name: "malformed image stays decoder compatible", output: `[{"type":"input_image","image_url":"data:image/png;base64,"}]`, compat: true, wantOutputContains: []string{"input_image"}},
+		{name: "whitespace discriminator stringifies", output: `[{"type":" INPUT_IMAGE ","image_url":"data:image/png;base64,AA=="}]`, compat: true, wantOutputContains: []string{" INPUT_IMAGE "}},
+		{name: "case changed discriminator stringifies", output: `[{"type":"Input_Image","image_url":"data:image/png;base64,AA=="}]`, compat: true, wantOutputContains: []string{"Input_Image"}},
+		{name: "nested image url stringifies", output: `[{"type":"input_image","image_url":{"url":"data:image/png;base64,AA=="}}]`, compat: true, wantOutputContains: []string{"input_image"}},
+		{name: "invalid image url stringifies", output: `[{"type":"input_image","image_url":"not-a-url"}]`, compat: true, wantOutputContains: []string{"not-a-url"}},
+		{name: "file data stringifies", output: `[{"type":"input_image","file_data":"data:image/png;base64,AA=="}]`, compat: true, wantOutputContains: []string{"file_data"}},
+		{name: "file url stringifies", output: `[{"type":"input_image","file_url":"https://example.test/image.png"}]`, compat: true, wantOutputContains: []string{"file_url"}},
+		{name: "invalid detail stringifies", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"original"}]`, compat: true, wantOutputContains: []string{"original"}},
+		{name: "multiple image sources stringify", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA==","file_id":"file_image_123"}]`, compat: true, wantOutputContains: []string{"file_image_123"}},
+		{name: "failure object stays decoder compatible", output: `{"error":"read failed"}`, compat: true, wantOutputContains: []string{"read failed"}},
+		{name: "compat off restores stringified image", output: `[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]`, compat: false, wantOutputContains: []string{"base64,AA=="}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"input":[{"type":"function_call","name":"image_reader","call_id":"call-image","arguments":"{}"},{"type":"function_call_output","call_id":"call-image","output":` + tt.output + `}]}`)
+			patched, err := sanitizeGrokResponsesModelInputWithCompat(body, tt.compat)
+			require.NoError(t, err)
+			items := gjson.GetBytes(patched, "input").Array()
+			require.Equal(t, "call-image", items[1].Get("call_id").String())
+			for _, want := range tt.wantOutputContains {
+				require.Contains(t, items[1].Get("output").String(), want)
+			}
+			require.Len(t, items, 2)
+			if !tt.wantArray {
+				require.Equal(t, gjson.String, items[1].Get("output").Type)
+				return
+			}
+			require.True(t, items[1].Get("output").IsArray())
+			projected := items[1].Get("output").Array()
+			if tt.name == "mixed text and multiple images" {
+				require.Len(t, projected, 4)
+				require.Equal(t, "input_text", projected[0].Get("type").String())
+				require.Equal(t, "before", projected[0].Get("text").String())
+				require.Equal(t, "input_image", projected[1].Get("type").String())
+				require.Equal(t, "input_text", projected[2].Get("type").String())
+				require.Equal(t, "after", projected[2].Get("text").String())
+				require.Equal(t, "input_image", projected[3].Get("type").String())
+			}
+		})
+	}
+}
+
+func TestGrokViewImageToolOutputPreservesExplicitAndRequiredChoice(t *testing.T) {
+	for _, choice := range []string{
+		`{"type":"function","name":"view_image"}`,
+		`"required"`,
+	} {
+		body := []byte(`{"input":[{"type":"function_call","name":"view_image","call_id":"call-image","arguments":"{}"},{"type":"function_call_output","call_id":"call-image","output":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}],"tools":[{"type":"function","name":"view_image","parameters":{"type":"object"}}],"tool_choice":` + choice + `}`)
+		patched, _, err := patchGrokResponsesBodyWithClientToolsCompat(body, "grok-4.6", true)
+		require.NoError(t, err)
+		require.Equal(t, "view_image", gjson.GetBytes(patched, "tools.0.name").String())
+		require.True(t, gjson.GetBytes(patched, "tool_choice").Exists())
+		require.Equal(t, "input_image", gjson.GetBytes(patched, "input.1.output.0.type").String())
+	}
+}
+
+func TestGrokCustomToolOutputPreservesRecognizedContentArray(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"render","format":{"type":"text"}}],"input":[{"type":"custom_tool_call","name":"render","call_id":"custom-image","input":"{}"},{"type":"custom_tool_call_output","call_id":"custom-image","output":[{"type":"input_text","text":"rendered"},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`)
+	patched, mapping, err := patchGrokResponsesBodyWithClientToolsCompat(body, "grok-4.6", true)
+	require.NoError(t, err)
+	require.True(t, mapping.CustomTools["render"])
+	require.Equal(t, "function_call_output", gjson.GetBytes(patched, "input.1.type").String())
+	require.Equal(t, "custom-image", gjson.GetBytes(patched, "input.1.call_id").String())
+	require.True(t, gjson.GetBytes(patched, "input.1.output").IsArray())
+	require.Equal(t, "input_text", gjson.GetBytes(patched, "input.1.output.0.type").String())
+	require.Equal(t, "input_image", gjson.GetBytes(patched, "input.1.output.1.type").String())
+
+	off, _, err := patchGrokResponsesBodyWithClientToolsCompat(body, "grok-4.6", false)
+	require.NoError(t, err)
+	require.Equal(t, gjson.String, gjson.GetBytes(off, "input.1.output").Type)
+
+	nonContent := []byte(`{"tools":[{"type":"custom","name":"render","format":{"type":"text"}}],"input":[{"type":"custom_tool_call","name":"render","call_id":"custom-json","input":"{}"},{"type":"custom_tool_call_output","call_id":"custom-json","output":{"ok":true}}]}`)
+	nonContentPatched, _, err := patchGrokResponsesBodyWithClientToolsCompat(nonContent, "grok-4.6", true)
+	require.NoError(t, err)
+	require.Equal(t, gjson.String, gjson.GetBytes(nonContentPatched, "input.1.output").Type)
+}
+
+func TestPrepareGrokWSInheritedCustomToolPreservesRecognizedContentArray(t *testing.T) {
+	account := healthyGrokOAuthGatewayTestAccount(9906, "access-token")
+	seed, err := prepareGrokWSResponsesBody(
+		[]byte(`{"type":"response.create","model":"grok-4.6","input":"start","tools":[{"type":"custom","name":"render","format":{"type":"text"}}]}`),
+		account, "grok-4.6", apicompat.ResponsesClientToolMapping{}, nil, true,
+	)
+	require.NoError(t, err)
+	require.True(t, seed.Mapping.CustomTools["render"])
+
+	payload := []byte(`{"type":"response.create","model":"grok-4.6","input":[{"type":"custom_tool_call","name":"render","call_id":"inherited-image","input":"{}"},{"type":"custom_tool_call_output","call_id":"inherited-image","output":[{"type":"input_text","text":"frame"},{"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"high"}]}]}`)
+	inheritedTools := decodeOpenAIWSHTTPBridgeLoweredTools(seed.LoweredTools)
+	prepared, err := prepareGrokWSResponsesBody(payload, account, "grok-4.6", seed.Mapping, inheritedTools, true)
+	require.NoError(t, err)
+	require.Equal(t, "function_call_output", gjson.GetBytes(prepared.Body, "input.1.type").String())
+	require.Equal(t, "inherited-image", gjson.GetBytes(prepared.Body, "input.1.call_id").String())
+	require.True(t, gjson.GetBytes(prepared.Body, "input.1.output").IsArray())
+	require.Equal(t, "input_text", gjson.GetBytes(prepared.Body, "input.1.output.0.type").String())
+	require.Equal(t, "input_image", gjson.GetBytes(prepared.Body, "input.1.output.1.type").String())
+
+	off, err := prepareGrokWSResponsesBody(payload, account, "grok-4.6", seed.Mapping, inheritedTools, false)
+	require.NoError(t, err)
+	require.Equal(t, gjson.String, gjson.GetBytes(off.Body, "input.1.output").Type)
+}
+
+func TestPrepareGrokWSPreservesToolOutputContentArrayAndCompatOffRestoresString(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"grok-4.6","input":[{"type":"function_call","name":"render","call_id":"ws-image","arguments":"{}"},{"type":"function_call_output","call_id":"ws-image","output":[{"type":"input_text","text":"frame"},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`)
+	account := healthyGrokOAuthGatewayTestAccount(9902, "access-token")
+
+	prepared, err := prepareGrokWSResponsesBody(payload, account, "grok-4.6", apicompat.ResponsesClientToolMapping{}, nil, true)
+	require.NoError(t, err)
+	require.True(t, gjson.GetBytes(prepared.Body, "input.1.output").IsArray())
+	require.Equal(t, "ws-image", gjson.GetBytes(prepared.Body, "input.1.call_id").String())
+	require.Equal(t, "input_image", gjson.GetBytes(prepared.Body, "input.1.output.1.type").String())
+
+	off, err := prepareGrokWSResponsesBody(payload, account, "grok-4.6", apicompat.ResponsesClientToolMapping{}, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, gjson.String, gjson.GetBytes(off.Body, "input.1.output").Type)
+	require.Contains(t, gjson.GetBytes(off.Body, "input.1.output").String(), "base64,AA==")
+}
+
+func TestGrokToolOutputContentArraySurvivesFinalCacheIdentityInjection(t *testing.T) {
+	raw := []byte(`{"model":"grok-4.6","input":[{"type":"message","role":"user","content":"anchor"},{"type":"function_call","name":"render","call_id":"cache-image","arguments":"{}"},{"type":"function_call_output","call_id":"cache-image","output":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`)
+	c := newGrokCacheTestContext(9903)
+	hint := captureGrokCacheSeedHint(c, raw, "")
+	on, err := patchGrokResponsesBodyBaseWithCompat(raw, "grok-4.6", true)
+	require.NoError(t, err)
+	require.True(t, gjson.GetBytes(on, "input.2.output").IsArray())
+	identity := resolveGrokCacheIdentityFromFinal(c, on, hint, "grok-4.6")
+	require.NotEmpty(t, identity)
+	withIdentity, err := injectGrokCacheIdentity(on, identity)
+	require.NoError(t, err)
+	require.Equal(t, identity, gjson.GetBytes(withIdentity, "prompt_cache_key").String())
+	require.True(t, gjson.GetBytes(withIdentity, "input.2.output").IsArray())
+	require.Equal(t, "data:image/png;base64,AA==", gjson.GetBytes(withIdentity, "input.2.output.0.image_url").String())
+}
+
 func TestNormalizeGrokFunctionParametersFiniteMatrix(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -88,27 +280,33 @@ func TestNormalizeGrokFunctionParametersFiniteMatrix(t *testing.T) {
 		want        string
 	}{
 		{name: "direct object", schema: `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`},
-		{name: "object and null type", schema: `{"type":["object","null"],"properties":{}}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{}}`},
+		{name: "empty schema does not prove object", schema: `{}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "properties only does not prove object", schema: `{"properties":{"q":{"type":"string"}}}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "required only does not prove object", schema: `{"required":["q"]}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "definitions only do not prove object", schema: `{"$defs":{"q":{"type":"string"}}}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "object and null type falls back", schema: `{"type":["object","null"],"properties":{}}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "local ref with sibling", schema: `{"$ref":"#/$defs/base","required":["q"],"$defs":{"base":{"type":"object","properties":{"q":{"type":"string"}}}}}`, disposition: grokSchemaProvenObject, want: `{"type":"object","required":["q"],"properties":{"q":{"type":"string"}},"$defs":{"base":{"type":"object","properties":{"q":{"type":"string"}}}}}`},
 		{name: "escaped local ref", schema: `{"$ref":"#/$defs/a~1b","$defs":{"a/b":{"type":"object","properties":{}}}}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{},"$defs":{"a/b":{"type":"object","properties":{}}}}`},
-		{name: "object and null any of", schema: `{"anyOf":[{"type":"object","properties":{}},{"type":"null"}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","anyOf":[{"type":"object","properties":{}}]}`},
-		{name: "all of object intersection", schema: `{"allOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"object","required":["a"]}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`},
+		{name: "object and null any of falls back", schema: `{"anyOf":[{"type":"object","properties":{}},{"type":"null"}]}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "all of object intersection", schema: `{"allOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"object","required":["a"]}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","allOf":[{"type":"object","properties":{"a":{"type":"string"}}},{"type":"object","required":["a"]}]}`},
 		{name: "object const witness", schema: `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"],"const":{"q":"yes"}}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"],"const":{"q":"yes"}}`},
 		{name: "const compatible with any of", schema: `{"type":"object","const":{"x":1},"anyOf":[{"type":"object","const":{"x":1}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","const":{"x":1},"anyOf":[{"type":"object","const":{"x":1}}]}`},
 		{name: "const conflicts with any of", schema: `{"type":"object","const":{"x":2},"anyOf":[{"type":"object","const":{"x":1}}]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
 		{name: "enum filtered by any of", schema: `{"type":"object","enum":[{"x":1},{"x":2}],"anyOf":[{"type":"object","const":{"x":1}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","enum":[{"x":1}],"anyOf":[{"type":"object","const":{"x":1}}]}`},
-		{name: "mixed enum keeps object", schema: `{"type":"object","enum":[1,{"ok":true},"x"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","enum":[{"ok":true}]}`},
+		{name: "explicit object type filters mixed enum", schema: `{"type":"object","enum":[1,{"ok":true},"x"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","enum":[{"ok":true}]}`},
+		{name: "implicit mixed enum does not prove object", schema: `{"enum":[1,{"ok":true}]}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "enum has no object", schema: `{"enum":[1,"x",null]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
-		{name: "one of finite exclusive witnesses", schema: `{"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`},
-		{name: "const compatible with one of", schema: `{"const":{"kind":"a"},"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","const":{"kind":"a"},"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`},
+		{name: "one of finite exclusive witnesses", schema: `{"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","oneOf":[{"type":"object","const":{"kind":"a"}},{"type":"object","const":{"kind":"b"}}]}`},
+		{name: "const compatible with one of", schema: `{"const":{"kind":"a"},"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","const":{"kind":"a"},"oneOf":[{"type":"object","const":{"kind":"a"}},{"type":"object","const":{"kind":"b"}}]}`},
 		{name: "const conflicts with one of", schema: `{"const":{"kind":"c"},"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
 		{name: "one of finite witness conflicts with required sibling", schema: `{"properties":{"q":{"type":"string"}},"required":["q"],"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
-		{name: "enum filtered by one of", schema: `{"enum":[{"kind":"a"},{"kind":"c"}],"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","enum":[{"kind":"a"}],"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`},
+		{name: "enum filtered by one of", schema: `{"enum":[{"kind":"a"},{"kind":"c"}],"oneOf":[{"const":{"kind":"a"}},{"const":{"kind":"b"}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","enum":[{"kind":"a"}],"oneOf":[{"type":"object","const":{"kind":"a"}},{"type":"object","const":{"kind":"b"}}]}`},
 		{name: "non object const", schema: `{"type":"object","const":"no"}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
 		{name: "false schema", schema: `false`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
+		{name: "true schema permits non objects", schema: `true`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "primitive root", schema: `"string"`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
 		{name: "mixed object primitive union", schema: `{"anyOf":[{"type":"object"},{"type":"string"}]}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
-		{name: "object only one of without witness", schema: `{"oneOf":[{"type":"object"},{"type":"object","required":["q"],"properties":{"q":{"type":"string"}}}]}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
+		{name: "object only one of without witness", schema: `{"oneOf":[{"type":"object"},{"type":"object","required":["q"],"properties":{"q":{"type":"string"}}}]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","oneOf":[{"type":"object"},{"type":"object","required":["q"],"properties":{"q":{"type":"string"}}}]}`},
 		{name: "external ref", schema: `{"$ref":"https://example.test/schema"}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "missing ref", schema: `{"$ref":"#/$defs/missing","$defs":{}}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "ref sibling type contradiction", schema: `{"$ref":"#/$defs/base","type":"string","$defs":{"base":{"type":"object"}}}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
@@ -124,6 +322,11 @@ func TestNormalizeGrokFunctionParametersFiniteMatrix(t *testing.T) {
 		{name: "empty enum", schema: `{"type":"object","enum":[]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
 		{name: "malformed bound", schema: `{"type":"object","minProperties":null}`, disposition: grokSchemaUnknown, want: grokSchemaFallbackJSON},
 		{name: "impossible required property", schema: `{"type":"object","properties":{},"required":["q"],"additionalProperties":false}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
+		{name: "required property type const contradiction", schema: `{"type":"object","properties":{"q":{"type":"string","const":1}},"required":["q"]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
+		{name: "required property type const compatible", schema: `{"type":"object","properties":{"q":{"type":"string","const":"one"}},"required":["q"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"q":{"type":"string","const":"one"}},"required":["q"]}`},
+		{name: "required property type enum contradiction", schema: `{"type":"object","properties":{"q":{"type":"string","enum":[1,2]}},"required":["q"]}`, disposition: grokSchemaContradictory, want: grokSchemaFallbackJSON},
+		{name: "required property type enum compatible member", schema: `{"type":"object","properties":{"q":{"type":"string","enum":[1,"two"]}},"required":["q"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"q":{"type":"string","enum":[1,"two"]}},"required":["q"]}`},
+		{name: "required complex array union remains preserved", schema: `{"type":"object","properties":{"q":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}]},"minItems":1}},"required":["q"]}`, disposition: grokSchemaProvenObject, want: `{"type":"object","properties":{"q":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}]},"minItems":1}},"required":["q"]}`},
 		{name: "annotations and extension", schema: `{"title":"kept","x-owner":"client","type":"object","properties":{}}`, disposition: grokSchemaProvenObject, want: `{"title":"kept","x-owner":"client","type":"object","properties":{}}`},
 	}
 	for _, tt := range tests {

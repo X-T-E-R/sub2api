@@ -156,10 +156,10 @@ func prepareGrokWSResponsesBody(
 	if err != nil {
 		return grokWSPreparedBody{}, fmt.Errorf("sanitize Grok WS HTTP bridge input: %w", err)
 	}
-	body, mapping, err := adaptResponsesClientToolsForFunctionUpstreamWithMapping(
+	body, mapping, err := adaptGrokResponsesClientToolsWithMapping(
 		body,
-		openAIWSHTTPBridgeToolUpstreamName(account),
 		inheritedMapping,
+		protocolCompat,
 		inheritedTools,
 	)
 	if err != nil {

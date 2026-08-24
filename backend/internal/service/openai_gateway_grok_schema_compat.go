@@ -44,7 +44,7 @@ var grokSchemaRootKeywords = map[string]struct{}{
 
 var grokSchemaAnnotationKeywords = map[string]struct{}{
 	"title": {}, "description": {}, "default": {}, "examples": {}, "deprecated": {},
-	"readOnly": {}, "writeOnly": {}, "format": {}, "$comment": {},
+	"readOnly": {}, "writeOnly": {}, "format": {}, "$comment": {}, "$schema": {},
 }
 
 func normalizeGrokFunctionParameters(raw json.RawMessage) (json.RawMessage, grokSchemaDisposition) {
@@ -76,7 +76,7 @@ func normalizeGrokFunctionParametersWithBudget(raw json.RawMessage, budget *grok
 
 	if truth, ok := value.(bool); ok {
 		if truth {
-			return grokSchemaFallbackRaw(), grokSchemaProvenObject
+			return grokSchemaFallbackRaw(), grokSchemaUnknown
 		}
 		return grokSchemaFallbackRaw(), grokSchemaContradictory
 	}
@@ -161,6 +161,13 @@ func normalizeGrokSchemaMap(
 	}
 
 	working := cloneGrokSchemaMap(schema)
+	rootObjectProven := false
+	if dialect, exists := working["$schema"]; exists {
+		if _, ok := dialect.(string); !ok {
+			return nil, grokSchemaUnknown
+		}
+		delete(working, "$schema")
+	}
 	if rawRef, exists := working["$ref"]; exists {
 		ref, ok := rawRef.(string)
 		if !ok || !strings.HasPrefix(ref, "#/") || budget.refVisits >= budget.MaxRefVisits {
@@ -210,26 +217,15 @@ func normalizeGrokSchemaMap(
 		if !ok || len(branches) == 0 {
 			return nil, grokSchemaUnknown
 		}
-		delete(working, "allOf")
+		objectBranches := make([]any, 0, len(branches))
 		for _, branch := range branches {
-			branchMap, ok := branch.(map[string]any)
-			if !ok {
+			if grokSchemaBranchObjectDisposition(branch, rootDocument, budget, depth+1, refStack) != grokSchemaProvenObject {
 				return nil, grokSchemaUnknown
 			}
-			normalizedBranch, disposition := normalizeGrokSchemaMap(branchMap, rootDocument, budget, depth+1, refStack)
-			if disposition != grokSchemaProvenObject {
-				return nil, disposition
-			}
-			previous := working
-			mergedWorking, merged := intersectGrokSchemaMaps(previous, normalizedBranch)
-			if !merged {
-				if grokSchemaMapsProveContradiction(previous, normalizedBranch) {
-					return nil, grokSchemaContradictory
-				}
-				return nil, grokSchemaUnknown
-			}
-			working = mergedWorking
+			objectBranches = append(objectBranches, normalizeGrokObjectUnionBranch(branch))
 		}
+		working["allOf"] = objectBranches
+		rootObjectProven = true
 	}
 
 	if rawAnyOf, exists := working["anyOf"]; exists {
@@ -239,23 +235,16 @@ func normalizeGrokSchemaMap(
 		}
 		objectBranches := make([]any, 0, len(branches))
 		for _, branch := range branches {
-			if isGrokNullOnlySchema(branch) {
-				continue
-			}
-			branchMap, ok := branch.(map[string]any)
-			if !ok {
+			if grokSchemaBranchObjectDisposition(branch, rootDocument, budget, depth+1, refStack) != grokSchemaProvenObject {
 				return nil, grokSchemaUnknown
 			}
-			normalizedBranch, disposition := normalizeGrokSchemaMap(branchMap, rootDocument, budget, depth+1, refStack)
-			if disposition != grokSchemaProvenObject {
-				return nil, grokSchemaUnknown
-			}
-			objectBranches = append(objectBranches, normalizedBranch)
+			objectBranches = append(objectBranches, normalizeGrokObjectUnionBranch(branch))
 		}
 		if len(objectBranches) == 0 {
 			return nil, grokSchemaContradictory
 		}
 		working["anyOf"] = objectBranches
+		rootObjectProven = true
 	}
 
 	if rawOneOf, exists := working["oneOf"]; exists {
@@ -263,64 +252,117 @@ func normalizeGrokSchemaMap(
 		if !ok || len(branches) == 0 {
 			return nil, grokSchemaUnknown
 		}
-		rootWitnesses := grokFiniteObjectWitnesses(working)
-		_, rootConstFinite := working["const"]
-		_, rootEnumFinite := working["enum"]
-		rootFinite := rootConstFinite || rootEnumFinite
-		branchesFinite := true
-		witnesses := rootWitnesses
+		allObject := true
+		_, hasRootConst := working["const"]
+		_, hasRootEnum := working["enum"]
+		finiteWitnessGrammar := hasRootConst || hasRootEnum
 		for _, branch := range branches {
-			branchMap, ok := branch.(map[string]any)
-			if !ok {
-				return nil, grokSchemaUnknown
+			if grokSchemaBranchObjectDisposition(branch, rootDocument, budget, depth+1, refStack) != grokSchemaProvenObject {
+				allObject = false
 			}
-			branchWitnesses := grokFiniteObjectWitnesses(branchMap)
-			branchesFinite = branchesFinite && len(branchWitnesses) > 0
-			if !rootFinite {
-				witnesses = append(witnesses, branchWitnesses...)
+			if branchMap, ok := branch.(map[string]any); ok && len(grokFiniteObjectWitnesses(branchMap)) > 0 {
+				finiteWitnessGrammar = true
 			}
 		}
-		provenExclusive := false
-		unknownWitness := false
-		siblings := cloneGrokSchemaMap(working)
-		delete(siblings, "oneOf")
-		for _, witness := range uniqueGrokObjectWitnesses(witnesses) {
-			siblingDisposition := validateGrokObjectValue(witness, siblings, rootDocument, budget, depth+1, "")
-			if siblingDisposition == grokSchemaUnknown {
-				unknownWitness = true
-				continue
-			}
-			if siblingDisposition == grokSchemaContradictory {
-				continue
-			}
-			matches := 0
-			unknown := false
+		if !allObject || finiteWitnessGrammar {
+			rootWitnesses := grokFiniteObjectWitnesses(working)
+			_, rootConstFinite := working["const"]
+			_, rootEnumFinite := working["enum"]
+			rootFinite := rootConstFinite || rootEnumFinite
+			branchesFinite := true
+			witnesses := rootWitnesses
 			for _, branch := range branches {
-				result := validateGrokSchemaValue(witness, branch, rootDocument, budget, depth+1)
-				switch result {
-				case grokSchemaProvenObject:
-					matches++
-				case grokSchemaUnknown:
-					unknown = true
+				branchMap, ok := branch.(map[string]any)
+				if !ok {
+					return nil, grokSchemaUnknown
+				}
+				branchWitnesses := grokFiniteObjectWitnesses(branchMap)
+				branchesFinite = branchesFinite && len(branchWitnesses) > 0
+				if !rootFinite {
+					witnesses = append(witnesses, branchWitnesses...)
 				}
 			}
-			if !unknown && matches == 1 {
-				provenExclusive = true
-				break
+			provenExclusive := false
+			unknownWitness := false
+			siblings := cloneGrokSchemaMap(working)
+			delete(siblings, "oneOf")
+			for _, witness := range uniqueGrokObjectWitnesses(witnesses) {
+				siblingDisposition := validateGrokObjectValue(witness, siblings, rootDocument, budget, depth+1, "")
+				if siblingDisposition == grokSchemaUnknown {
+					unknownWitness = true
+					continue
+				}
+				if siblingDisposition == grokSchemaContradictory {
+					continue
+				}
+				matches := 0
+				unknown := false
+				for _, branch := range branches {
+					result := validateGrokSchemaValue(witness, branch, rootDocument, budget, depth+1)
+					switch result {
+					case grokSchemaProvenObject:
+						matches++
+					case grokSchemaUnknown:
+						unknown = true
+					}
+				}
+				if !unknown && matches == 1 {
+					provenExclusive = true
+					break
+				}
+				unknownWitness = unknownWitness || unknown
 			}
-			unknownWitness = unknownWitness || unknown
+			if !provenExclusive {
+				if (rootFinite || branchesFinite) && !unknownWitness {
+					return nil, grokSchemaContradictory
+				}
+				return nil, grokSchemaUnknown
+			}
 		}
-		if !provenExclusive {
-			if (rootFinite || branchesFinite) && !unknownWitness {
-				return nil, grokSchemaContradictory
+		if allObject {
+			objectBranches := make([]any, 0, len(branches))
+			for _, branch := range branches {
+				objectBranches = append(objectBranches, normalizeGrokObjectUnionBranch(branch))
 			}
-			return nil, grokSchemaUnknown
+			working["oneOf"] = objectBranches
+			rootObjectProven = true
 		}
 	}
 
-	typeDisposition := normalizeGrokObjectRootType(working)
-	if typeDisposition != grokSchemaProvenObject {
-		return nil, typeDisposition
+	if rawConst, exists := working["const"]; exists {
+		_, constObject := rawConst.(map[string]any)
+		if !constObject {
+			return nil, grokSchemaContradictory
+		}
+		rootObjectProven = rootObjectProven || constObject
+	}
+	if rawEnum, exists := working["enum"]; exists {
+		if values, ok := rawEnum.([]any); ok && len(values) > 0 {
+			objectCount := 0
+			for _, value := range values {
+				if _, object := value.(map[string]any); object {
+					objectCount++
+				}
+			}
+			if objectCount == 0 {
+				return nil, grokSchemaContradictory
+			}
+			if objectCount == len(values) {
+				rootObjectProven = true
+			} else if _, hasExplicitType := working["type"]; !hasExplicitType && !rootObjectProven {
+				return nil, grokSchemaUnknown
+			}
+		}
+	}
+	if _, hasExplicitType := working["type"]; hasExplicitType {
+		typeDisposition := normalizeGrokObjectRootType(working)
+		if typeDisposition != grokSchemaProvenObject {
+			return nil, typeDisposition
+		}
+	} else if !rootObjectProven {
+		return nil, grokSchemaUnknown
+	} else {
+		working["type"] = "object"
 	}
 	if disposition := validateGrokObjectShape(working, rootDocument, budget, depth); disposition != grokSchemaProvenObject {
 		return nil, disposition
@@ -368,7 +410,7 @@ func normalizeGrokSchemaMap(
 func normalizeGrokObjectRootType(schema map[string]any) grokSchemaDisposition {
 	rawType, exists := schema["type"]
 	if !exists {
-		return grokSchemaProvenObject
+		return grokSchemaUnknown
 	}
 	switch value := rawType.(type) {
 	case string:
@@ -389,7 +431,6 @@ func normalizeGrokObjectRootType(schema map[string]any) grokSchemaDisposition {
 			switch typeName {
 			case "object":
 				hasObject = true
-			case "null":
 			default:
 				return grokSchemaUnknown
 			}
@@ -402,6 +443,129 @@ func normalizeGrokObjectRootType(schema map[string]any) grokSchemaDisposition {
 	default:
 		return grokSchemaUnknown
 	}
+}
+
+func normalizeGrokObjectUnionBranch(schema any) any {
+	branch, ok := schema.(map[string]any)
+	if !ok {
+		return schema
+	}
+	normalized := cloneGrokSchemaMap(branch)
+	delete(normalized, "$schema")
+	normalized["type"] = "object"
+	return normalized
+}
+
+func grokSchemaBranchObjectDisposition(
+	schema any,
+	rootDocument map[string]any,
+	budget *grokSchemaBudget,
+	depth int,
+	refStack map[string]struct{},
+) grokSchemaDisposition {
+	if depth > budget.MaxDepth {
+		return grokSchemaUnknown
+	}
+	if truth, ok := schema.(bool); ok {
+		if truth {
+			return grokSchemaUnknown
+		}
+		return grokSchemaContradictory
+	}
+	branch, ok := schema.(map[string]any)
+	if !ok {
+		return grokSchemaUnknown
+	}
+	for key := range branch {
+		if _, supported := grokSchemaRootKeywords[key]; supported {
+			continue
+		}
+		if _, annotation := grokSchemaAnnotationKeywords[key]; annotation || strings.HasPrefix(key, "x-") {
+			continue
+		}
+		return grokSchemaUnknown
+	}
+	if rawRef, exists := branch["$ref"]; exists {
+		ref, ok := rawRef.(string)
+		if !ok || !strings.HasPrefix(ref, "#/") || budget.refVisits >= budget.MaxRefVisits {
+			return grokSchemaUnknown
+		}
+		if _, cyclic := refStack[ref]; cyclic {
+			return grokSchemaUnknown
+		}
+		budget.refVisits++
+		target, ok := resolveGrokLocalSchemaRef(rootDocument, ref)
+		if !ok {
+			return grokSchemaUnknown
+		}
+		nextStack := cloneGrokRefStack(refStack)
+		nextStack[ref] = struct{}{}
+		disposition := grokSchemaBranchObjectDisposition(target, rootDocument, budget, depth+1, nextStack)
+		if disposition != grokSchemaProvenObject {
+			return disposition
+		}
+		if siblingType, exists := branch["type"]; exists {
+			return grokSchemaExplicitObjectTypeDisposition(siblingType)
+		}
+		return grokSchemaProvenObject
+	}
+	if rawType, exists := branch["type"]; exists {
+		return grokSchemaExplicitObjectTypeDisposition(rawType)
+	}
+	if rawConst, exists := branch["const"]; exists {
+		if _, object := rawConst.(map[string]any); object {
+			return grokSchemaProvenObject
+		}
+		return grokSchemaContradictory
+	}
+	if rawEnum, exists := branch["enum"]; exists {
+		values, ok := rawEnum.([]any)
+		if !ok || len(values) == 0 {
+			return grokSchemaUnknown
+		}
+		for _, value := range values {
+			if _, object := value.(map[string]any); !object {
+				return grokSchemaUnknown
+			}
+		}
+		return grokSchemaProvenObject
+	}
+	for _, combinator := range []string{"allOf", "anyOf", "oneOf"} {
+		rawBranches, exists := branch[combinator]
+		if !exists {
+			continue
+		}
+		branches, ok := rawBranches.([]any)
+		if !ok || len(branches) == 0 {
+			return grokSchemaUnknown
+		}
+		for _, child := range branches {
+			if grokSchemaBranchObjectDisposition(child, rootDocument, budget, depth+1, refStack) != grokSchemaProvenObject {
+				return grokSchemaUnknown
+			}
+		}
+		return grokSchemaProvenObject
+	}
+	return grokSchemaUnknown
+}
+
+func grokSchemaExplicitObjectTypeDisposition(rawType any) grokSchemaDisposition {
+	types, ok := grokSchemaTypeSet(rawType)
+	if !ok {
+		return grokSchemaUnknown
+	}
+	hasObject := false
+	for _, typeName := range types {
+		if typeName == "object" {
+			hasObject = true
+			continue
+		}
+		return grokSchemaUnknown
+	}
+	if hasObject {
+		return grokSchemaProvenObject
+	}
+	return grokSchemaContradictory
 }
 
 func validateGrokObjectShape(schema map[string]any, root map[string]any, budget *grokSchemaBudget, depth int) grokSchemaDisposition {
@@ -455,29 +619,6 @@ func validateGrokObjectShape(schema map[string]any, root map[string]any, budget 
 	if additional == false && minSet && len(properties) < minProperties {
 		return grokSchemaContradictory
 	}
-	if minSet && minProperties > len(required) {
-		possible := len(required)
-		for name, propertySchema := range properties {
-			if containsGrokString(required, name) {
-				continue
-			}
-			disposition := grokLeafSchemaHasWitness(propertySchema, root, budget, depth+1)
-			if disposition == grokSchemaUnknown {
-				return disposition
-			}
-			if disposition == grokSchemaProvenObject {
-				possible++
-			}
-		}
-		if possible < minProperties {
-			if additional == false {
-				return grokSchemaContradictory
-			}
-			if disposition := grokLeafSchemaHasWitness(additional, root, budget, depth+1); disposition != grokSchemaProvenObject {
-				return disposition
-			}
-		}
-	}
 	for _, name := range required {
 		propertySchema, exists := properties[name]
 		if !exists {
@@ -486,61 +627,51 @@ func validateGrokObjectShape(schema map[string]any, root map[string]any, budget 
 			}
 			propertySchema = additional
 		}
-		if disposition := grokLeafSchemaHasWitness(propertySchema, root, budget, depth+1); disposition != grokSchemaProvenObject {
+		if impossible, booleanSchema := propertySchema.(bool); booleanSchema && !impossible {
+			return grokSchemaContradictory
+		}
+		if disposition := grokRequiredChildFiniteDisposition(propertySchema); disposition != grokSchemaProvenObject {
 			return disposition
 		}
 	}
 	return grokSchemaProvenObject
 }
 
-func grokLeafSchemaHasWitness(schema any, root map[string]any, budget *grokSchemaBudget, depth int) grokSchemaDisposition {
-	if depth > budget.MaxDepth {
-		return grokSchemaUnknown
-	}
-	if truth, ok := schema.(bool); ok {
-		if truth {
-			return grokSchemaProvenObject
-		}
-		return grokSchemaContradictory
-	}
-	m, ok := schema.(map[string]any)
+func grokRequiredChildFiniteDisposition(schema any) grokSchemaDisposition {
+	child, ok := schema.(map[string]any)
 	if !ok {
-		return grokSchemaUnknown
-	}
-	if len(m) == 0 {
 		return grokSchemaProvenObject
 	}
-	for key := range m {
-		switch key {
-		case "type", "const", "enum", "title", "description", "default", "examples", "deprecated", "readOnly", "writeOnly", "format", "$comment":
-		default:
-			if !strings.HasPrefix(key, "x-") {
-				return grokSchemaUnknown
-			}
-		}
-	}
-	if rawConst, exists := m["const"]; exists {
-		if grokValueMatchesDeclaredType(rawConst, m["type"]) == grokSchemaContradictory {
-			return grokSchemaContradictory
-		}
+	rawType, hasType := child["type"]
+	if !hasType {
 		return grokSchemaProvenObject
 	}
-	if rawEnum, exists := m["enum"]; exists {
-		items, ok := rawEnum.([]any)
-		if !ok || len(items) == 0 {
+	if rawConst, hasConst := child["const"]; hasConst {
+		return grokValueMatchesDeclaredType(rawConst, rawType)
+	}
+	if rawEnum, hasEnum := child["enum"]; hasEnum {
+		values, ok := rawEnum.([]any)
+		if !ok {
 			return grokSchemaUnknown
 		}
-		for _, item := range items {
-			if grokValueMatchesDeclaredType(item, m["type"]) == grokSchemaProvenObject {
+		if len(values) == 0 {
+			return grokSchemaContradictory
+		}
+		unknown := false
+		for _, value := range values {
+			switch grokValueMatchesDeclaredType(value, rawType) {
+			case grokSchemaProvenObject:
 				return grokSchemaProvenObject
+			case grokSchemaUnknown:
+				unknown = true
 			}
+		}
+		if unknown {
+			return grokSchemaUnknown
 		}
 		return grokSchemaContradictory
 	}
-	if _, exists := m["type"]; !exists {
-		return grokSchemaProvenObject
-	}
-	return grokDeclaredTypeHasCanonicalValue(m["type"])
+	return grokSchemaProvenObject
 }
 
 func validateGrokSchemaValue(value map[string]any, rawSchema any, root map[string]any, budget *grokSchemaBudget, depth int) grokSchemaDisposition {
@@ -955,15 +1086,6 @@ func resolveGrokLocalSchemaRef(root map[string]any, ref string) (any, bool) {
 	return current, true
 }
 
-func isGrokNullOnlySchema(value any) bool {
-	m, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	typeName, ok := m["type"].(string)
-	return ok && typeName == "null" && len(m) == 1
-}
-
 func grokNonNegativeSchemaInteger(raw any) (int, bool, bool) {
 	if raw == nil {
 		return 0, true, false
@@ -986,15 +1108,6 @@ func grokSchemaBound(schema map[string]any, key string) (int, bool, bool) {
 	}
 	value, _, ok := grokNonNegativeSchemaInteger(raw)
 	return value, true, ok
-}
-
-func containsGrokString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func validateGrokLeafValue(value any, schema map[string]any) grokSchemaDisposition {
@@ -1028,20 +1141,6 @@ func validateGrokLeafValue(value any, schema map[string]any) grokSchemaDispositi
 		return grokSchemaContradictory
 	}
 	return grokSchemaProvenObject
-}
-
-func grokDeclaredTypeHasCanonicalValue(raw any) grokSchemaDisposition {
-	types, ok := grokSchemaTypeSet(raw)
-	if !ok {
-		return grokSchemaUnknown
-	}
-	for _, typeName := range types {
-		switch typeName {
-		case "null", "boolean", "string", "number", "integer", "array", "object":
-			return grokSchemaProvenObject
-		}
-	}
-	return grokSchemaUnknown
 }
 
 func grokValueMatchesDeclaredType(value any, rawType any) grokSchemaDisposition {
