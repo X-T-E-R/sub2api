@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -37,14 +39,15 @@ func TestNormalizeGrokFunctionParametersPreservesRealCodexKikiSchemas(t *testing
 
 			var want map[string]any
 			require.NoError(t, decodeOpenAIJSONUseNumber(raw, &want))
+			if name == "codex_automation_update_actual" {
+				requireProviderAdmissibleGrokRootObject(t, normalized)
+				var got map[string]any
+				require.NoError(t, decodeOpenAIJSONUseNumber(normalized, &got))
+				require.Equal(t, want["$defs"], got["$defs"], "root normalization must preserve nested-property definitions")
+				return
+			}
 			delete(want, "$schema")
 			want["type"] = "object"
-			if name == "codex_automation_update_actual" {
-				branches := want["oneOf"].([]any)
-				for _, rawBranch := range branches {
-					rawBranch.(map[string]any)["type"] = "object"
-				}
-			}
 			wantJSON, err := json.Marshal(want)
 			require.NoError(t, err)
 			require.JSONEq(t, string(wantJSON), string(normalized))
@@ -58,7 +61,7 @@ func TestNormalizeGrokFunctionParametersRealSchemaActionableConstraints(t *testi
 		checks map[string]string
 	}{
 		{name: "codex_create_thread_actual", checks: map[string]string{"required.1": "target", "properties.target.anyOf.#": "3", "properties.target.anyOf.0.properties.environment.anyOf.#": "2"}},
-		{name: "codex_automation_update_actual", checks: map[string]string{"oneOf.#": "4", "oneOf.0.type": "object", "oneOf.3.type": "object", "$defs.__schema4.required.0": "name", "$defs.__schema21.oneOf.#": "2", "$defs.__schema0.properties.id.$ref": "#/$defs/__schema1"}},
+		{name: "codex_automation_update_actual", checks: map[string]string{"oneOf.#": "4", "oneOf.0.type": "object", "oneOf.0.properties.mode.enum.0": "view", "oneOf.1.oneOf.0.properties.mode.$ref": "#/$defs/__schema16", "oneOf.2.oneOf.#": "2", "oneOf.3.properties.mode.enum.0": "delete", "$defs.__schema4.required.0": "name", "$defs.__schema21.oneOf.#": "2", "$defs.__schema0.properties.id.$ref": "#/$defs/__schema1", "$defs.__schema12.anyOf.1.type": "null"}},
 		{name: "codex_app_wait_threads_old_actual", checks: map[string]string{"required.0": "targets", "properties.targets.type": "array", "properties.targets.items.required.0": "threadId"}},
 		{name: "codex_wait_agent_v1_actual", checks: map[string]string{"required.0": "targets", "properties.targets.items.type": "string"}},
 		{name: "kiki_wait_threads_actual_control", checks: map[string]string{"required.0": "threads", "properties.threads.minItems": "1", "properties.threads.items.properties.thread.required.#": "3", "properties.timeout_ms.maximum": "60000"}},
@@ -68,11 +71,93 @@ func TestNormalizeGrokFunctionParametersRealSchemaActionableConstraints(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			normalized, disposition := normalizeGrokFunctionParameters(task0007GrokSchemaFixtures[tt.name])
 			require.Equal(t, grokSchemaProvenObject, disposition)
+			if tt.name == "codex_automation_update_actual" {
+				requireProviderAdmissibleGrokRootObject(t, normalized)
+			}
 			for path, want := range tt.checks {
 				require.Equal(t, want, gjson.GetBytes(normalized, path).String(), path)
 			}
 		})
 	}
+}
+
+func requireProviderAdmissibleGrokRootObject(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var root map[string]any
+	require.NoError(t, decodeOpenAIJSONUseNumber(raw, &root))
+
+	var walk func(map[string]any, string)
+	walk = func(schema map[string]any, path string) {
+		require.Equal(t, "object", schema["type"], "%s must directly declare an object type", path)
+		require.NotContains(t, schema, "$ref", "%s must not defer its root-object proof through a ref", path)
+		for _, keyword := range []string{"allOf", "anyOf", "oneOf"} {
+			rawBranches, exists := schema[keyword]
+			if !exists {
+				continue
+			}
+			branches, ok := rawBranches.([]any)
+			require.True(t, ok, "%s.%s must be an array", path, keyword)
+			require.NotEmpty(t, branches, "%s.%s must not be empty", path, keyword)
+			for index, rawBranch := range branches {
+				branch, ok := rawBranch.(map[string]any)
+				require.True(t, ok, "%s.%s.%d must be an object schema", path, keyword, index)
+				walk(branch, fmt.Sprintf("%s.%s.%d", path, keyword, index))
+			}
+		}
+	}
+	walk(root, "parameters")
+}
+
+func TestNormalizeGrokRootUnionIsGenericAndBounded(t *testing.T) {
+	raw := task0007GrokSchemaFixtures["codex_automation_update_actual"]
+	body := []byte(`{"tools":[{"type":"function","name":"codex_app__automation_update","strict":true,"parameters":` + string(raw) + `},{"type":"function","name":"unrelated_root_union","strict":true,"parameters":` + string(raw) + `}]}`)
+	patched, err := sanitizeGrokResponsesToolsWithCompat(body, true)
+	require.NoError(t, err)
+	first := json.RawMessage(gjson.GetBytes(patched, "tools.0.parameters").Raw)
+	second := json.RawMessage(gjson.GetBytes(patched, "tools.1.parameters").Raw)
+	requireProviderAdmissibleGrokRootObject(t, first)
+	requireProviderAdmissibleGrokRootObject(t, second)
+	require.JSONEq(t, string(first), string(second))
+	require.True(t, gjson.GetBytes(patched, "tools.0.strict").Bool())
+	require.True(t, gjson.GetBytes(patched, "tools.1.strict").Bool())
+
+	simple := json.RawMessage(`{"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"}`)
+	normalized, disposition := normalizeGrokFunctionParameters(simple)
+	require.Equal(t, grokSchemaProvenObject, disposition)
+	require.Equal(t, []byte(simple), []byte(normalized), "canonical simple object schemas must remain byte-stable")
+
+	expansionSchema := json.RawMessage(fmt.Sprintf(`{"$defs":{"a":{"type":"object","description":"%s"}},"oneOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/a"},{"$ref":"#/$defs/a"}]}`, strings.Repeat("x", 256)))
+	fallbackCases := []struct {
+		name   string
+		schema json.RawMessage
+		budget *grokSchemaBudget
+	}{
+		{name: "cycle", schema: json.RawMessage(`{"$defs":{"loop":{"oneOf":[{"$ref":"#/$defs/loop"}]}},"oneOf":[{"$ref":"#/$defs/loop"}]}`)},
+		{name: "external", schema: json.RawMessage(`{"oneOf":[{"$ref":"https://example.test/object"}]}`)},
+		{name: "missing", schema: json.RawMessage(`{"$defs":{},"oneOf":[{"$ref":"#/$defs/missing"}]}`)},
+		{name: "mixed primitive branch", schema: json.RawMessage(`{"const":{"mode":"object"},"oneOf":[{"type":"object","const":{"mode":"object"}},{"type":"string"}]}`)},
+		{name: "ref budget", schema: json.RawMessage(`{"$defs":{"a":{"type":"object"},"b":{"type":"object"}},"oneOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/b"}]}`), budget: &grokSchemaBudget{MaxSize: 4096, MaxDepth: 32, MaxRefVisits: 1}},
+		{name: "expanded size budget", schema: expansionSchema, budget: &grokSchemaBudget{MaxSize: len(expansionSchema) + 100, MaxDepth: 32, MaxRefVisits: 128}},
+	}
+	for _, tt := range fallbackCases {
+		t.Run(tt.name, func(t *testing.T) {
+			var got json.RawMessage
+			var gotDisposition grokSchemaDisposition
+			if tt.budget == nil {
+				got, gotDisposition = normalizeGrokFunctionParameters(tt.schema)
+			} else {
+				got, gotDisposition = normalizeGrokFunctionParametersWithBudget(tt.schema, tt.budget)
+			}
+			require.NotEqual(t, grokSchemaProvenObject, gotDisposition)
+			require.JSONEq(t, grokSchemaFallbackJSON, string(got))
+		})
+	}
+
+	cycle := fallbackCases[0].schema
+	fallbackBody, err := sanitizeGrokResponsesToolsWithCompat([]byte(`{"tools":[{"type":"function","name":"cyclic_root_union","strict":true,"parameters":`+string(cycle)+`}]}`), true)
+	require.NoError(t, err)
+	require.JSONEq(t, grokSchemaFallbackJSON, gjson.GetBytes(fallbackBody, "tools.0.parameters").Raw)
+	require.False(t, gjson.GetBytes(fallbackBody, "tools.0.strict").Bool())
 }
 
 func TestGrokComplexSchemaSharedPreparationRoutesAndCompatOff(t *testing.T) {
@@ -123,6 +208,60 @@ func TestGrokComplexSchemaSharedPreparationRoutesAndCompatOff(t *testing.T) {
 
 	offBody := []byte(`{"tools":[` + tool + `]}`)
 	off, err := sanitizeGrokResponsesToolsWithCompat(offBody, false)
+	require.NoError(t, err)
+	require.JSONEq(t, string(raw), gjson.GetBytes(off, "tools.0.parameters").Raw)
+	require.True(t, gjson.GetBytes(off, "tools.0.strict").Bool())
+}
+
+func TestGrokRootUnionSharedPreparationRoutes(t *testing.T) {
+	raw := task0007GrokSchemaFixtures["codex_automation_update_actual"]
+	tool := `{"type":"function","name":"unrelated_root_union","strict":true,"parameters":` + string(raw) + `}`
+	assertPrepared := func(t *testing.T, body []byte) {
+		t.Helper()
+		parameters := json.RawMessage(gjson.GetBytes(body, "tools.0.parameters").Raw)
+		requireProviderAdmissibleGrokRootObject(t, parameters)
+		require.Equal(t, "view", gjson.GetBytes(parameters, "oneOf.0.properties.mode.enum.0").String())
+		require.Equal(t, "#/$defs/__schema12", gjson.GetBytes(parameters, "oneOf.1.oneOf.0.properties.projectId.$ref").String())
+		require.Equal(t, "null", gjson.GetBytes(parameters, "$defs.__schema12.anyOf.1.type").String())
+	}
+
+	native, _, err := patchGrokResponsesBodyWithClientToolsCompat([]byte(`{"model":"grok-4.6","input":"hi","tools":[`+tool+`]}`), "grok-4.6", true)
+	require.NoError(t, err)
+	assertPrepared(t, native)
+	require.True(t, gjson.GetBytes(native, "tools.0.strict").Bool())
+
+	messagesReq := &apicompat.AnthropicRequest{
+		Model: "grok-4.6", MaxTokens: 32,
+		Messages: []apicompat.AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:    []apicompat.AnthropicTool{{Name: "unrelated_root_union", InputSchema: raw}},
+	}
+	convertedMessages, err := apicompat.AnthropicToResponses(messagesReq)
+	require.NoError(t, err)
+	messagesBody, err := json.Marshal(convertedMessages)
+	require.NoError(t, err)
+	messagesBody, err = patchGrokResponsesBodyBaseWithCompat(messagesBody, "grok-4.6", true)
+	require.NoError(t, err)
+	assertPrepared(t, messagesBody)
+
+	chatBody := []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"unrelated_root_union","strict":true,"parameters":` + string(raw) + `}}]}`)
+	eligible, reason := grokChatResponsesBridgeEligibilityWithCompat(chatBody, true)
+	require.True(t, eligible, reason)
+	var chatReq apicompat.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal(chatBody, &chatReq))
+	convertedChat, err := apicompat.ChatCompletionsToResponses(&chatReq)
+	require.NoError(t, err)
+	chatResponsesBody, err := json.Marshal(convertedChat)
+	require.NoError(t, err)
+	chatResponsesBody, err = patchGrokResponsesBodyBaseWithCompat(chatResponsesBody, "grok-4.6", true)
+	require.NoError(t, err)
+	assertPrepared(t, chatResponsesBody)
+
+	account := healthyGrokOAuthGatewayTestAccount(9906, "access-token")
+	ws, err := prepareGrokWSResponsesBody([]byte(`{"type":"response.create","model":"grok-4.6","input":"hi","tools":[`+tool+`]}`), account, "grok-4.6", apicompat.ResponsesClientToolMapping{}, nil, true)
+	require.NoError(t, err)
+	assertPrepared(t, ws.Body)
+
+	off, err := sanitizeGrokResponsesToolsWithCompat([]byte(`{"tools":[`+tool+`]}`), false)
 	require.NoError(t, err)
 	require.JSONEq(t, string(raw), gjson.GetBytes(off, "tools.0.parameters").Raw)
 	require.True(t, gjson.GetBytes(off, "tools.0.strict").Bool())

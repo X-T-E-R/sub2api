@@ -2,8 +2,11 @@ package service
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -58,8 +61,10 @@ func sanitizeGrokResponsesModelInputWithCompat(body []byte, protocolCompat bool)
 		if role == "tool" || role == "function" || isGrokReplayOutputType(itemType) {
 			output := firstNonNilGrokJSONValue(item["output"], item["content"], item["results"])
 			normalizedOutput := any(grokModelInputString(output, "(empty)"))
-			if protocolCompat && isGrokToolOutputContentArray(output) {
-				normalizedOutput = output
+			if protocolCompat {
+				if content, ok := normalizeGrokToolOutputContentArray(output); ok {
+					normalizedOutput = content
+				}
 			}
 			filtered = append(filtered, map[string]any{
 				"type":    "function_call_output",
@@ -171,90 +176,226 @@ func sanitizeGrokResponsesModelInputWithCompat(body []byte, protocolCompat bool)
 }
 
 func isGrokToolOutputContentArray(output any) bool {
+	_, ok := normalizeGrokToolOutputContentArray(output)
+	return ok
+}
+
+func normalizeGrokToolOutputContentArray(output any) ([]any, bool) {
 	parts, ok := output.([]any)
 	if !ok || len(parts) == 0 {
-		return false
+		return nil, false
 	}
+	normalized := make([]any, 0, len(parts))
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
 		if !ok {
-			return false
+			return nil, false
 		}
 		partType, ok := part["type"].(string)
 		if !ok {
-			return false
+			return nil, false
 		}
 		switch partType {
 		case "input_text":
 			if _, ok := part["text"].(string); !ok {
-				return false
+				return nil, false
 			}
+			normalized = append(normalized, cloneGrokToolOutputContentPart(part))
 		case "input_image":
-			if !isGrokToolOutputInputImagePart(part) {
-				return false
+			normalizedPart, ok := normalizeGrokToolOutputInputImagePart(part)
+			if !ok {
+				return nil, false
 			}
+			normalized = append(normalized, normalizedPart)
 		default:
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return normalized, true
 }
 
 func isGrokToolOutputInputImagePart(part map[string]any) bool {
+	_, ok := normalizeGrokToolOutputInputImagePart(part)
+	return ok
+}
+
+func normalizeGrokToolOutputInputImagePart(part map[string]any) (map[string]any, bool) {
 	if _, exists := part["file_data"]; exists {
-		return false
+		return nil, false
 	}
 	if _, exists := part["file_url"]; exists {
-		return false
+		return nil, false
 	}
 	imageURL, hasImageURL := part["image_url"]
 	fileID, hasFileID := part["file_id"]
 	if hasImageURL == hasFileID {
-		return false
+		return nil, false
 	}
+	normalized := cloneGrokToolOutputContentPart(part)
+	verifiedInlineImage := false
 	if hasImageURL {
 		value, ok := imageURL.(string)
-		if !ok || !isGrokToolOutputImageURL(value) {
-			return false
+		if !ok {
+			return nil, false
 		}
+		image, ok := normalizeGrokToolOutputImageURL(value)
+		if !ok {
+			return nil, false
+		}
+		normalized["image_url"] = image.value
+		verifiedInlineImage = !image.inlineData || image.verified
 	}
 	if hasFileID {
 		value, ok := fileID.(string)
 		if !ok || value == "" || value != strings.TrimSpace(value) {
-			return false
+			return nil, false
 		}
 	}
 	if rawDetail, exists := part["detail"]; exists {
 		detail, ok := rawDetail.(string)
 		if !ok {
-			return false
+			return nil, false
 		}
 		switch detail {
 		case "auto", "low", "high":
+		case "original":
+			// xAI accepts high in the same semantic slot. Inline data is
+			// verified before changing the caller's declared detail so malformed
+			// data URLs retain the existing string fallback.
+			if hasImageURL && !verifiedInlineImage {
+				return nil, false
+			}
+			normalized["detail"] = "high"
 		default:
+			return nil, false
+		}
+	}
+	return normalized, true
+}
+
+func isGrokToolOutputImageURL(value string) bool {
+	_, ok := normalizeGrokToolOutputImageURL(value)
+	return ok
+}
+
+type grokToolOutputImageURLNormalization struct {
+	value      string
+	inlineData bool
+	verified   bool
+}
+
+func normalizeGrokToolOutputImageURL(value string) (grokToolOutputImageURLNormalization, bool) {
+	if value == "" || value != strings.TrimSpace(value) || isEmptyBase64DataURI(value) {
+		return grokToolOutputImageURLNormalization{}, false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return grokToolOutputImageURLNormalization{}, false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return grokToolOutputImageURLNormalization{value: value}, parsed.Host != ""
+	case "data":
+		return normalizeGrokToolOutputImageDataURL(value)
+	default:
+		return grokToolOutputImageURLNormalization{}, false
+	}
+}
+
+const maxGrokToolOutputImageBytes = 20 << 20
+
+func normalizeGrokToolOutputImageDataURL(value string) (grokToolOutputImageURLNormalization, bool) {
+	comma := strings.IndexByte(value, ',')
+	if comma < len("data:x;base64") || comma == len(value)-1 {
+		return grokToolOutputImageURLNormalization{}, false
+	}
+	metadata := value[len("data:"):comma]
+	separator := strings.LastIndexByte(metadata, ';')
+	if separator <= 0 || !strings.EqualFold(metadata[separator+1:], "base64") {
+		return grokToolOutputImageURLNormalization{}, false
+	}
+	declaredMIME := strings.ToLower(metadata[:separator])
+	payload := value[comma+1:]
+	detectedMIME, sniffed := sniffGrokToolOutputImageBase64(payload)
+	if declaredMIME == "application/octet-stream" {
+		if !sniffed {
+			return grokToolOutputImageURLNormalization{}, false
+		}
+		return grokToolOutputImageURLNormalization{
+			value:      "data:" + detectedMIME + ";base64," + payload,
+			inlineData: true,
+			verified:   true,
+		}, true
+	}
+	if !strings.HasPrefix(declaredMIME, "image/") {
+		return grokToolOutputImageURLNormalization{}, false
+	}
+	return grokToolOutputImageURLNormalization{
+		value:      value,
+		inlineData: true,
+		verified:   sniffed && declaredMIME == detectedMIME,
+	}, true
+}
+
+func sniffGrokToolOutputImageBase64(payload string) (string, bool) {
+	const maxEncodedBytes = ((maxGrokToolOutputImageBytes + 2) / 3) * 4
+	if payload == "" || len(payload) > maxEncodedBytes || !isStrictGrokToolOutputBase64(payload) {
+		return "", false
+	}
+
+	decoder := base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(payload))
+	sniff := make([]byte, 512)
+	n, err := io.ReadFull(decoder, sniff)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return "", false
+	}
+	if n == 0 {
+		return "", false
+	}
+	if err == nil {
+		if _, err := io.Copy(io.Discard, decoder); err != nil {
+			return "", false
+		}
+	}
+
+	detected := http.DetectContentType(sniff[:n])
+	switch detected {
+	case "image/gif", "image/jpeg", "image/png", "image/webp":
+		return detected, true
+	default:
+		return "", false
+	}
+}
+
+func isStrictGrokToolOutputBase64(payload string) bool {
+	if len(payload)%4 != 0 {
+		return false
+	}
+	padding := 0
+	for index := 0; index < len(payload); index++ {
+		char := payload[index]
+		if char == '=' {
+			padding++
+			if padding > 2 || index < len(payload)-2 {
+				return false
+			}
+			continue
+		}
+		if padding != 0 || !((char >= 'A' && char <= 'Z') ||
+			(char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') || char == '+' || char == '/') {
 			return false
 		}
 	}
 	return true
 }
 
-func isGrokToolOutputImageURL(value string) bool {
-	if value == "" || value != strings.TrimSpace(value) || isEmptyBase64DataURI(value) {
-		return false
+func cloneGrokToolOutputContentPart(part map[string]any) map[string]any {
+	cloned := make(map[string]any, len(part))
+	for key, value := range part {
+		cloned[key] = value
 	}
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		return parsed.Host != ""
-	case "data":
-		const imageDataPrefix = "data:image/"
-		return len(value) >= len(imageDataPrefix) && strings.EqualFold(value[:len(imageDataPrefix)], imageDataPrefix) && strings.Contains(value, ",")
-	default:
-		return false
-	}
+	return cloned
 }
 
 const grokAgentMessageMetadataLabel = "[sub2api client-declared inter-agent metadata]"
