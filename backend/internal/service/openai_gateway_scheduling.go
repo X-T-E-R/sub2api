@@ -147,14 +147,17 @@ func (s *OpenAIGatewayService) GenerateExplicitSessionHash(c *gin.Context, body 
 
 // GenerateSessionHash generates a sticky-session hash for OpenAI requests.
 //
-// Priority:
+// Non-Grok priority:
 //  1. Header: session_id
 //  2. Header: conversation_id
 //  3. Header: x-session-affinity / x-session-id / x-opencode-session (OpenCode)
 //  4. Header: x-conversation-id (CodeBuddy)
-//  5. Header: x-grok-conv-id (Grok groups only)
-//  6. Body:   prompt_cache_key
-//  7. Body:   content-based fallback (model + system + tools + first user message)
+//  5. Body:   prompt_cache_key
+//  6. Body:   content-based fallback (model + system + tools + first user message)
+//
+// Grok request contexts instead prefer body prompt_cache_key, x-grok-conv-id,
+// x-grok-session-id, request-qualified Codex Session-Id, generic headers,
+// previous_response_id, then the content-based fallback.
 //
 // Grok sticky affinity is intentionally separate from the upstream
 // prompt_cache_key identity (resolveGrokCacheIdentity): sticky pins an OAuth

@@ -385,7 +385,7 @@ func TestOpenAIGatewayService_ClientSessionHeaderPriority(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
-	c.Set("api_key", &APIKey{ID: 901, Group: &Group{Platform: PlatformGrok}})
+	c.Set("api_key", &APIKey{ID: 901, Group: &Group{Platform: PlatformOpenAI}})
 
 	headers := []struct {
 		name  string
@@ -397,23 +397,58 @@ func TestOpenAIGatewayService_ClientSessionHeaderPriority(t *testing.T) {
 		{name: openCodeSessionIDHeader, value: "opencode-session-id"},
 		{name: openCodeNativeSessionHeader, value: "opencode-native-session"},
 		{name: codeBuddyConversationHeader, value: "codebuddy-conversation"},
-		{name: grokConversationIDHeader, value: "grok-conversation"},
 	}
 	for _, header := range headers {
 		c.Request.Header.Set(header.name, header.value)
 	}
+	c.Request.Header.Set(grokConversationIDHeader, "ignored-grok-conversation")
+	c.Request.Header.Set(grokSessionIDHeader, "ignored-grok-session")
 
 	svc := &OpenAIGatewayService{}
 	body := []byte(`{"prompt_cache_key":"body-session"}`)
 	for _, header := range headers {
 		require.Equal(t, header.value, svc.ExtractSessionID(c, body), header.name)
 		require.Equal(t, fmt.Sprintf("%016x", xxhash.Sum64String(header.value)), svc.GenerateExplicitSessionHash(c, body), header.name)
-		if header.name != grokConversationIDHeader {
-			require.Equal(t, header.value, explicitOpenAISessionID(c, body), header.name)
-		}
+		require.Equal(t, header.value, explicitOpenAISessionID(c, body), header.name)
 		c.Request.Header.Del(header.name)
 	}
 	require.Equal(t, "body-session", svc.ExtractSessionID(c, body))
+	require.Equal(t, fmt.Sprintf("%016x", xxhash.Sum64String("body-session")), svc.GenerateExplicitSessionHash(c, body))
+	require.Empty(t, svc.ExtractSessionID(c, nil), "Grok-only headers must not affect non-Grok scheduling")
+}
+
+func TestOpenAIGatewayService_GrokPromptCacheKeyPriority(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"grok-4.5","prompt_cache_key":"body-session","client_metadata":{"session_id":"codex-session"},"previous_response_id":"resp_lower_priority"}`)
+	headers := []struct {
+		name  string
+		value string
+	}{
+		{name: grokConversationIDHeader, value: "grok-conversation"},
+		{name: grokSessionIDHeader, value: "grok-session"},
+		{name: codexSessionIDHeader, value: "codex-session"},
+		{name: claudeCodeSessionHeader, value: "claude-session"},
+		{name: "session_id", value: "generic-session"},
+		{name: "conversation_id", value: "generic-conversation"},
+		{name: openCodeSessionAffinityHeader, value: "opencode-affinity"},
+		{name: openCodeSessionIDHeader, value: "opencode-session-id"},
+		{name: openCodeNativeSessionHeader, value: "opencode-native-session"},
+		{name: codeBuddyConversationHeader, value: "codebuddy-conversation"},
+	}
+
+	svc := &OpenAIGatewayService{}
+	for _, header := range headers {
+		t.Run(header.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+			c.Request.Header.Set(header.name, header.value)
+			c.Set("api_key", &APIKey{ID: 902, Group: &Group{Platform: PlatformGrok}})
+
+			require.Equal(t, "body-session", svc.ExtractSessionID(c, body))
+			require.Equal(t, fmt.Sprintf("%016x", xxhash.Sum64String("body-session")), svc.GenerateExplicitSessionHash(c, body))
+		})
+	}
 }
 
 func TestOpenAIGatewayService_ClientSessionHeadersIgnorePerRequestIDs(t *testing.T) {
