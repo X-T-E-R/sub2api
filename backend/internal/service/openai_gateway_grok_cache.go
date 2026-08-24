@@ -14,13 +14,30 @@ import (
 )
 
 const (
-	grokConversationIDHeader         = "X-Grok-Conv-Id"
-	claudeCodeSessionHeader          = "X-Claude-Code-Session-Id"
-	grokClientToolCacheOptInHeader   = "X-Sub2API-Grok-Client-Tool-Cache"
-	grokFreeCacheNativeToolsJSON     = `[{"type":"web_search"},{"type":"x_search"}]`
-	grokFreeCacheDisabledToolChoice  = "none"
-	grokClientToolCacheOptInExtraKey = "grok_client_tool_cache_enabled"
+	grokConversationIDHeader            = "X-Grok-Conv-Id"
+	claudeCodeSessionHeader             = "X-Claude-Code-Session-Id"
+	grokClientToolCacheOptInHeader      = "X-Sub2API-Grok-Client-Tool-Cache"
+	grokFreeCacheNativeToolsJSON        = `[{"type":"web_search"},{"type":"x_search"}]`
+	grokFreeCacheDisabledToolChoice     = "none"
+	grokClientToolCacheOptInExtraKey    = "grok_client_tool_cache_enabled"
+	grokResponsesProtocolCompatExtraKey = "grok_responses_protocol_compat_v1"
 )
+
+type grokCacheSeedHint struct {
+	explicit string
+}
+
+func grokResponsesProtocolCompatEnabled(account *Account) bool {
+	if account == nil || account.Extra == nil {
+		return true
+	}
+	value, exists := account.Extra[grokResponsesProtocolCompatExtraKey]
+	if !exists {
+		return true
+	}
+	enabled, valid := value.(bool)
+	return !valid || enabled
+}
 
 // Claude Code metadata.user_id often ends with _session_<uuid>.
 var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
@@ -64,6 +81,19 @@ func extractClaudeCodeSessionIDFromPayload(body []byte) string {
 // internal probes and incomplete request contexts instead of creating a cache
 // identity that could be shared by unrelated tenants.
 func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstreamModel string) string {
+	hint := captureGrokCacheSeedHint(c, body, explicitKey)
+	return resolveGrokCacheIdentityFromFinal(c, body, hint, upstreamModel)
+}
+
+func captureGrokCacheSeedHint(c *gin.Context, ingressBody []byte, explicitKey string) grokCacheSeedHint {
+	return grokCacheSeedHint{explicit: explicitGrokCacheSeed(c, ingressBody, explicitKey)}
+}
+
+func canDeriveGrokCacheIdentity(c *gin.Context, body []byte, hint grokCacheSeedHint, upstreamModel string) bool {
+	return grokCacheIdentitySeed(c, body, hint, upstreamModel) != ""
+}
+
+func resolveGrokCacheIdentityFromFinal(c *gin.Context, finalBody []byte, hint grokCacheSeedHint, upstreamModel string) string {
 	apiKeyID := getAPIKeyIDFromContext(c)
 	if apiKeyID <= 0 {
 		return ""
@@ -80,16 +110,7 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 		return ""
 	}
 
-	seed := explicitGrokCacheSeed(c, body, explicitKey)
-	if seed == "" {
-		seed = deriveOpenAIStablePrefixSessionSeed(body)
-		if seed == "" {
-			// A model alone is too broad for cache routing. Preserve the
-			// existing first-user-derived identity when no reusable prefix is
-			// available so unrelated prompts do not share one tenant-wide key.
-			seed = deriveOpenAIAnchoredContentSessionSeed(body)
-		}
-	}
+	seed := grokCacheIdentitySeed(c, finalBody, hint, upstreamModel)
 	if seed == "" {
 		return ""
 	}
@@ -99,6 +120,66 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 	// upstream session identifiers derived by sub2api.
 	isolatedSeed := fmt.Sprintf("grok-prompt-cache:v1:%d:%s:%s", apiKeyID, model, seed)
 	return generateSessionUUID(isolatedSeed)
+}
+
+func grokCacheIdentitySeed(c *gin.Context, body []byte, hint grokCacheSeedHint, upstreamModel string) string {
+	if getAPIKeyIDFromContext(c) <= 0 || isOpenAIResponsesCompactPath(c) || strings.TrimSpace(upstreamModel) == "" {
+		return ""
+	}
+	if seed := strings.TrimSpace(hint.explicit); seed != "" {
+		return seed
+	}
+	body = stripGrokPromptCacheKey(body)
+	seed := deriveOpenAIStablePrefixSessionSeed(body)
+	if seed == "" {
+		seed = deriveOpenAIAnchoredContentSessionSeed(body)
+	}
+	return seed
+}
+
+func stripGrokPromptCacheKey(body []byte) []byte {
+	if !gjson.GetBytes(body, "prompt_cache_key").Exists() {
+		return body
+	}
+	stripped, err := sjson.DeleteBytes(append([]byte(nil), body...), "prompt_cache_key")
+	if err != nil {
+		return body
+	}
+	return stripped
+}
+
+func injectGrokCacheIdentity(body []byte, identity string) ([]byte, error) {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		if gjson.GetBytes(body, "prompt_cache_key").Exists() {
+			return sjson.DeleteBytes(body, "prompt_cache_key")
+		}
+		return body, nil
+	}
+	return sjson.SetBytes(body, "prompt_cache_key", identity)
+}
+
+func augmentGrokResponsesCacheRoute(c *gin.Context, body, intentSourceBody []byte, account *Account, identityAvailable bool) ([]byte, error) {
+	out := stripGrokPromptCacheKey(body)
+	if !identityAvailable {
+		return out, nil
+	}
+	var err error
+	if account != nil && account.IsGrokOAuth() && !hasGrokResponsesToolIntent(intentSourceBody) {
+		out, err = sjson.SetRawBytes(out, "tools", []byte(grokFreeCacheNativeToolsJSON))
+		if err != nil {
+			return nil, err
+		}
+		out, err = sjson.SetBytes(out, "tool_choice", grokFreeCacheDisabledToolChoice)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// The pre-sanitization source decides whether this was a genuinely tool-free
+	// request. Mixed-tool routing, however, must inspect the lowered and schema-
+	// sanitized provider body so private custom/namespace declarations cannot
+	// hide the effective function inventory.
+	return applyGrokFreeRequestToolCacheRouteAvailable(c, out, body, account, true)
 }
 
 func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) string {
@@ -215,6 +296,10 @@ func applyGrokFreeMessagesFunctionToolCacheRoute(body, intentSourceBody []byte, 
 // sub2api header is consumed locally because buildGrokResponsesRequest only
 // forwards the explicitly supported OpenAI-Beta header from downstream.
 func applyGrokFreeRequestToolCacheRoute(c *gin.Context, body, intentSourceBody []byte, account *Account, cacheIdentity string) ([]byte, error) {
+	return applyGrokFreeRequestToolCacheRouteAvailable(c, body, intentSourceBody, account, strings.TrimSpace(cacheIdentity) != "")
+}
+
+func applyGrokFreeRequestToolCacheRouteAvailable(c *gin.Context, body, intentSourceBody []byte, account *Account, identityAvailable bool) ([]byte, error) {
 	allowPureClientTools, accountPolicyExplicit := grokClientToolCacheAccountPolicy(account)
 	requestOptOut := false
 	if c != nil {
@@ -234,7 +319,7 @@ func applyGrokFreeRequestToolCacheRoute(c *gin.Context, body, intentSourceBody [
 	// opt-in may override an account opt-out, while an explicit request opt-out
 	// always wins. The legacy Claude fingerprint remains only as a compatibility
 	// fallback when no account policy has been recorded (#4486).
-	return applyGrokFreeToolCacheRoute(body, intentSourceBody, account, cacheIdentity, allowPureClientTools, allowPureClientTools)
+	return applyGrokFreeToolCacheRouteAvailable(body, intentSourceBody, account, identityAvailable, allowPureClientTools, allowPureClientTools)
 }
 
 // grokClientToolCacheAccountPolicy is intentionally strict for configured
@@ -288,7 +373,11 @@ func isGrokClaudeDesktopResponsesCacheRequest(c *gin.Context) bool {
 }
 
 func applyGrokFreeToolCacheRoute(body, intentSourceBody []byte, account *Account, cacheIdentity string, allowPureClientTools, allowFunctionSearch bool) ([]byte, error) {
-	if strings.TrimSpace(cacheIdentity) == "" || !isKnownGrokFreeAccount(account) {
+	return applyGrokFreeToolCacheRouteAvailable(body, intentSourceBody, account, strings.TrimSpace(cacheIdentity) != "", allowPureClientTools, allowFunctionSearch)
+}
+
+func applyGrokFreeToolCacheRouteAvailable(body, intentSourceBody []byte, account *Account, identityAvailable, allowPureClientTools, allowFunctionSearch bool) ([]byte, error) {
+	if !identityAvailable || !isKnownGrokFreeAccount(account) {
 		return body, nil
 	}
 	intentTools := gjson.GetBytes(intentSourceBody, "tools")

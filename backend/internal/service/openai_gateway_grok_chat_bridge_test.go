@@ -150,9 +150,9 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "unsupported_tool_type",
 		},
 		{
-			name:   "missing tool schema falls back",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
-			reason: "invalid_tool_function_parameters",
+			name: "missing tool schema is repaired by responses owner",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
+			want: true,
 		},
 		{
 			name:   "named tool choice falls back",
@@ -474,8 +474,10 @@ func TestForwardGrokChatViaResponsesTraeCompatibilityFieldsKeepCacheRoute(t *tes
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 	require.Equal(t, 12288, result.Usage.CacheReadInputTokens)
-	require.Equal(t, extendedTurnIdentity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.Equal(t, extendedTurnIdentity, upstream.lastReq.Header.Get(grokConversationIDHeader))
+	finalIdentity := independentlyExpectedGrokToolPrefixIdentity(t, 7161, "grok-4.6", stripGrokPromptCacheKey(upstream.lastBody))
+	require.NotEqual(t, extendedTurnIdentity, finalIdentity)
+	require.Equal(t, finalIdentity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.Equal(t, finalIdentity, upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Equal(t, "Return concise JSON", gjson.GetBytes(upstream.lastBody, "instructions").String())
 	require.Equal(t, "json_object", gjson.GetBytes(upstream.lastBody, "text.format.type").String())
 	require.Equal(t, "priority", gjson.GetBytes(upstream.lastBody, "service_tier").String())

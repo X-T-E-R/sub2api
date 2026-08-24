@@ -47,6 +47,10 @@ var grokChatResponsesBridgeTopLevelFields = map[string]struct{}{
 // Everything else stays on raw Chat Completions rather than being silently
 // dropped or rewritten.
 func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
+	return grokChatResponsesBridgeEligibilityWithCompat(body, true)
+}
+
+func grokChatResponsesBridgeEligibilityWithCompat(body []byte, protocolCompat bool) (bool, string) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil || root == nil {
 		return false, "invalid_json"
@@ -80,7 +84,7 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 		}
 	}
 	if raw, exists := root["tools"]; exists {
-		if ok, reason := grokChatFunctionDeclarationsBridgeable(raw); !ok {
+		if ok, reason := grokChatFunctionDeclarationsBridgeableWithCompat(raw, protocolCompat); !ok {
 			return false, reason
 		}
 	}
@@ -250,6 +254,10 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 }
 
 func grokChatFunctionDeclarationsBridgeable(raw json.RawMessage) (bool, string) {
+	return grokChatFunctionDeclarationsBridgeableWithCompat(raw, true)
+}
+
+func grokChatFunctionDeclarationsBridgeableWithCompat(raw json.RawMessage, protocolCompat bool) (bool, string) {
 	if strings.TrimSpace(string(raw)) == "null" {
 		return true, ""
 	}
@@ -297,8 +305,17 @@ func grokChatFunctionDeclarationsBridgeable(raw json.RawMessage) (bool, string) 
 				return false, "invalid_tool_function_description"
 			}
 		}
-		var parameters map[string]json.RawMessage
-		if rawParameters, exists := function["parameters"]; !exists || json.Unmarshal(rawParameters, &parameters) != nil || parameters == nil {
+		if rawParameters, exists := function["parameters"]; exists {
+			if !json.Valid(rawParameters) {
+				return false, "invalid_tool_function_parameters"
+			}
+			if !protocolCompat {
+				var parameters map[string]json.RawMessage
+				if json.Unmarshal(rawParameters, &parameters) != nil || parameters == nil {
+					return false, "invalid_tool_function_parameters"
+				}
+			}
+		} else if !protocolCompat {
 			return false, "invalid_tool_function_parameters"
 		}
 		if rawStrict, exists := function["strict"]; exists {
@@ -531,16 +548,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	clientStream := chatReq.Stream
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
-	cacheIdentity := resolveGrokCacheIdentity(c, body, promptCacheKey, upstreamModel)
+	cacheHint := captureGrokCacheSeedHint(c, body, promptCacheKey)
 	// Image inputs must go through the Responses bridge: the raw Chat
 	// Completions path cannot forward image_url parts to Grok's native vision
 	// for non-composer models, so they would be silently dropped. Route them to
 	// Responses even when no prompt-cache identity is available.
 	hasImageInput := openAIJSONValueMayContainImageInput(gjson.GetBytes(body, "messages"))
-	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) && (!hasImageInput || !grokChatResponsesBridgeModel(upstreamModel)) {
-		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
-	}
-
 	responsesReq, err := apicompat.ChatCompletionsToResponses(&chatReq)
 	if err != nil {
 		return nil, fmt.Errorf("convert grok chat completions to responses: %w", err)
@@ -567,17 +580,22 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("normalize grok responses bridge cache intent: %w", err)
 	}
-	responsesBody, err = patchGrokResponsesBody(responsesBody, upstreamModel)
+	responsesBody, err = patchGrokResponsesBodyBaseWithCompat(responsesBody, upstreamModel, grokResponsesProtocolCompatEnabled(account))
 	if err != nil {
 		return nil, fmt.Errorf("patch grok responses bridge request: %w", err)
 	}
-	responsesBody, err = applyGrokResponsesCacheIdentity(responsesBody, intentBody, cacheIdentity, true)
+	identityAvailable := canDeriveGrokCacheIdentity(c, responsesBody, cacheHint, upstreamModel)
+	responsesBody, err = augmentGrokResponsesCacheRoute(c, responsesBody, intentBody, account, identityAvailable)
+	if err != nil {
+		return nil, fmt.Errorf("augment grok responses bridge cache route: %w", err)
+	}
+	cacheIdentity := resolveGrokCacheIdentityFromFinal(c, responsesBody, cacheHint, upstreamModel)
+	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) && (!hasImageInput || !grokChatResponsesBridgeModel(upstreamModel)) {
+		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+	}
+	responsesBody, err = injectGrokCacheIdentity(responsesBody, cacheIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
-	}
-	responsesBody, err = applyGrokFreeRequestToolCacheRoute(c, responsesBody, intentBody, account, cacheIdentity)
-	if err != nil {
-		return nil, fmt.Errorf("apply grok responses bridge function-tool cache route: %w", err)
 	}
 
 	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)

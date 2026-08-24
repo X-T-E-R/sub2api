@@ -14,6 +14,10 @@ import (
 // shapes into the subset accepted by xAI's ModelInput decoder. Call IDs are
 // assigned in a separate pass so an output can safely appear before its call.
 func sanitizeGrokResponsesModelInput(body []byte) ([]byte, error) {
+	return sanitizeGrokResponsesModelInputWithCompat(body, true)
+}
+
+func sanitizeGrokResponsesModelInputWithCompat(body []byte, protocolCompat bool) ([]byte, error) {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || input.Type == gjson.String {
 		return body, nil
@@ -39,6 +43,7 @@ func sanitizeGrokResponsesModelInput(body []byte) ([]byte, error) {
 	callIDs, outputIDs := pairGrokReplayCallIDs(items)
 	filtered := make([]any, 0, len(items))
 	for index, rawItem := range items {
+		agentProjected := false
 		item, ok := rawItem.(map[string]any)
 		if !ok {
 			if text, ok := rawItem.(string); ok && strings.TrimSpace(text) != "" {
@@ -60,6 +65,13 @@ func sanitizeGrokResponsesModelInput(body []byte) ([]byte, error) {
 		}
 
 		switch itemType {
+		case "agent_message":
+			if protocolCompat {
+				item = projectGrokAgentMessage(item)
+				itemType = "message"
+				role = "user"
+				agentProjected = true
+			}
 		case "text", "input_text", "output_text":
 			text := strings.TrimSpace(grokStringValue(item["text"]))
 			if text == "" {
@@ -90,13 +102,15 @@ func sanitizeGrokResponsesModelInput(body []byte) ([]byte, error) {
 				role = "user"
 				item["role"] = role
 			}
-			content, keep := sanitizeGrokMessageContent(item["content"])
-			if !keep {
-				continue
+			if !agentProjected {
+				content, keep := sanitizeGrokMessageContent(item["content"])
+				if !keep {
+					continue
+				}
+				item["content"] = content
 			}
-			item["content"] = content
 			if role == "assistant" && !grokIsCompleteOutputMessage(item) {
-				if text, ok := collapseGrokAssistantOutputText(content); ok {
+				if text, ok := collapseGrokAssistantOutputText(item["content"]); ok {
 					item["content"] = text
 				}
 				delete(item, "id")
@@ -149,6 +163,78 @@ func sanitizeGrokResponsesModelInput(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("set Grok Responses model input: %w", err)
 	}
 	return updated, nil
+}
+
+const grokAgentMessageMetadataLabel = "[sub2api client-declared inter-agent metadata]"
+
+type grokAgentMessageMetadata struct {
+	Author       string   `json:"author"`
+	Recipient    string   `json:"recipient"`
+	ContentTypes []string `json:"content_types"`
+}
+
+func projectGrokAgentMessage(item map[string]any) map[string]any {
+	contentTypes, sourceTexts := grokAgentMessageSources(item["content"])
+	metadata, _ := json.Marshal(grokAgentMessageMetadata{
+		Author:       grokStringValue(item["author"]),
+		Recipient:    grokStringValue(item["recipient"]),
+		ContentTypes: contentTypes,
+	})
+	content := make([]any, 0, len(sourceTexts)+1)
+	content = append(content, map[string]any{
+		"type": "input_text",
+		"text": grokAgentMessageMetadataLabel + "\n" + string(metadata),
+	})
+	for _, text := range sourceTexts {
+		content = append(content, map[string]any{"type": "input_text", "text": text})
+	}
+	return map[string]any{"type": "message", "role": "user", "content": content}
+}
+
+func grokAgentMessageSources(content any) ([]string, []string) {
+	if text, ok := content.(string); ok {
+		return []string{"input_text"}, []string{text}
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return []string{"unknown"}, []string{grokCanonicalJSONText(content)}
+	}
+	types := make([]string, 0, len(parts))
+	texts := make([]string, 0, len(parts))
+	for _, rawPart := range parts {
+		part, isObject := rawPart.(map[string]any)
+		partType := "unknown"
+		if isObject {
+			if declared := grokStringValue(part["type"]); declared != "" {
+				partType = declared
+			}
+			switch partType {
+			case "input_text":
+				if text, ok := part["text"].(string); ok {
+					types = append(types, partType)
+					texts = append(texts, text)
+					continue
+				}
+			case "encrypted_content":
+				if text, ok := part["encrypted_content"].(string); ok {
+					types = append(types, partType)
+					texts = append(texts, text)
+					continue
+				}
+			}
+		}
+		types = append(types, partType)
+		texts = append(texts, grokCanonicalJSONText(rawPart))
+	}
+	return types, texts
+}
+
+func grokCanonicalJSONText(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "null"
+	}
+	return string(encoded)
 }
 
 func pairGrokReplayCallIDs(items []any) (map[int]string, map[int]string) {

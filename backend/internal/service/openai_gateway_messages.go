@@ -285,19 +285,21 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	responsesBody = updatedBody
 	grokCacheIdentity := ""
 	if account.Platform == PlatformGrok {
+		cacheHint := captureGrokCacheSeedHint(c, body, promptCacheKey)
 		grokIntentBody := responsesBody
-		grokCacheIdentity = resolveGrokCacheIdentity(c, grokIntentBody, promptCacheKey, upstreamModel)
-		patchedBody, patchErr := patchGrokResponsesBody(grokIntentBody, upstreamModel)
+		patchedBody, patchErr := patchGrokResponsesBodyBaseWithCompat(grokIntentBody, upstreamModel, grokResponsesProtocolCompatEnabled(account))
 		if patchErr != nil {
 			return nil, patchErr
 		}
-		responsesBody, patchErr = applyGrokResponsesCacheIdentity(patchedBody, grokIntentBody, grokCacheIdentity, account.IsGrokOAuth())
+		identityAvailable := canDeriveGrokCacheIdentity(c, patchedBody, cacheHint, upstreamModel)
+		responsesBody, patchErr = augmentGrokResponsesCacheRoute(c, patchedBody, grokIntentBody, account, identityAvailable)
+		if patchErr != nil {
+			return nil, fmt.Errorf("augment grok prompt cache route: %w", patchErr)
+		}
+		grokCacheIdentity = resolveGrokCacheIdentityFromFinal(c, responsesBody, cacheHint, upstreamModel)
+		responsesBody, patchErr = injectGrokCacheIdentity(responsesBody, grokCacheIdentity)
 		if patchErr != nil {
 			return nil, fmt.Errorf("apply grok prompt cache identity: %w", patchErr)
-		}
-		responsesBody, patchErr = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, grokIntentBody, account, grokCacheIdentity)
-		if patchErr != nil {
-			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", patchErr)
 		}
 	}
 

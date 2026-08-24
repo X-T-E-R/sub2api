@@ -56,7 +56,8 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	if isGrokImageGenerationModel(upstreamModel) {
 		return nil, fmt.Errorf("model %s is an image model and is not available on the Responses endpoint; use /v1/images/generations instead", upstreamModel)
 	}
-	patchedBody, clientToolMapping, err := patchGrokResponsesBodyWithClientTools(body, upstreamModel)
+	cacheHint := captureGrokCacheSeedHint(c, body, "")
+	patchedBody, clientToolMapping, err := patchGrokResponsesBodyWithClientToolsCompat(body, upstreamModel, grokResponsesProtocolCompatEnabled(account))
 	if err != nil {
 		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
@@ -74,19 +75,15 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 			return nil, err
 		}
 	}
-	// Derive the identity from the request xAI will actually see. This makes
-	// Codex Responses Lite additional_tools part of the stable tool prefix.
-	cacheIdentity := resolveGrokCacheIdentity(c, patchedBody, "", upstreamModel)
-	mixedCacheIntentBody := append([]byte(nil), patchedBody...)
-	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, body, cacheIdentity, account.IsGrokOAuth())
+	identityAvailable := canDeriveGrokCacheIdentity(c, patchedBody, cacheHint, upstreamModel)
+	patchedBody, err = augmentGrokResponsesCacheRoute(c, patchedBody, body, account, identityAvailable)
+	if err != nil {
+		return nil, fmt.Errorf("augment grok prompt cache route: %w", err)
+	}
+	cacheIdentity := resolveGrokCacheIdentityFromFinal(c, patchedBody, cacheHint, upstreamModel)
+	patchedBody, err = injectGrokCacheIdentity(patchedBody, cacheIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok prompt cache identity: %w", err)
-	}
-	// Free OAuth + client function tools: reuse Messages mixed-tools cache route
-	// (append web_search/x_search so xAI does not force non-cacheable build-free).
-	patchedBody, err = applyGrokFreeRequestToolCacheRoute(c, patchedBody, mixedCacheIntentBody, account, cacheIdentity)
-	if err != nil {
-		return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
 	}
 
 	token, _, err := s.getRequestCredential(ctx, c, account)
@@ -508,10 +505,14 @@ func trimGrokInvalidEncryptedContentRetryBody(body []byte) ([]byte, bool, error)
 }
 
 func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {
-	return patchGrokResponsesBodyBase(body, upstreamModel)
+	return patchGrokResponsesBodyBaseWithCompat(body, upstreamModel, true)
 }
 
 func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return patchGrokResponsesBodyWithClientToolsCompat(body, upstreamModel, true)
+}
+
+func patchGrokResponsesBodyWithClientToolsCompat(body []byte, upstreamModel string, protocolCompat bool) ([]byte, apicompat.ResponsesClientToolMapping, error) {
 	if !json.Valid(body) {
 		return nil, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("invalid json request body")
 	}
@@ -523,7 +524,7 @@ func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}
-	patched, err := patchGrokResponsesBodyBase(adapted, upstreamModel)
+	patched, err := patchGrokResponsesBodyBaseWithCompat(adapted, upstreamModel, protocolCompat)
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}
@@ -531,6 +532,10 @@ func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([
 }
 
 func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, error) {
+	return patchGrokResponsesBodyBaseWithCompat(body, upstreamModel, true)
+}
+
+func patchGrokResponsesBodyBaseWithCompat(body []byte, upstreamModel string, protocolCompat bool) ([]byte, error) {
 	if !json.Valid(body) {
 		return nil, fmt.Errorf("invalid json request body")
 	}
@@ -588,7 +593,7 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	out, err = sanitizeGrokResponsesModelInput(out)
+	out, err = sanitizeGrokResponsesModelInputWithCompat(out, protocolCompat)
 	if err != nil {
 		return nil, err
 	}
@@ -600,7 +605,7 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	out, err = sanitizeGrokResponsesTools(out)
+	out, err = sanitizeGrokResponsesToolsWithCompat(out, protocolCompat)
 	if err != nil {
 		return nil, err
 	}
@@ -1053,6 +1058,10 @@ var grokResponsesSupportedToolTypes = map[string]struct{}{
 }
 
 func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
+	return sanitizeGrokResponsesToolsWithCompat(body, true)
+}
+
+func sanitizeGrokResponsesToolsWithCompat(body []byte, protocolCompat bool) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() {
 		return deleteGrokOrphanToolControls(body)
@@ -1075,18 +1084,38 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		toolType := strings.TrimSpace(tool.Get("type").String())
 		if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
 			raw := json.RawMessage(tool.Raw)
-			if toolType == "function" && (!tool.Get("parameters").Exists() || tool.Get("parameters").Type == gjson.Null) {
+			if toolType == "function" {
 				var payload map[string]any
 				if err := decodeOpenAIJSONUseNumber(raw, &payload); err != nil {
 					return nil, err
 				}
-				payload["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
-				encoded, err := marshalOpenAIUpstreamJSON(payload)
-				if err != nil {
-					return nil, err
+				parameters, exists := payload["parameters"]
+				if !exists || parameters == nil {
+					payload["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+					toolsChanged = true
+				} else if protocolCompat {
+					encodedParameters, encodeErr := json.Marshal(parameters)
+					if encodeErr != nil {
+						return nil, encodeErr
+					}
+					normalized, disposition := normalizeGrokFunctionParameters(encodedParameters)
+					var normalizedValue any
+					if decodeErr := decodeOpenAIJSONUseNumber(normalized, &normalizedValue); decodeErr != nil {
+						return nil, decodeErr
+					}
+					payload["parameters"] = normalizedValue
+					if disposition != grokSchemaProvenObject {
+						payload["strict"] = false
+					}
+					toolsChanged = true
 				}
-				raw = encoded
-				toolsChanged = true
+				if toolsChanged {
+					encoded, encodeErr := marshalOpenAIUpstreamJSON(payload)
+					if encodeErr != nil {
+						return nil, encodeErr
+					}
+					raw = encoded
+				}
 			}
 			filteredTools = append(filteredTools, raw)
 		}

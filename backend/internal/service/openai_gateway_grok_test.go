@@ -2796,6 +2796,7 @@ func TestForwardAsAnthropicForGrokFunctionToolUsesCacheCapableMixedRoute(t *test
 	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
 	require.NotEmpty(t, identity)
 	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
+	require.Equal(t, independentlyExpectedGrokToolPrefixIdentity(t, 5403, "grok-4.6", stripGrokPromptCacheKey(upstream.lastBody)), identity)
 	tools := gjson.GetBytes(upstream.lastBody, "tools").Array()
 	require.Len(t, tools, 3)
 	require.Equal(t, "function", tools[0].Get("type").String())
