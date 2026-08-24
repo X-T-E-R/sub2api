@@ -1,0 +1,112 @@
+name: Publish Grok protocol-compat image
+
+on:
+  push:
+    tags:
+      - "xter-image-grok-protocol-compat-38a6a620a"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SOURCE_COMMIT: 38a6a620a6993e084eaf5195ca28e6dcc1ba7215
+  VERSION: grok-protocol-compat-38a6a620a
+  WORKFLOW_FILE: .github/workflows/publish-grok-protocol-compat-image.yml
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged workflow commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify immutable source boundary
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_ref="refs/tags/xter-image-grok-protocol-compat-38a6a620a"
+          if [[ "${GITHUB_REF}" != "${expected_ref}" ]]; then
+            echo "Unexpected ref: ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "${head_commit}" != "${GITHUB_SHA}" ]]; then
+            echo "Checked-out commit does not match the triggering commit." >&2
+            exit 1
+          fi
+
+          read -r -a lineage <<< "$(git rev-list --parents -n 1 HEAD)"
+          if (( ${#lineage[@]} != 2 )); then
+            echo "Workflow commit must have exactly one parent." >&2
+            exit 1
+          fi
+
+          parent_commit="${lineage[1]}"
+          if [[ "${parent_commit}" != "${SOURCE_COMMIT}" ]]; then
+            echo "Workflow parent is not the approved source commit." >&2
+            exit 1
+          fi
+
+          mapfile -t changed_files < <(
+            git diff --no-renames --name-only "${parent_commit}" HEAD --
+          )
+          if (( ${#changed_files[@]} != 1 )) || [[ "${changed_files[0]}" != "${WORKFLOW_FILE}" ]]; then
+            echo "Workflow commit must change only ${WORKFLOW_FILE}." >&2
+            printf 'Changed path: %s\n' "${changed_files[@]}" >&2
+            exit 1
+          fi
+
+          echo "source_commit=${parent_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/x-t-e-r/sub2api:grok-protocol-compat-38a6a620a
+            ghcr.io/x-t-e-r/sub2api:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/x-t-e-r/sub2api
+            org.opencontainers.image.revision=${{ steps.verify.outputs.source_commit }}
+            org.opencontainers.image.title=Sub2API Grok protocol compatibility
+            org.opencontainers.image.description=Sub2API image with Codex agent-message and permissive Grok tool-schema compatibility
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ steps.verify.outputs.source_commit }}
+          cache-from: type=gha,scope=grok-protocol-compat-38a6a620a
+          cache-to: type=gha,mode=max,scope=grok-protocol-compat-38a6a620a
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo '### Published images'
+            echo '```text'
+            echo 'ghcr.io/x-t-e-r/sub2api:grok-protocol-compat-38a6a620a'
+            echo 'ghcr.io/x-t-e-r/sub2api:latest'
+            echo '```'
+            echo 'Digest: `${{ steps.build.outputs.digest }}`'
+          } >> "${GITHUB_STEP_SUMMARY}"
