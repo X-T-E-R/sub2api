@@ -56,7 +56,13 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		return nil, fmt.Errorf("model %s is an image model and is not available on the Responses endpoint; use /v1/images/generations instead", upstreamModel)
 	}
 	cacheHint := captureGrokCacheSeedHint(c, body, "")
-	patchedBody, clientToolMapping, err := patchGrokResponsesBodyWithClientToolsCompat(body, upstreamModel, grokResponsesProtocolCompatEnabled(account))
+	protocolCompat := grokResponsesProtocolCompatEnabled(account)
+	patchedBody, clientToolMapping, err := patchGrokResponsesBodyWithClientToolsOptions(
+		body,
+		upstreamModel,
+		protocolCompat,
+		grokViewImageReadFileBridgeEnabled(account),
+	)
 	if err != nil {
 		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
@@ -512,6 +518,15 @@ func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([
 }
 
 func patchGrokResponsesBodyWithClientToolsCompat(body []byte, upstreamModel string, protocolCompat bool) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return patchGrokResponsesBodyWithClientToolsOptions(body, upstreamModel, protocolCompat, protocolCompat)
+}
+
+func patchGrokResponsesBodyWithClientToolsOptions(
+	body []byte,
+	upstreamModel string,
+	protocolCompat bool,
+	viewImageBridge bool,
+) ([]byte, apicompat.ResponsesClientToolMapping, error) {
 	if !json.Valid(body) {
 		return nil, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("invalid json request body")
 	}
@@ -523,11 +538,16 @@ func patchGrokResponsesBodyWithClientToolsCompat(body []byte, upstreamModel stri
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}
+	aliasCandidate := protocolCompat && viewImageBridge && grokViewImageReadFileAliasCandidate(adapted, mapping)
 	patched, err := patchGrokResponsesBodyBaseWithCompat(adapted, upstreamModel, protocolCompat)
 	if err != nil {
 		return nil, apicompat.ResponsesClientToolMapping{}, err
 	}
-	return patched, mapping, nil
+	aliased, mapping, err := adaptGrokViewImageReadFileAlias(patched, mapping, aliasCandidate)
+	if err != nil {
+		return nil, apicompat.ResponsesClientToolMapping{}, err
+	}
+	return aliased, mapping, nil
 }
 
 func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, error) {

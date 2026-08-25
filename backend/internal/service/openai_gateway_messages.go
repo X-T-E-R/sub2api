@@ -288,13 +288,21 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 	responsesBody = updatedBody
 	grokCacheIdentity := ""
+	var grokClientToolMapping apicompat.ResponsesClientToolMapping
 	if account.Platform == PlatformGrok {
 		cacheHint := captureGrokCacheSeedHint(c, body, promptCacheKey)
 		grokIntentBody := responsesBody
-		patchedBody, patchErr := patchGrokResponsesBodyBaseWithCompat(grokIntentBody, upstreamModel, grokResponsesProtocolCompatEnabled(account))
+		protocolCompat := grokResponsesProtocolCompatEnabled(account)
+		patchedBody, mapping, patchErr := patchGrokResponsesBodyWithClientToolsOptions(
+			grokIntentBody,
+			upstreamModel,
+			protocolCompat,
+			grokViewImageReadFileBridgeEnabled(account),
+		)
 		if patchErr != nil {
 			return nil, patchErr
 		}
+		grokClientToolMapping = mapping
 		identityAvailable := canDeriveGrokCacheIdentity(c, patchedBody, cacheHint, upstreamModel)
 		responsesBody, patchErr = augmentGrokResponsesCacheRoute(c, patchedBody, grokIntentBody, account, identityAvailable)
 		if patchErr != nil {
@@ -462,6 +470,13 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 	if account.Platform == PlatformGrok && account.Type == AccountTypeOAuth && !account.IsShadow() {
 		s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
+	}
+	if hasGrokResponsesClientToolMapping(grokClientToolMapping) {
+		maxLineSize := defaultMaxLineSize
+		if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+			maxLineSize = s.cfg.Gateway.MaxLineSize
+		}
+		resp.Body = newGrokResponsesClientToolStreamBody(resp.Body, grokClientToolMapping, maxLineSize)
 	}
 
 	if account.UsesOpenAICodexProtocol() && promptCacheKey != "" {

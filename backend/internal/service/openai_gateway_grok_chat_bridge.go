@@ -580,7 +580,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("normalize grok responses bridge cache intent: %w", err)
 	}
-	responsesBody, err = patchGrokResponsesBodyBaseWithCompat(responsesBody, upstreamModel, grokResponsesProtocolCompatEnabled(account))
+	protocolCompat := grokResponsesProtocolCompatEnabled(account)
+	responsesBody, clientToolMapping, err := patchGrokResponsesBodyWithClientToolsOptions(
+		responsesBody,
+		upstreamModel,
+		protocolCompat,
+		grokViewImageReadFileBridgeEnabled(account),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("patch grok responses bridge request: %w", err)
 	}
@@ -667,6 +673,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 
 	s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
+	if hasGrokResponsesClientToolMapping(clientToolMapping) {
+		maxLineSize := defaultMaxLineSize
+		if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+			maxLineSize = s.cfg.Gateway.MaxLineSize
+		}
+		resp.Body = newGrokResponsesClientToolStreamBody(resp.Body, clientToolMapping, maxLineSize)
+	}
 
 	var result *OpenAIForwardResult
 	if clientStream {

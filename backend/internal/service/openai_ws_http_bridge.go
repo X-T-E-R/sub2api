@@ -168,13 +168,23 @@ func prepareGrokWSResponsesBody(
 	if !explicitToolsField && !explicitToolIntent && len(inheritedTools) > 0 && hasGrokResponsesToolIntent(body) {
 		intentSource = append(intentSource[:0], body...)
 	}
-	loweredTools, _ := openAIWSHTTPBridgeRawField(body, "tools")
-	if len(loweredTools) == 0 && len(inheritedTools) > 0 {
-		loweredTools, _ = json.Marshal(inheritedTools)
-	}
+	aliasCandidate := protocolCompat && grokViewImageReadFileBridgeEnabled(account) &&
+		grokViewImageReadFileAliasCandidate(body, mapping)
 	body, err = patchGrokResponsesBodyBaseWithCompat(body, upstreamModel, protocolCompat)
 	if err != nil {
 		return grokWSPreparedBody{}, err
+	}
+	body, mapping, err = adaptGrokViewImageReadFileAlias(
+		body,
+		mapping,
+		aliasCandidate,
+	)
+	if err != nil {
+		return grokWSPreparedBody{}, err
+	}
+	loweredTools, _ := openAIWSHTTPBridgeRawField(body, "tools")
+	if len(loweredTools) == 0 && len(inheritedTools) > 0 {
+		loweredTools, _ = json.Marshal(inheritedTools)
 	}
 	return grokWSPreparedBody{
 		Body:              body,

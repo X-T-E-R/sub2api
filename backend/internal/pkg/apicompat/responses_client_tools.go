@@ -11,9 +11,91 @@ import (
 // native Responses request is sent to an upstream that only understands
 // function tools.
 type ResponsesClientToolMapping struct {
-	CustomTools    map[string]bool
-	ToolSearch     bool
-	NamespaceTools map[string]ResponsesNamespaceName
+	CustomTools     map[string]bool
+	ToolSearch      bool
+	NamespaceTools  map[string]ResponsesNamespaceName
+	FunctionAliases map[string]ResponsesFunctionToolAlias
+}
+
+// ResponsesFunctionToolAlias records one request-scoped ordinary-function
+// rename. The map in ResponsesClientToolMapping is keyed by ProviderName so a
+// legitimate provider call is restored only when this request installed the
+// alias.
+type ResponsesFunctionToolAlias struct {
+	ClientName           string
+	ProviderName         string
+	ClientArgumentName   string
+	ProviderArgumentName string
+	OriginalDeclaration  map[string]any
+}
+
+// AdaptResponsesFunctionToolAlias replaces one unique ordinary client
+// function with a provider-facing declaration and rewrites matching history
+// and an explicit function choice. Collisions fail open: req and mapping are
+// left unchanged.
+func AdaptResponsesFunctionToolAlias(
+	req map[string]any,
+	mapping *ResponsesClientToolMapping,
+	clientName string,
+	providerDeclaration map[string]any,
+	clientArgumentName string,
+	providerArgumentName string,
+) bool {
+	if req == nil || mapping == nil {
+		return false
+	}
+	clientName = strings.TrimSpace(clientName)
+	providerName := strings.TrimSpace(stringValue(providerDeclaration["name"]))
+	if clientName == "" || providerName == "" || clientName == providerName ||
+		strings.TrimSpace(stringValue(providerDeclaration["type"])) != "function" {
+		return false
+	}
+	tools, ok := req["tools"].([]any)
+	if !ok || len(tools) == 0 || mapping.CustomTools[clientName] || mapping.NamespaceTools[clientName].Namespace != "" {
+		return false
+	}
+
+	clientIndex := -1
+	var original map[string]any
+	for index, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(stringValue(tool["name"]))
+		if name == providerName {
+			return false
+		}
+		if name != clientName {
+			continue
+		}
+		if strings.TrimSpace(stringValue(tool["type"])) != "function" || clientIndex >= 0 {
+			return false
+		}
+		clientIndex = index
+		original = copyClientTool(tool)
+	}
+	if clientIndex < 0 {
+		return false
+	}
+
+	alias := ResponsesFunctionToolAlias{
+		ClientName:           clientName,
+		ProviderName:         providerName,
+		ClientArgumentName:   strings.TrimSpace(clientArgumentName),
+		ProviderArgumentName: strings.TrimSpace(providerArgumentName),
+		OriginalDeclaration:  original,
+	}
+	lowered := append([]any(nil), tools...)
+	lowered[clientIndex] = copyClientTool(providerDeclaration)
+	req["tools"] = lowered
+	if mapping.FunctionAliases == nil {
+		mapping.FunctionAliases = make(map[string]ResponsesFunctionToolAlias)
+	}
+	mapping.FunctionAliases[providerName] = alias
+	rewriteFunctionAliasHistory(req["input"], alias)
+	rewriteFunctionAliasChoice(req, alias)
+	return true
 }
 
 // AdaptResponsesClientTools lowers Codex client-only tools in req to
@@ -180,12 +262,13 @@ func AdaptResponsesClientToolsWithInheritedMapping(
 	if _, toolsPresent := req["tools"]; toolsPresent {
 		return AdaptResponsesClientTools(req)
 	}
-	if len(inherited.CustomTools) == 0 && !inherited.ToolSearch && len(inherited.NamespaceTools) == 0 {
+	if len(inherited.CustomTools) == 0 && !inherited.ToolSearch && len(inherited.NamespaceTools) == 0 && len(inherited.FunctionAliases) == 0 {
 		return ResponsesClientToolMapping{}, false, nil
 	}
 	if len(inheritedLoweredTools) > 0 && len(inheritedLoweredTools[0]) > 0 {
 		req["tools"] = restoreInheritedResponsesClientToolDeclarations(inheritedLoweredTools[0], inherited)
-		return AdaptResponsesClientTools(req)
+		mapping, _, err := AdaptResponsesClientTools(req)
+		return mapping, true, err
 	}
 
 	changed, err := rewriteClientToolHistory(req["input"], &inherited)
@@ -204,6 +287,14 @@ func AdaptResponsesClientToolsWithInheritedMapping(
 	}
 	if rewriteClientToolChoice(req, &inherited) {
 		changed = true
+	}
+	for _, alias := range inherited.FunctionAliases {
+		if rewriteFunctionAliasHistory(req["input"], alias) {
+			changed = true
+		}
+		if rewriteFunctionAliasChoice(req, alias) {
+			changed = true
+		}
 	}
 	return inherited, changed, nil
 }
@@ -278,6 +369,74 @@ func rewriteClientToolHistory(value any, adapter *ResponsesClientToolMapping) (b
 		return false, err
 	}
 	return changed, nil
+}
+
+func rewriteFunctionAliasHistory(value any, alias ResponsesFunctionToolAlias) bool {
+	changed := false
+	var visit func(any)
+	visit = func(value any) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				visit(item)
+			}
+		case map[string]any:
+			if strings.TrimSpace(stringValue(typed["type"])) == "function_call" &&
+				strings.TrimSpace(stringValue(typed["name"])) == alias.ClientName {
+				typed["name"] = alias.ProviderName
+				if raw, exists := typed["arguments"]; exists {
+					arguments := rawObjectString(raw)
+					if lowered, ok := rewriteFunctionAliasArguments(arguments, alias.ClientArgumentName, alias.ProviderArgumentName); ok {
+						typed["arguments"] = lowered
+					}
+				}
+				changed = true
+			}
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	return changed
+}
+
+func rewriteFunctionAliasChoice(req map[string]any, alias ResponsesFunctionToolAlias) bool {
+	choice, ok := req["tool_choice"].(map[string]any)
+	if !ok || strings.TrimSpace(stringValue(choice["type"])) != "function" {
+		return false
+	}
+	name := strings.TrimSpace(stringValue(choice["name"]))
+	if name == "" {
+		if nested, ok := choice["function"].(map[string]any); ok {
+			name = strings.TrimSpace(stringValue(nested["name"]))
+		}
+	}
+	if name != alias.ClientName {
+		return false
+	}
+	choice["name"] = alias.ProviderName
+	delete(choice, "function")
+	return true
+}
+
+func rewriteFunctionAliasArguments(raw, fromName, toName string) (string, bool) {
+	if strings.TrimSpace(fromName) == "" || strings.TrimSpace(toName) == "" {
+		return raw, false
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(raw), &arguments); err != nil || arguments == nil {
+		return raw, false
+	}
+	value, ok := arguments[fromName].(string)
+	if !ok {
+		return raw, false
+	}
+	encoded, err := json.Marshal(map[string]string{toName: value})
+	if err != nil {
+		return raw, false
+	}
+	return string(encoded), true
 }
 
 // dropInvalidLoweredFunctionItemID removes Codex client-only item IDs such as
@@ -430,7 +589,16 @@ func restoreClientToolValue(value any, adapter *ResponsesClientToolMapping) bool
 	case map[string]any:
 		if strings.TrimSpace(stringValue(typed["type"])) == "function_call" {
 			name := strings.TrimSpace(stringValue(typed["name"]))
-			if adapter.CustomTools[name] {
+			if alias, ok := adapter.FunctionAliases[name]; ok {
+				typed["name"] = alias.ClientName
+				if raw, exists := typed["arguments"]; exists {
+					arguments := rawObjectString(raw)
+					if restored, valid := rewriteFunctionAliasArguments(arguments, alias.ProviderArgumentName, alias.ClientArgumentName); valid {
+						typed["arguments"] = restored
+					}
+				}
+				changed = true
+			} else if adapter.CustomTools[name] {
 				typed["type"] = "custom_tool_call"
 				typed["input"] = extractCustomToolCallInput(rawObjectString(typed["arguments"]))
 				delete(typed, "arguments")
@@ -466,10 +634,22 @@ type ResponsesClientToolStreamRestorer struct {
 type responsesClientToolStreamCall struct {
 	kind      string
 	name      string
+	alias     ResponsesFunctionToolAlias
 	callID    string
 	itemID    string
 	outputIdx int
 	arguments strings.Builder
+}
+
+func (c *responsesClientToolStreamCall) restoredAliasArguments() string {
+	if c == nil {
+		return ""
+	}
+	raw := c.arguments.String()
+	if restored, ok := rewriteFunctionAliasArguments(raw, c.alias.ProviderArgumentName, c.alias.ClientArgumentName); ok {
+		return restored
+	}
+	return raw
 }
 
 func NewResponsesClientToolStreamRestorer(mapping ResponsesClientToolMapping) *ResponsesClientToolStreamRestorer {
@@ -497,16 +677,20 @@ func (r *ResponsesClientToolStreamRestorer) Restore(event ResponsesStreamEvent) 
 	switch event.Type {
 	case "response.output_item.added":
 		if call := r.recordItem(event); call != nil {
-			if call.kind == "custom" {
+			switch call.kind {
+			case "custom":
 				event.Item.Type = "custom_tool_call"
 				event.Item.Input = ""
 				event.Item.Arguments = ""
 				event.Item.Namespace = ""
-			} else {
+			case "tool_search":
 				event.Item.Type = "tool_search_call"
 				event.Item.Name = ""
 				event.Item.Arguments = "{}"
 				event.Item.Namespace = ""
+			case "alias":
+				event.Item.Name = call.alias.ClientName
+				event.Item.Arguments = ""
 			}
 		}
 		emit(r.restoreNamespaceEvent(event))
@@ -522,24 +706,34 @@ func (r *ResponsesClientToolStreamRestorer) Restore(event ResponsesStreamEvent) 
 				call.arguments.Reset()
 				_, _ = call.arguments.WriteString(event.Arguments)
 			}
-			if call.kind == "custom" {
+			switch call.kind {
+			case "custom":
 				input := extractCustomToolCallInput(call.arguments.String())
 				if input != "" {
 					emit(ResponsesStreamEvent{Type: "response.custom_tool_call_input.delta", OutputIndex: call.outputIdx, ItemID: call.itemID, Delta: input})
 				}
 				emit(ResponsesStreamEvent{Type: "response.custom_tool_call_input.done", OutputIndex: call.outputIdx, ItemID: call.itemID, CallID: call.callID, Name: call.name, Input: input})
+			case "alias":
+				arguments := call.restoredAliasArguments()
+				if arguments != "" {
+					emit(ResponsesStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: call.outputIdx, ItemID: call.itemID, Delta: arguments})
+				}
+				event.Name = call.alias.ClientName
+				event.Arguments = arguments
+				emit(event)
 			}
 			return out
 		}
 		emit(r.restoreNamespaceEvent(event))
 	case "response.output_item.done":
 		if call := r.recordItem(event); call != nil {
-			if call.kind == "custom" {
+			switch call.kind {
+			case "custom":
 				event.Item.Type = "custom_tool_call"
 				event.Item.Input = extractCustomToolCallInput(call.arguments.String())
 				event.Item.Arguments = ""
 				event.Item.Namespace = ""
-			} else {
+			case "tool_search":
 				event.Item.Type = "tool_search_call"
 				event.Item.Name = ""
 				event.Item.Arguments = call.arguments.String()
@@ -547,6 +741,9 @@ func (r *ResponsesClientToolStreamRestorer) Restore(event ResponsesStreamEvent) 
 					event.Item.Arguments = "{}"
 				}
 				event.Item.Namespace = ""
+			case "alias":
+				event.Item.Name = call.alias.ClientName
+				event.Item.Arguments = call.restoredAliasArguments()
 			}
 			delete(r.calls, call.itemID)
 			delete(r.calls, call.callID)
@@ -642,7 +839,11 @@ func (r *ResponsesClientToolStreamRestorer) clientToolEventPayload(payload []byt
 			return false
 		}
 		_, namespaceTool := r.adapter.NamespaceTools[raw.Item.Name]
-		return r.adapter.CustomTools[raw.Item.Name] || (r.adapter.ToolSearch && raw.Item.Name == toolSearchProxyName) || namespaceTool || r.calls[raw.Item.ID] != nil || r.calls[raw.Item.CallID] != nil
+		_, functionAlias := r.adapter.FunctionAliases[raw.Item.Name]
+		return r.adapter.CustomTools[raw.Item.Name] || (r.adapter.ToolSearch && raw.Item.Name == toolSearchProxyName) || namespaceTool || functionAlias || r.calls[raw.Item.ID] != nil || r.calls[raw.Item.CallID] != nil
+	}
+	if _, functionAlias := r.adapter.FunctionAliases[raw.Name]; functionAlias {
+		return true
 	}
 	if _, namespaceTool := r.adapter.NamespaceTools[raw.Name]; namespaceTool {
 		return true
@@ -690,10 +891,14 @@ func (r *ResponsesClientToolStreamRestorer) recordItem(event ResponsesStreamEven
 	}
 	name := event.Item.Name
 	kind := ""
+	alias := ResponsesFunctionToolAlias{}
 	if r.adapter.CustomTools[name] {
 		kind = "custom"
 	} else if r.adapter.ToolSearch && name == toolSearchProxyName {
 		kind = "tool_search"
+	} else if mapped, ok := r.adapter.FunctionAliases[name]; ok {
+		kind = "alias"
+		alias = mapped
 	}
 	if kind == "" {
 		return nil
@@ -704,7 +909,7 @@ func (r *ResponsesClientToolStreamRestorer) recordItem(event ResponsesStreamEven
 	}
 	call := r.calls[key]
 	if call == nil {
-		call = &responsesClientToolStreamCall{kind: kind, name: name, callID: event.Item.CallID, itemID: event.Item.ID, outputIdx: event.OutputIndex}
+		call = &responsesClientToolStreamCall{kind: kind, name: name, alias: alias, callID: event.Item.CallID, itemID: event.Item.ID, outputIdx: event.OutputIndex}
 		r.calls[key] = call
 		if call.callID != "" {
 			r.calls[call.callID] = call
@@ -765,6 +970,11 @@ func restoreResponsesOutputClientTools(outputs []ResponsesOutput, adapter *Respo
 			output.Type = "tool_search_call"
 			output.Name = ""
 			output.Namespace = ""
+		} else if alias, ok := adapter.FunctionAliases[output.Name]; ok {
+			output.Name = alias.ClientName
+			if restored, valid := rewriteFunctionAliasArguments(output.Arguments, alias.ProviderArgumentName, alias.ClientArgumentName); valid {
+				output.Arguments = restored
+			}
 		}
 		if name, ok := adapter.NamespaceTools[output.Name]; ok && output.Type == "function_call" {
 			output.Name, output.Namespace = name.Name, name.Namespace

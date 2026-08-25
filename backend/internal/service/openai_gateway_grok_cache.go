@@ -21,6 +21,7 @@ const (
 	grokFreeCacheDisabledToolChoice     = "none"
 	grokClientToolCacheOptInExtraKey    = "grok_client_tool_cache_enabled"
 	grokResponsesProtocolCompatExtraKey = "grok_responses_protocol_compat_v1"
+	grokViewImageReadFileBridgeExtraKey = "grok_view_image_read_file_bridge_v1"
 )
 
 type grokCacheSeedHint struct {
@@ -32,6 +33,21 @@ func grokResponsesProtocolCompatEnabled(account *Account) bool {
 		return true
 	}
 	value, exists := account.Extra[grokResponsesProtocolCompatExtraKey]
+	if !exists {
+		return true
+	}
+	enabled, valid := value.(bool)
+	return !valid || enabled
+}
+
+func grokViewImageReadFileBridgeEnabled(account *Account) bool {
+	if !grokResponsesProtocolCompatEnabled(account) {
+		return false
+	}
+	if account == nil || account.Extra == nil {
+		return true
+	}
+	value, exists := account.Extra[grokViewImageReadFileBridgeExtraKey]
 	if !exists {
 		return true
 	}

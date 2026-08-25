@@ -201,6 +201,15 @@ func restoreInheritedResponsesClientToolDeclarations(lowered []any, mapping Resp
 		}
 		name := strings.TrimSpace(stringValue(tool["name"]))
 		switch {
+		case mapping.FunctionAliases[name].ClientName != "":
+			alias := mapping.FunctionAliases[name]
+			if alias.OriginalDeclaration != nil {
+				restored = append(restored, copyClientTool(alias.OriginalDeclaration))
+			} else {
+				copy := copyClientTool(tool)
+				copy["name"] = alias.ClientName
+				restored = append(restored, copy)
+			}
 		case mapping.ToolSearch && name == toolSearchProxyName:
 			restored = append(restored, map[string]any{"type": "tool_search"})
 		case mapping.CustomTools[name]:
