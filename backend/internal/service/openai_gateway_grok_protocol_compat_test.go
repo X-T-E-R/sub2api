@@ -25,6 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type grokCompatibilityStaticFixtures struct {
@@ -527,11 +528,17 @@ func TestForwardGrokResponsesProtocolCompatibilityHTTPAuthParity(t *testing.T) {
 			require.Equal(t, "known parsed message", gjson.GetBytes(upstream.lastBody, "input.0.content.1.text").String())
 			require.Equal(t, "object", gjson.GetBytes(upstream.lastBody, "tools.0.parameters.type").String())
 			require.False(t, gjson.GetBytes(upstream.lastBody, "tools.0.strict").Bool())
-			patched, _, err := patchGrokResponsesBodyWithClientTools(body, "grok-4.5")
+
+			// Recompute from the exact provider body after compatibility and route
+			// augmentation, excluding only the gateway-owned cache key itself. The
+			// model in these bytes is authoritative: the upstream alias catalog now
+			// canonicalizes the client alias "grok" to grok-4.6 rather than the old
+			// grok-4.5 test fixture.
+			providerBody, err := sjson.DeleteBytes(upstream.lastBody, "prompt_cache_key")
 			require.NoError(t, err)
-			normalized, _, err := normalizeGrokResponsesProtocolCompatibility(patched)
-			require.NoError(t, err)
-			wantIdentity := resolveGrokCacheIdentity(c, normalized, "", "grok-4.5")
+			upstreamModel := strings.TrimSpace(gjson.GetBytes(providerBody, "model").String())
+			require.Equal(t, xai.ResolveGrokTextResponsesModelID(account.GetMappedModel("grok"), grokDefaultResponsesModel), upstreamModel)
+			wantIdentity := resolveGrokCacheIdentity(c, providerBody, "", upstreamModel)
 			require.NotEmpty(t, wantIdentity)
 			require.Equal(t, wantIdentity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 			require.Equal(t, wantIdentity, upstream.lastReq.Header.Get(grokConversationIDHeader))
