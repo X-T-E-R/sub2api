@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -2868,7 +2869,10 @@ func TestHandleGrokAccountUpstreamError5xxRespectsPoolMode(t *testing.T) {
 			},
 		}
 		repo := &grokQuotaAccountRepo{}
-		svc := &OpenAIGatewayService{accountRepo: repo}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
 
 		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusBadGateway, nil, nil)
 
@@ -2881,7 +2885,10 @@ func TestHandleGrokAccountUpstreamError5xxRespectsPoolMode(t *testing.T) {
 	t.Run("non-pool mode keeps two minute cooldown", func(t *testing.T) {
 		account := &Account{ID: 612, Platform: PlatformGrok, Type: AccountTypeAPIKey}
 		repo := &grokQuotaAccountRepo{}
-		svc := &OpenAIGatewayService{accountRepo: repo}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
 		before := time.Now()
 
 		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusBadGateway, nil, nil)
@@ -2892,6 +2899,149 @@ func TestHandleGrokAccountUpstreamError5xxRespectsPoolMode(t *testing.T) {
 		require.Equal(t, "grok upstream temporary error", repo.lastTempUnschedReason)
 		require.WithinDuration(t, before.Add(2*time.Minute), repo.lastTempUnschedUntil, time.Second)
 	})
+}
+
+func TestHandleGrokAccountUpstreamErrorOAuth5xxCooldownPolicy(t *testing.T) {
+	t.Run("custom cooldown", func(t *testing.T) {
+		account := &Account{ID: 620, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+		before := time.Now()
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusServiceUnavailable, nil, nil)
+
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(17*time.Second), repo.lastTempUnschedUntil, time.Second)
+		require.Equal(t, "grok upstream temporary error", repo.lastTempUnschedReason)
+	})
+
+	t.Run("disabled leaves scheduling state unchanged", func(t *testing.T) {
+		account := &Account{ID: 621, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 30
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusInternalServerError, nil, nil)
+
+		require.Zero(t, repo.tempUnschedCalls)
+		require.Nil(t, account.TempUnschedulableUntil)
+		require.True(t, svc.shouldFailoverGrokUpstreamError(http.StatusInternalServerError, nil))
+	})
+
+	t.Run("body classification keeps dedicated cooldown", func(t *testing.T) {
+		account := &Account{ID: 622, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+		before := time.Now()
+
+		svc.handleGrokAccountUpstreamError(
+			context.Background(), account, http.StatusBadGateway, nil,
+			[]byte(`empty model output: no content/tool_calls`),
+		)
+
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(4*time.Minute), repo.lastTempUnschedUntil, time.Second)
+	})
+
+	t.Run("bare 529 keeps existing cooldown", func(t *testing.T) {
+		account := &Account{ID: 623, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+		before := time.Now()
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, 529, nil, nil)
+
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(2*time.Minute), repo.lastTempUnschedUntil, time.Second)
+	})
+
+	t.Run("existing longer block wins", func(t *testing.T) {
+		existingUntil := time.Now().Add(10 * time.Minute)
+		account := &Account{
+			ID:                      624,
+			Platform:                PlatformGrok,
+			Type:                    AccountTypeOAuth,
+			TempUnschedulableUntil:  &existingUntil,
+			TempUnschedulableReason: "existing block",
+		}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg}
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusServiceUnavailable, nil, nil)
+
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.Equal(t, existingUntil, repo.lastTempUnschedUntil)
+	})
+}
+
+func TestProxyOpenAIWSHTTPBridgeTurnGrokHTTP200SSEErrorKeepsLegacyCooldown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+		seconds  int
+	}{
+		{name: "custom policy", seconds: 17},
+		{name: "disabled policy", disabled: true, seconds: 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type":   []string{"text/event-stream"},
+					"Xai-Request-Id": []string{"req-synthetic-sse-502"},
+				},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"error\",\"error\":{\"message\":\"temporary upstream failure\"}}\n\n",
+				)),
+			}}
+			repo := &grokQuotaAccountRepo{}
+			cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
+			cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = tc.disabled
+			cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = tc.seconds
+			svc := &OpenAIGatewayService{accountRepo: repo, cfg: cfg, httpUpstream: upstream}
+			account := &Account{
+				ID:          625,
+				Platform:    PlatformGrok,
+				Type:        AccountTypeOAuth,
+				Concurrency: 1,
+				Credentials: map[string]any{"base_url": xai.DefaultCLIBaseURL},
+			}
+			payload := []byte(`{"type":"response.create","model":"grok-4.5","stream":true,"input":"hello"}`)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			before := time.Now()
+
+			result, err := svc.proxyOpenAIWSHTTPBridgeTurn(
+				context.Background(), c, account, "access-token", payload, len(payload),
+				"grok-4.5", "", "", "", "", 1, func([]byte) error { return nil },
+			)
+
+			require.Nil(t, result)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+			require.Equal(t, 1, repo.tempUnschedCalls)
+			require.WithinDuration(t, before.Add(2*time.Minute), repo.lastTempUnschedUntil, time.Second)
+			require.NotContains(t, logs.String(), "grok_oauth_http_5xx_cooldown_decision")
+		})
+	}
 }
 
 func TestHandleGrokAccountUpstreamError429SetsRateLimitedFromRetryAfter(t *testing.T) {

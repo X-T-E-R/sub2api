@@ -3,11 +3,15 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,6 +77,49 @@ func TestClassifyGrokUpstreamFailure_FreeUsageWinsOver5xx(t *testing.T) {
 	d := classifyGrokUpstreamFailure(http.StatusBadGateway, []byte(`subscription:free-usage-exhausted for model grok-4.3`), "grok-4.3")
 	require.Equal(t, GrokFailureFreeUsage, d.Class)
 	require.NotEqual(t, GrokFailureServer, d.Class)
+}
+
+func TestResolveGrokOAuthHTTP5xxCooldownLogsDecision(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	cfg := &config.Config{}
+	cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+	cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 33
+	account := &Account{
+		ID:       9100,
+		Name:     "grok-oauth-test",
+		Platform: PlatformGrok,
+		Type:     AccountTypeOAuth,
+	}
+	failure := classifyGrokUpstreamFailure(http.StatusServiceUnavailable, nil, "")
+
+	cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+		cfg,
+		account,
+		http.StatusServiceUnavailable,
+		failure,
+		grokUpstreamFailureProvenanceHTTPResponse,
+		"gateway",
+		http.Header{"Xai-Request-Id": []string{"xai-request-123"}},
+	)
+
+	require.True(t, handled)
+	require.Zero(t, cooldown)
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event))
+	require.Equal(t, "grok_oauth_http_5xx_cooldown_decision", event["msg"])
+	require.Equal(t, "gateway", event["source"])
+	require.Equal(t, float64(account.ID), event["account_id"])
+	require.Equal(t, account.Name, event["account_name"])
+	require.Equal(t, account.Platform, event["account_platform"])
+	require.Equal(t, account.Type, event["account_type"])
+	require.Equal(t, float64(http.StatusServiceUnavailable), event["status_code"])
+	require.Equal(t, false, event["enabled"])
+	require.Equal(t, float64(33), event["cooldown_seconds"])
+	require.Equal(t, "xai-request-123", event["upstream_request_id"])
 }
 
 func TestShouldFailoverGrokUpstreamError_FreeUsageBody(t *testing.T) {

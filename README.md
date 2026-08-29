@@ -761,6 +761,12 @@ OAuth credential storage reuses the existing account JSON fields: `access_token`
 
 For API-key accounts, select **Grok → API Key** in the create-account dialog. The official base URL defaults to `https://api.x.ai/v1`; credentials use the existing `base_url` and `api_key` account fields. OAuth accounts continue to use the subscription flow above.
 
+### OAuth HTTP 5xx Cooldown
+
+Ordinary HTTP `500`–`599` responses from Grok OAuth upstreams temporarily remove the affected account from scheduling for 120 seconds by default while account failover continues. HTTP `529`, body-classified quota, billing, authentication, capacity, and rate-limit failures, plus transport errors such as EOF, keep their existing policies. Grok API-key accounts keep their existing two-minute non-pool cooldown, and pool-mode accounts keep their existing scheduling behavior.
+
+Set `gateway.grok.oauth_http_5xx_cooldown_seconds` in YAML or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS` in the environment to a value from 1 through 7200 seconds. Set `gateway.grok.oauth_http_5xx_cooldown_disabled: true` or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_DISABLED=true` to disable this OAuth cooldown; the seconds value must remain within range. These startup settings use environment-over-YAML precedence and require a Sub2API service restart. Disabling the cooldown does not clear an account state that was already recorded.
+
 ### Grok Build CLI Configuration
 
 1. In the Sub2API admin dashboard, add either a `grok` OAuth account and complete xAI authorization, or add a Grok API-key account.

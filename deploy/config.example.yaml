@@ -428,6 +428,13 @@ gateway:
     # Stats cache for free-tier soft gate. Hot path never waits on DB: misses
     # fail open and refresh in the background. Prefer >= 60s in production.
     free_quota_stats_cache_seconds: 60
+    # Ordinary HTTP 500-599 responses (except 529) from Grok OAuth upstreams
+    # temporarily remove the account from scheduling while failover continues.
+    # Body-classified quota, billing, auth, capacity, 429, and transport errors
+    # keep their dedicated policies. Changes require a service restart.
+    oauth_http_5xx_cooldown_disabled: false
+    # Valid range: 1-7200 seconds, including when the policy is disabled.
+    oauth_http_5xx_cooldown_seconds: 120
   # HTTP upstream connection pool settings (HTTP/2 + multi-proxy scenario defaults)
   # HTTP 上游连接池配置（HTTP/2 + 多代理场景默认值）
   # Max idle connections across all hosts

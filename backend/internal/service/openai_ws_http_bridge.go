@@ -563,7 +563,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 					shouldFailover = false
 				} else {
 					shouldFailover = s.shouldFailoverGrokUpstreamError(statusCode, upstreamMessage)
-					s.handleGrokAccountUpstreamError(ctx, account, statusCode, resp.Header, upstreamMessage)
+					s.handleGrokAccountUpstreamStreamError(ctx, account, statusCode, resp.Header, upstreamMessage)
 				}
 			} else if eventType == "error" && shouldFailover && !requestScopedCapacity {
 				accountStatus := statusCode

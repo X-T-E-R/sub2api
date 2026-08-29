@@ -397,6 +397,56 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	}
 }
 
+func TestLoadGrokOAuthHTTP5xxCooldownConfig(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.False(t, cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled)
+		require.Equal(t, DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds, cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds)
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		configFile := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  grok:\n    oauth_http_5xx_cooldown_disabled: true\n    oauth_http_5xx_cooldown_seconds: 45\n"), 0o600))
+		t.Setenv("CONFIG_FILE", configFile)
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.True(t, cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled)
+		require.Equal(t, 45, cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds)
+	})
+
+	t.Run("environment overrides yaml", func(t *testing.T) {
+		resetViperWithJWTSecret(t)
+		configFile := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(configFile, []byte("gateway:\n  grok:\n    oauth_http_5xx_cooldown_disabled: false\n    oauth_http_5xx_cooldown_seconds: 45\n"), 0o600))
+		t.Setenv("CONFIG_FILE", configFile)
+		t.Setenv("GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_DISABLED", "true")
+		t.Setenv("GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS", "300")
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		require.True(t, cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled)
+		require.Equal(t, 300, cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds)
+	})
+}
+
+func TestLoadRejectsInvalidGrokOAuthHTTP5xxCooldown(t *testing.T) {
+	for _, seconds := range []string{"0", "7201"} {
+		t.Run(seconds, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			t.Setenv("GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_DISABLED", "true")
+			t.Setenv("GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS", seconds)
+
+			_, err := Load()
+			require.ErrorContains(t, err, "gateway.grok.oauth_http_5xx_cooldown_seconds must be between 1 and 7200")
+		})
+	}
+}
+
 func TestLoadDefaultOpenAIFirstOutputTimeoutsDisabled(t *testing.T) {
 	resetViperWithJWTSecret(t)
 

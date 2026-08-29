@@ -1872,6 +1872,35 @@ func persistGrokTransientModelCooldown(account *Account, decision GrokUpstreamFa
 }
 
 func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte) {
+	s.handleGrokAccountUpstreamErrorWithProvenance(
+		ctx,
+		account,
+		statusCode,
+		headers,
+		responseBody,
+		grokUpstreamFailureProvenanceHTTPResponse,
+	)
+}
+
+func (s *OpenAIGatewayService) handleGrokAccountUpstreamStreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte) {
+	s.handleGrokAccountUpstreamErrorWithProvenance(
+		ctx,
+		account,
+		statusCode,
+		headers,
+		responseBody,
+		grokUpstreamFailureProvenanceStreamEvent,
+	)
+}
+
+func (s *OpenAIGatewayService) handleGrokAccountUpstreamErrorWithProvenance(
+	ctx context.Context,
+	account *Account,
+	statusCode int,
+	headers http.Header,
+	responseBody []byte,
+	provenance grokUpstreamFailureProvenance,
+) {
 	if s == nil || account == nil {
 		return
 	}
@@ -1904,6 +1933,13 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 					s.rateLimitGrok(ctx, account, resetAt)
 					return
 				}
+			}
+			if cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(s.cfg, account, statusCode, decision, provenance, "gateway", headers); handled {
+				if cooldown > 0 {
+					decision.Cooldown = cooldown
+					s.applyGrokUpstreamFailureDecision(ctx, account, decision)
+				}
+				return
 			}
 			if s.applyGrokUpstreamFailureDecision(ctx, account, decision) {
 				return

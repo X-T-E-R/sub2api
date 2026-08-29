@@ -1059,7 +1059,18 @@ type GatewayGrokConfig struct {
 	// FreeQuotaStatsCacheSeconds is the soft-gate stats cache TTL. Hot path never
 	// waits on usage_logs; misses fail open and refresh asynchronously.
 	FreeQuotaStatsCacheSeconds int `mapstructure:"free_quota_stats_cache_seconds"`
+	// OAuthHTTP5xxCooldownDisabled disables account cooldowns for ordinary HTTP
+	// 5xx responses from Grok OAuth upstreams. Failover remains enabled.
+	OAuthHTTP5xxCooldownDisabled bool `mapstructure:"oauth_http_5xx_cooldown_disabled"`
+	// OAuthHTTP5xxCooldownSeconds controls the ordinary HTTP 5xx account cooldown
+	// for Grok OAuth upstreams.
+	OAuthHTTP5xxCooldownSeconds int `mapstructure:"oauth_http_5xx_cooldown_seconds"`
+	// OAuthHTTP5xxCooldownSecondsExplicit distinguishes a configured zero (invalid)
+	// from zero-valued Config fixtures, which retain the default policy.
+	OAuthHTTP5xxCooldownSecondsExplicit bool `mapstructure:"-" yaml:"-"`
 }
+
+const DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds = 120
 
 // GatewayCNProvidersConfig 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）的余额检测配置。
 //
@@ -1805,6 +1816,10 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	cfg.OIDC.UserInfoUsernamePath = strings.TrimSpace(cfg.OIDC.UserInfoUsernamePath)
 	cfg.OIDC.UsePKCEExplicit = hasExplicitConfigOrEnv("oidc_connect.use_pkce", "OIDC_CONNECT_USE_PKCE")
 	cfg.OIDC.ValidateIDTokenExplicit = hasExplicitConfigOrEnv("oidc_connect.validate_id_token", "OIDC_CONNECT_VALIDATE_ID_TOKEN")
+	cfg.Gateway.Grok.OAuthHTTP5xxCooldownSecondsExplicit = hasExplicitConfigOrEnv(
+		"gateway.grok.oauth_http_5xx_cooldown_seconds",
+		"GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS",
+	)
 	cfg.Dashboard.KeyPrefix = strings.TrimSpace(cfg.Dashboard.KeyPrefix)
 	cfg.CORS.AllowedOrigins = normalizeStringSlice(cfg.CORS.AllowedOrigins)
 	cfg.Security.ResponseHeaders.AdditionalAllowed = normalizeStringSlice(cfg.Security.ResponseHeaders.AdditionalAllowed)
@@ -2371,6 +2386,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.grok.free_quota_soft_gate_percent", 95)
 	viper.SetDefault("gateway.grok.free_quota_window_hours", 24)
 	viper.SetDefault("gateway.grok.free_quota_stats_cache_seconds", 60)
+	viper.SetDefault("gateway.grok.oauth_http_5xx_cooldown_disabled", false)
+	viper.SetDefault("gateway.grok.oauth_http_5xx_cooldown_seconds", DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds)
 	// 国产供应商余额检测（kimi/deepseek payg；zhipu 无余额端点，仅靠响应式 429/402）。
 	viper.SetDefault("gateway.cn_providers.balance_check_enabled", true)
 	viper.SetDefault("gateway.cn_providers.balance_threshold", 0.5)
@@ -3597,6 +3614,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.Grok.FreeQuotaStatsCacheSeconds < 0 {
 		return fmt.Errorf("gateway.grok.free_quota_stats_cache_seconds must be non-negative")
+	}
+	if c.Gateway.Grok.OAuthHTTP5xxCooldownSeconds == 0 && !c.Gateway.Grok.OAuthHTTP5xxCooldownSecondsExplicit {
+		c.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds
+	}
+	if c.Gateway.Grok.OAuthHTTP5xxCooldownSeconds < 1 || c.Gateway.Grok.OAuthHTTP5xxCooldownSeconds > 7200 {
+		return fmt.Errorf("gateway.grok.oauth_http_5xx_cooldown_seconds must be between 1 and 7200")
 	}
 	if err := ValidateDingTalkConfig(c.DingTalk); err != nil {
 		return fmt.Errorf("dingtalk_connect: %w", err)

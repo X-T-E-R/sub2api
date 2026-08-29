@@ -1041,16 +1041,31 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	}
 	cooldown := time.Duration(0)
 	reason := ""
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		cooldown, reason = 10*time.Minute, "grok oauth token unauthorized"
-	case http.StatusPaymentRequired:
-		cooldown, reason = 30*time.Minute, "grok payment required"
-	case http.StatusForbidden:
-		cooldown, reason = 30*time.Minute, "grok entitlement or subscription tier denied"
-	default:
-		if resp.StatusCode >= 500 {
-			cooldown, reason = 2*time.Minute, "grok upstream temporary error"
+	if policyCooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+		s.cfg,
+		account,
+		resp.StatusCode,
+		decision,
+		grokUpstreamFailureProvenanceHTTPResponse,
+		"account_test",
+		resp.Header,
+	); handled {
+		if policyCooldown <= 0 {
+			return
+		}
+		cooldown, reason = policyCooldown, "grok upstream temporary error"
+	} else {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			cooldown, reason = 10*time.Minute, "grok oauth token unauthorized"
+		case http.StatusPaymentRequired:
+			cooldown, reason = 30*time.Minute, "grok payment required"
+		case http.StatusForbidden:
+			cooldown, reason = 30*time.Minute, "grok entitlement or subscription tier denied"
+		default:
+			if resp.StatusCode >= 500 {
+				cooldown, reason = 2*time.Minute, "grok upstream temporary error"
+			}
 		}
 	}
 	if decision.Class == GrokFailureBilling && cooldown == 0 {

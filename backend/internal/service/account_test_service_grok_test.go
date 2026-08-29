@@ -11,12 +11,14 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -80,6 +82,81 @@ func TestObserveGrokTestResponseKeepsEntitlement403Cooldown(t *testing.T) {
 	require.Equal(t, 1, repo.tempUnschedCalls)
 	require.Equal(t, "grok entitlement or subscription tier denied", repo.lastTempUnschedReason)
 	require.Greater(t, repo.lastTempUnschedUntil, before.Add(29*time.Minute))
+}
+
+func TestObserveGrokTestResponseUsesOAuthHTTP5xxCooldownPolicy(t *testing.T) {
+	t.Run("custom cooldown", func(t *testing.T) {
+		var logs bytes.Buffer
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(previous) })
+
+		account := &Account{ID: 1904, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
+		svc := &AccountTestService{accountRepo: repo, cfg: cfg}
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     http.Header{"X-Request-Id": []string{"req-account-test"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary upstream failure"}}`)),
+		}
+		before := time.Now()
+
+		svc.observeGrokTestResponse(context.Background(), account, resp)
+
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(25*time.Second), repo.lastTempUnschedUntil, time.Second)
+		require.Equal(t, "grok upstream temporary error", repo.lastTempUnschedReason)
+		require.Equal(t, "account_test", gjson.Get(logs.String(), "source").String())
+		require.Equal(t, "req-account-test", gjson.Get(logs.String(), "upstream_request_id").String())
+		require.True(t, gjson.Get(logs.String(), "enabled").Bool())
+		require.Equal(t, int64(25), gjson.Get(logs.String(), "cooldown_seconds").Int())
+	})
+
+	t.Run("disabled does not mutate or clear existing state", func(t *testing.T) {
+		existingUntil := time.Now().Add(5 * time.Minute)
+		account := &Account{
+			ID:                      1905,
+			Platform:                PlatformGrok,
+			Type:                    AccountTypeOAuth,
+			TempUnschedulableUntil:  &existingUntil,
+			TempUnschedulableReason: "existing block",
+		}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled = true
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
+		svc := &AccountTestService{accountRepo: repo, cfg: cfg}
+		resp := &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary upstream failure"}}`)),
+		}
+
+		svc.observeGrokTestResponse(context.Background(), account, resp)
+
+		require.Zero(t, repo.tempUnschedCalls)
+		require.Equal(t, existingUntil, *account.TempUnschedulableUntil)
+		require.Equal(t, "existing block", account.TempUnschedulableReason)
+	})
+
+	t.Run("empty body keeps existing no mutation semantics", func(t *testing.T) {
+		account := &Account{ID: 1906, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
+		svc := &AccountTestService{accountRepo: repo, cfg: cfg}
+		resp := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+		}
+
+		svc.observeGrokTestResponse(context.Background(), account, resp)
+
+		require.Zero(t, repo.tempUnschedCalls)
+	})
 }
 
 func (r *grokAccountTestRateLimitRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
