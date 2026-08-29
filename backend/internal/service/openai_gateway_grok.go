@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -109,6 +112,10 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	if err != nil {
 		return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
 	}
+	patchedBody, _, err = stripGrokNonReplayableEncryptedInput(patchedBody)
+	if err != nil {
+		return nil, fmt.Errorf("strip Grok non-replayable encrypted input: %w", err)
+	}
 
 	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
@@ -125,13 +132,16 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 
 	upstreamStart := time.Now()
 	var resp *http.Response
+	freshTransportRetryUsed := false
 	for attempt := 0; ; attempt++ {
 		upstreamReq, buildErr := buildGrokResponsesRequest(upstreamCtx, c, account, patchedBody, token, cacheIdentity, s.cfg, s.settingService)
 		if buildErr != nil {
 			return nil, buildErr
 		}
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		var freshTransportRetryAttempted bool
+		resp, err, freshTransportRetryAttempted = s.doGrokUpstreamWithFreshConnectionRetry(upstreamReq, proxyURL, account, !freshTransportRetryUsed)
+		freshTransportRetryUsed = freshTransportRetryUsed || freshTransportRetryAttempted
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -294,7 +304,7 @@ func isGrokInvalidEncryptedContentResponse(statusCode int, body []byte) bool {
 			code = strings.TrimSpace(errNode.Get("code").String())
 		}
 	default:
-		message = gjson.GetBytes(body, "message").String()
+		message = firstNonEmpty(gjson.GetBytes(body, "message").String(), gjson.GetBytes(body, "err").String())
 	}
 	normalizedMessage := strings.ToLower(strings.TrimSpace(message))
 	if normalizedMessage == "" {
@@ -309,17 +319,19 @@ func isGrokInvalidEncryptedContentResponse(statusCode int, body []byte) bool {
 		return false
 	}
 	// Nested OpenAI-style envelopes may omit top-level code; require decrypt text.
-	if code == "" && !strings.Contains(normalizedMessage, "decrypt") {
+	if code == "" && !strings.Contains(normalizedMessage, "decrypt") && !strings.Contains(normalizedMessage, "compaction blob") {
 		return false
 	}
-	return strings.Contains(normalizedMessage, "encrypted_content") &&
+	if strings.Contains(normalizedMessage, "encrypted_content") &&
 		(strings.Contains(normalizedMessage, "decrypt") ||
-			strings.Contains(normalizedMessage, "unmodified"))
+			strings.Contains(normalizedMessage, "unmodified")) {
+		return true
+	}
+	return strings.Contains(normalizedMessage, "compaction blob") &&
+		(strings.Contains(normalizedMessage, "decode") || strings.Contains(normalizedMessage, "unmodified"))
 }
 
-// requestHasGrokEncryptedReasoning reports whether the outbound Responses body
-// still carries reasoning.encrypted_content that can be stripped for retry.
-func requestHasGrokEncryptedReasoning(body []byte) bool {
+func requestHasGrokNonReplayableEncryptedInput(body []byte) bool {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() {
 		return false
@@ -329,15 +341,41 @@ func requestHasGrokEncryptedReasoning(body []byte) bool {
 		items = []gjson.Result{input}
 	}
 	for _, item := range items {
-		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "reasoning", "compaction", "compaction_summary":
+		default:
 			continue
 		}
 		enc := item.Get("encrypted_content")
-		if enc.Exists() && enc.Type != gjson.Null && strings.TrimSpace(enc.String()) != "" {
+		if enc.Exists() && enc.Type != gjson.Null && strings.TrimSpace(enc.Raw) != "" && strings.TrimSpace(enc.Raw) != `""` {
 			return true
 		}
 	}
 	return false
+}
+
+func requestHasGrokEncryptedInputField(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	items := input.Array()
+	if input.IsObject() {
+		items = []gjson.Result{input}
+	}
+	for _, item := range items {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "reasoning", "compaction", "compaction_summary":
+			if item.Get("encrypted_content").Exists() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stripGrokNonReplayableEncryptedInput(body []byte) ([]byte, bool, error) {
+	if !requestHasGrokNonReplayableEncryptedInput(body) {
+		return body, false, nil
+	}
+	return trimGrokInvalidEncryptedContentRetryBody(body)
 }
 
 type grokEncryptedContentStripRetriedKey struct{}
@@ -401,20 +439,7 @@ func stripAnthropicThinkingSignatures(body []byte) ([]byte, bool) {
 }
 
 func trimGrokInvalidEncryptedContentRetryBody(body []byte) ([]byte, bool, error) {
-	input := gjson.GetBytes(body, "input")
-	items := input.Array()
-	if input.IsObject() {
-		items = []gjson.Result{input}
-	}
-
-	hasEncryptedReasoning := false
-	for _, item := range items {
-		if strings.TrimSpace(item.Get("type").String()) == "reasoning" && item.Get("encrypted_content").Exists() {
-			hasEncryptedReasoning = true
-			break
-		}
-	}
-	if !hasEncryptedReasoning {
+	if !requestHasGrokEncryptedInputField(body) {
 		return body, false, nil
 	}
 
@@ -433,6 +458,59 @@ func trimGrokInvalidEncryptedContentRetryBody(body []byte) ([]byte, bool, error)
 		return nil, false, err
 	}
 	return retryBody, true, nil
+}
+
+func isGrokFreshConnectionRetryableTransportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || classifyOpenAITransportError(err).Persistent {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "server closed idle connection") ||
+		strings.Contains(lower, "use of closed network connection") ||
+		strings.Contains(lower, "broken pipe")
+}
+
+func replayHTTPRequest(req *http.Request) (*http.Request, error) {
+	if req == nil || req.GetBody == nil {
+		return nil, fmt.Errorf("request body is not replayable")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	replayed := req.Clone(req.Context())
+	replayed.Body = body
+	replayed.GetBody = req.GetBody
+	replayed.ContentLength = req.ContentLength
+	return replayed, nil
+}
+
+func (s *OpenAIGatewayService) doGrokUpstreamWithFreshConnectionRetry(req *http.Request, proxyURL string, account *Account, allowFreshRetry bool) (*http.Response, error, bool) {
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	if err == nil || !allowFreshRetry || !isGrokFreshConnectionRetryableTransportError(err) {
+		return resp, err, false
+	}
+	freshUpstream, ok := s.httpUpstream.(HTTPUpstreamFreshConnection)
+	if !ok {
+		return nil, err, false
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	replayed, replayErr := replayHTTPRequest(req)
+	if replayErr != nil {
+		return nil, err, false
+	}
+	slog.Warn("grok_transport_fresh_connection_retry",
+		"account_id", account.ID,
+		"transport_error", sanitizeOpenAITransportErrorMessage(err.Error()),
+	)
+	resp, err = freshUpstream.DoFresh(replayed, proxyURL, account.ID, account.Concurrency)
+	return resp, err, true
 }
 
 func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {

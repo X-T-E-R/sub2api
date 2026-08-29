@@ -50,6 +50,91 @@ func TestHTTPUpstreamDoCanDisableRedirectsPerRequest(t *testing.T) {
 	require.Zero(t, redirectedCalls.Load())
 }
 
+func TestHTTPUpstreamDoFreshUsesDifferentConnectionFromCachedClient(t *testing.T) {
+	remoteAddrs := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteAddrs <- r.RemoteAddr
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{
+		Enabled:           false,
+		AllowInsecureHTTP: true,
+	}}}
+	upstream := NewHTTPUpstream(cfg)
+	freshUpstream, ok := upstream.(service.HTTPUpstreamFreshConnection)
+	require.True(t, ok)
+
+	firstReq, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewBufferString("same-body"))
+	require.NoError(t, err)
+	firstResp, err := upstream.Do(firstReq, "", 991, 1)
+	require.NoError(t, err)
+	_, err = io.ReadAll(firstResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, firstResp.Body.Close())
+
+	freshReq, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewBufferString("same-body"))
+	require.NoError(t, err)
+	freshResp, err := freshUpstream.DoFresh(freshReq, "", 991, 1)
+	require.NoError(t, err)
+	_, err = io.ReadAll(freshResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, freshResp.Body.Close())
+
+	firstAddr := <-remoteAddrs
+	freshAddr := <-remoteAddrs
+	require.NotEqual(t, firstAddr, freshAddr, "DoFresh must not reuse the cached client's connection")
+}
+
+func TestHTTPUpstreamDoFreshClosesConnectionWhenResponseBodyCloses(t *testing.T) {
+	requestAddr := make(chan string, 1)
+	closedAddr := make(chan string, 4)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestAddr <- r.RemoteAddr
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closedAddr <- conn.RemoteAddr().String()
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{
+		Enabled:           false,
+		AllowInsecureHTTP: true,
+	}}}
+	upstream := NewHTTPUpstream(cfg)
+	freshUpstream, ok := upstream.(service.HTTPUpstreamFreshConnection)
+	require.True(t, ok)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewBufferString("body"))
+	require.NoError(t, err)
+	resp, err := freshUpstream.DoFresh(req, "", 992, 1)
+	require.NoError(t, err)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	remoteAddr := <-requestAddr
+	require.NoError(t, resp.Body.Close())
+
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case addr := <-closedAddr:
+			if addr == remoteAddr {
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("DoFresh connection %s remained open after response body close", remoteAddr)
+		}
+	}
+}
+
 func TestHTTPUpstreamDoWithTLSPlainHTTPUsesConfiguredHTTPProxy(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

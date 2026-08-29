@@ -22,3 +22,11 @@ type HTTPUpstream interface {
 	// 支持按账号绑定的数据库 profile 或内置默认 profile。
 	DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error)
 }
+
+// HTTPUpstreamFreshConnection is an optional transport capability for retries
+// that must not reuse any cached or idle connection. Keeping this separate from
+// HTTPUpstream preserves existing callers and test doubles that do not need the
+// stronger connection contract.
+type HTTPUpstreamFreshConnection interface {
+	DoFresh(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error)
+}

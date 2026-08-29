@@ -683,6 +683,7 @@ type UpstreamFailoverError struct {
 	NextAccountAction        NextAccountAction
 	ClientStatusCode         int
 	ClientMessage            string
+	TransportError           string // sanitized transport failure; empty for real HTTP responses
 }
 
 func (e *UpstreamFailoverError) Error() string {

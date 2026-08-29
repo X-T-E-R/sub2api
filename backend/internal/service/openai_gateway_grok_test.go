@@ -1918,7 +1918,7 @@ func TestForwardGrokResponsesAPIKeyUsesXAIResponses(t *testing.T) {
 	require.Equal(t, 1, result.Usage.OutputTokens)
 }
 
-func TestForwardGrokResponsesRetriesInvalidEncryptedContentOnce(t *testing.T) {
+func TestForwardGrokResponsesStripsInvalidEncryptedContentBeforeFirstRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -1950,14 +1950,6 @@ func TestForwardGrokResponsesRetriesInvalidEncryptedContentOnce(t *testing.T) {
 	}
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		{
-			StatusCode: http.StatusBadRequest,
-			Header: http.Header{
-				"Content-Type":   []string{"application/json"},
-				"Xai-Request-Id": []string{"recoverable-first"},
-			},
-			Body: io.NopCloser(strings.NewReader(`{"code":"invalid-argument","error":"Could not decrypt the provided encrypted_content. Ensure the value is unmodified."}`)),
-		},
-		{
 			StatusCode: http.StatusOK,
 			Header: http.Header{
 				"Content-Type":   []string{"application/json"},
@@ -1973,29 +1965,23 @@ func TestForwardGrokResponsesRetriesInvalidEncryptedContentOnce(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "resp_recovered", result.ResponseID)
 	require.Equal(t, "recovered-second", result.RequestID)
-	require.Len(t, upstream.requests, 2)
-	require.Len(t, upstream.bodies, 2)
+	require.Len(t, upstream.requests, 1)
+	require.Len(t, upstream.bodies, 1)
 
 	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.0.type").String())
-	require.Equal(t, "encrypted-reasoning", gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").String())
-	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[1], "input.0.type").String())
-	require.False(t, gjson.GetBytes(upstream.bodies[1], "input.0.encrypted_content").Exists())
-	require.Equal(t, "keep this summary", gjson.GetBytes(upstream.bodies[1], "input.0.summary.0.text").String())
-	require.Equal(t, "message", gjson.GetBytes(upstream.bodies[1], "input.1.type").String())
+	require.False(t, gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").Exists())
+	require.Equal(t, "keep this summary", gjson.GetBytes(upstream.bodies[0], "input.0.summary.0.text").String())
+	require.Equal(t, "message", gjson.GetBytes(upstream.bodies[0], "input.1.type").String())
 	require.Equal(t, "9007199254740993", gjson.GetBytes(upstream.bodies[0], "metadata.large_id").Raw)
-	require.Equal(t, "9007199254740993", gjson.GetBytes(upstream.bodies[1], "metadata.large_id").Raw)
 
 	firstIdentity := gjson.GetBytes(upstream.bodies[0], "prompt_cache_key").String()
-	secondIdentity := gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").String()
 	require.NotEmpty(t, firstIdentity)
-	require.Equal(t, firstIdentity, secondIdentity)
 	for _, req := range upstream.requests {
 		require.Equal(t, "Bearer same-token", req.Header.Get("Authorization"))
 		require.Equal(t, firstIdentity, req.Header.Get(grokConversationIDHeader))
 		require.Equal(t, firstIdentity, req.Header.Get(grokSessionIDHeader))
 	}
 	require.NotEmpty(t, upstream.requests[0].Header.Get(grokRequestIDHeader))
-	require.Equal(t, upstream.requests[0].Header.Get(grokRequestIDHeader), upstream.requests[1].Header.Get(grokRequestIDHeader), "encrypted reasoning repair must preserve the logical request id")
 	require.Equal(t, StatusActive, account.Status)
 	_, hasUpstreamErrors := c.Get(OpsUpstreamErrorsKey)
 	require.False(t, hasUpstreamErrors)
@@ -2060,12 +2046,12 @@ func TestForwardGrokResponsesInvalidEncryptedContentRecoveryDoesNotOvermatch(t *
 	}
 }
 
-func TestForwardGrokResponsesInvalidEncryptedContentRecoveryNestedErrorShape(t *testing.T) {
+func TestForwardGrokResponsesInvalidEncryptedContentFallbackStillRetriesOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	body := []byte(`{"model":"grok","input":[{"type":"reasoning","encrypted_content":"cipher"},{"type":"message","role":"user","content":"hi"}],"stream":false}`)
+	body := []byte(`{"model":"grok","input":[{"type":"reasoning","encrypted_content":null},{"type":"message","role":"user","content":"hi"}],"stream":false}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 
 	account := &Account{
@@ -2094,7 +2080,7 @@ func TestForwardGrokResponsesInvalidEncryptedContentRecoveryNestedErrorShape(t *
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, upstream.requests, 2)
-	require.True(t, gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").Exists())
+	require.Equal(t, gjson.Null, gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").Type)
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "input.0.encrypted_content").Exists())
 }
 
@@ -2103,7 +2089,7 @@ func TestForwardGrokResponsesInvalidEncryptedContentRetryFailureIsTerminal(t *te
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	body := []byte(`{"model":"grok","input":[{"type":"reasoning","encrypted_content":"cipher"},{"type":"message","role":"user","content":"hi"}],"stream":false}`)
+	body := []byte(`{"model":"grok","input":[{"type":"reasoning","encrypted_content":null},{"type":"message","role":"user","content":"hi"}],"stream":false}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 
 	account := &Account{
@@ -2135,7 +2121,7 @@ func TestForwardGrokResponsesInvalidEncryptedContentRetryFailureIsTerminal(t *te
 	require.Error(t, err)
 	require.Len(t, upstream.requests, 2)
 	require.Len(t, upstream.bodies, 2)
-	require.True(t, gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").Exists())
+	require.Equal(t, gjson.Null, gjson.GetBytes(upstream.bodies[0], "input.0.encrypted_content").Type)
 	require.False(t, gjson.GetBytes(upstream.bodies[1], `input.#(type=="reasoning")`).Exists())
 
 	rawEvents, ok := c.Get(OpsUpstreamErrorsKey)

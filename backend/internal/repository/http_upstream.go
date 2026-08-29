@@ -237,6 +237,47 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	return resp, nil
 }
 
+// DoFresh executes req on a one-shot Transport that has no cached or idle
+// connections. It is reserved for narrowly classified retries where reusing the
+// cached client could repeat a failure on a dead connection.
+func (s *httpUpstreamService) DoFresh(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	applyGrokCLIProxyHeaders(req)
+	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	profile := service.HTTPUpstreamProfileDefault
+	if req != nil {
+		profile = service.HTTPUpstreamProfileFromContext(req.Context())
+	}
+	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	isolation := s.getIsolationMode()
+	protocolMode := s.resolveProtocolMode(profile, proxyKey, parsedProxy)
+	settings := s.applyProfilePoolSettings(s.resolvePoolSettings(isolation, accountConcurrency), profile)
+	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode)
+	if err != nil {
+		return nil, fmt.Errorf("build fresh transport: %w", err)
+	}
+	client := &http.Client{Transport: transport}
+	if s.shouldValidateResolvedIP() {
+		client.CheckRedirect = s.redirectChecker
+	}
+	client = httpClientForUpstreamRequest(client, req)
+	client = httpClientWithGrokAccessDeniedFallback(client)
+	resp, err := servertiming.Do(client, req)
+	if err != nil {
+		client.CloseIdleConnections()
+		s.recordOpenAIHTTP2Failure(profile, protocolMode, proxyKey, err)
+		return nil, err
+	}
+	s.recordOpenAIHTTP2Success(profile, protocolMode, proxyKey)
+	decompressResponseBody(resp)
+	resp.Body = wrapTrackedBody(resp.Body, client.CloseIdleConnections)
+	return resp, nil
+}
+
 // DoWithTLS 执行带 TLS 指纹伪装的 HTTP 请求
 //
 // profile 为 nil 时不启用 TLS 指纹，行为与 Do 方法相同。
@@ -315,6 +356,15 @@ func httpClientForUpstreamRequest(client *http.Client, req *http.Request) *http.
 // original response so account scheduling semantics do not change.
 type grokAccessDeniedFallbackTransport struct {
 	base http.RoundTripper
+}
+
+func (t *grokAccessDeniedFallbackTransport) CloseIdleConnections() {
+	if t == nil || t.base == nil {
+		return
+	}
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func httpClientWithGrokAccessDeniedFallback(client *http.Client) *http.Client {

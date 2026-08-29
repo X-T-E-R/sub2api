@@ -287,6 +287,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if patchErr != nil {
 			return nil, patchErr
 		}
+		responsesBody, _, patchErr = stripGrokNonReplayableEncryptedInput(responsesBody)
+		if patchErr != nil {
+			return nil, fmt.Errorf("strip Grok non-replayable encrypted input: %w", patchErr)
+		}
 	}
 
 	// 5. Get access token
@@ -351,6 +355,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// account/cache identity. Match forwardGrokResponses: one strip+retry before
 	// treating the 400 as a hard failure / failover trigger.
 	var resp *http.Response
+	freshTransportRetryUsed := false
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			if account.Platform != PlatformGrok {
@@ -363,7 +368,13 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return nil, fmt.Errorf("build grok retry request: %w", err)
 			}
 		}
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		if account.Platform == PlatformGrok {
+			var freshTransportRetryAttempted bool
+			resp, err, freshTransportRetryAttempted = s.doGrokUpstreamWithFreshConnectionRetry(upstreamReq, proxyURL, account, !freshTransportRetryUsed)
+			freshTransportRetryUsed = freshTransportRetryUsed || freshTransportRetryAttempted
+		} else {
+			resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		}
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 		}
@@ -378,7 +389,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// outbound body still carries reasoning.encrypted_content (account
 		// switch often returns opaque "Upstream error: 400").
 		shouldStrip := isGrokInvalidEncryptedContentResponse(resp.StatusCode, respBody) ||
-			requestHasGrokEncryptedReasoning(responsesBody)
+			requestHasGrokEncryptedInputField(responsesBody)
 		if !shouldStrip {
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
 			break

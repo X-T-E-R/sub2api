@@ -45,6 +45,13 @@ type OpenAIGatewayHandler struct {
 	cfg                        *config.Config
 }
 
+func appendOpenAITransportFailoverField(fields []zap.Field, failoverErr *service.UpstreamFailoverError) []zap.Field {
+	if failoverErr == nil || failoverErr.TransportError == "" {
+		return fields
+	}
+	return append(fields, zap.String("transport_error", failoverErr.TransportError))
+}
+
 type openAIWSTurnChannelMappingSnapshot struct {
 	turn    int
 	mapping service.ChannelMappingResult
@@ -758,6 +765,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						zap.Int("switch_count", switchCount),
 						zap.Int("max_switches", maxAccountSwitches),
 					}
+					failoverSwitchFields = appendOpenAITransportFailoverField(failoverSwitchFields, failoverErr)
 					if account.Proxy != nil {
 						failoverSwitchFields = append(failoverSwitchFields,
 							zap.Int64("proxy_id", account.Proxy.ID),
@@ -1301,12 +1309,14 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					reqLog.Warn("openai_messages.upstream_failover_switching",
+					failoverSwitchFields := []zap.Field{
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
 						zap.Int("switch_count", switchCount),
 						zap.Int("max_switches", maxAccountSwitches),
-					)
+					}
+					failoverSwitchFields = appendOpenAITransportFailoverField(failoverSwitchFields, failoverErr)
+					reqLog.Warn("openai_messages.upstream_failover_switching", failoverSwitchFields...)
 					continue
 				}
 				if result != nil && result.ClientDisconnect {
