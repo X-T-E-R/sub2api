@@ -42,14 +42,6 @@ var grokChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"service_tier":          {},
 }
 
-// grokChatResponsesBridgeEligibility deliberately accepts only request shapes
-// whose Chat Completions semantics are preserved by the Responses bridge.
-// Everything else stays on raw Chat Completions rather than being silently
-// dropped or rewritten.
-func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
-	return grokChatResponsesBridgeEligibilityWithCompatibility(body, true)
-}
-
 func grokChatResponsesBridgeEligibilityWithCompatibility(body []byte, compatibilityEnabled bool) (bool, string) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil || root == nil {

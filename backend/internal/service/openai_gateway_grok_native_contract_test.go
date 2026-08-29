@@ -30,7 +30,7 @@ func TestCodexResponsesSessionHeaderIsProtocolAware(t *testing.T) {
 	messages.Request.URL.Path = "/v1/messages"
 	messages.Request.Header.Set(codexSessionIDHeader, sessionID)
 	require.Empty(t, codexResponsesSessionID(messages, responsesBody))
-	require.Empty(t, (&OpenAIGatewayService{}).ExtractSessionID(messages, responsesBody), "Codex session-id must not become an Anthropic Messages session channel")
+	require.Equal(t, sessionID, (&OpenAIGatewayService{}).ExtractSessionID(messages, responsesBody), "current generic session-id routing remains available to Messages clients")
 
 	nonCodexResponses := newGrokCacheTestContext(7101)
 	nonCodexResponses.Request.URL.Path = "/v1/responses"
@@ -131,7 +131,7 @@ func TestApplyGrokNativeRequestHeadersFillsOnlyMissingIdentityAndRejectsUnsafeVa
 	require.NoError(t, err)
 }
 
-func TestBuildGrokResponsesRequestPreservesCodexResponsesHeadersAndOpenAIProfile(t *testing.T) {
+func TestBuildGrokResponsesRequestPreservesCodexResponsesHeadersAndGrokProfile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	account := &Account{
 		Platform: PlatformGrok,
@@ -155,5 +155,5 @@ func TestBuildGrokResponsesRequestPreservesCodexResponsesHeadersAndOpenAIProfile
 	require.Equal(t, "codex-session", req.Header.Get(codexSessionIDHeader))
 	require.Equal(t, "codex-thread", req.Header.Get(codexThreadIDHeader))
 	require.Equal(t, "codex-thread", req.Header.Get("X-Client-Request-Id"))
-	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(req.Context()))
+	require.Equal(t, HTTPUpstreamProfileGrok, HTTPUpstreamProfileFromContext(req.Context()))
 }

@@ -713,7 +713,7 @@ func TestForwardGrokResponsesProtocolCompatibilityKillSwitchSkipsOnlyNewStage(t 
 	require.Equal(t, "agent_message", gjson.GetBytes(upstream.lastBody, "input.0.type").String())
 	require.Equal(t, "#/$defs/missing", gjson.GetBytes(upstream.lastBody, "tools.0.parameters.$ref").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "tools.0.strict").Bool())
-	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String(), "existing Grok base patch remains active")
+	require.Equal(t, result.UpstreamModel, gjson.GetBytes(upstream.lastBody, "model").String(), "existing Grok base patch remains active")
 }
 
 func TestObserveGrokResponsesProtocolCompatibilityIsStructuredAndPayloadFree(t *testing.T) {

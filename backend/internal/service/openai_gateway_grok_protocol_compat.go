@@ -150,10 +150,6 @@ func SnapshotGrokResponsesCompatibilityMetrics() GrokResponsesCompatibilityMetri
 	}
 }
 
-func snapshotGrokResponsesCompatibilityMetrics() GrokResponsesCompatibilityMetricsSnapshot {
-	return SnapshotGrokResponsesCompatibilityMetrics()
-}
-
 func cloneStringUint64Map(input map[string]uint64) map[string]uint64 {
 	out := make(map[string]uint64, len(input))
 	for key, value := range input {
@@ -526,6 +522,12 @@ func normalizeGrokFunctionParameters(raw []byte, path string) ([]byte, bool, str
 }
 
 func normalizeGrokFunctionParametersWithLimits(raw []byte, path string, limits grokSchemaCompatibilityLimits) ([]byte, bool, string, string, error) {
+	parameters := gjson.ParseBytes(raw)
+	if strings.EqualFold(strings.TrimSpace(parameters.Get("type").String()), "object") &&
+		grokFunctionParametersHaveInvalidUnionRoot(parameters) {
+		fallback := permissiveGrokObjectSchema()
+		return fallback, !bytes.Equal(raw, fallback), "fallback", "typed_invalid_union_root", nil
+	}
 	result, changed, outcome, reason, err := tryNormalizeGrokFunctionParametersWithLimits(raw, path, limits)
 	if err == nil || compatibilityErrorReason(err) == "encode_failed" {
 		return result, changed, outcome, reason, err
@@ -902,7 +904,10 @@ func pruneGrokRootNullType(value any) (bool, any, error) {
 		return false, typed, nil
 	case []any:
 		for _, item := range typed {
-			name := item.(string)
+			name, ok := item.(string)
+			if !ok {
+				return false, nil, fmt.Errorf("non-string type")
+			}
 			if name != "null" {
 				names = append(names, name)
 			}
@@ -1060,7 +1065,7 @@ func decodeGrokJSONPointerToken(encoded string) (string, error) {
 	var builder strings.Builder
 	for index := 0; index < len(encoded); index++ {
 		if encoded[index] != '~' {
-			builder.WriteByte(encoded[index])
+			_ = builder.WriteByte(encoded[index])
 			continue
 		}
 		if index+1 >= len(encoded) {
@@ -1069,9 +1074,9 @@ func decodeGrokJSONPointerToken(encoded string) (string, error) {
 		index++
 		switch encoded[index] {
 		case '0':
-			builder.WriteByte('~')
+			_ = builder.WriteByte('~')
 		case '1':
-			builder.WriteByte('/')
+			_ = builder.WriteByte('/')
 		default:
 			return "", fmt.Errorf("invalid escape")
 		}

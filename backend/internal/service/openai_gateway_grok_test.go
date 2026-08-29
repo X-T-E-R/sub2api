@@ -438,10 +438,12 @@ func TestPatchGrokResponsesBodySimplifiesTypedInvalidRootUnion(t *testing.T) {
 		}]
 	}`)
 
-	patched, _, err := patchGrokResponsesBodyWithClientTools(body, "grok-4.6")
+	patched, _, report, err := patchGrokResponsesBodyWithClientToolsCompatibility(body, "grok-4.6", true)
 	require.NoError(t, err)
 	require.True(t, json.Valid(patched))
 	require.False(t, gjson.GetBytes(patched, "metadata").Exists())
+	require.Equal(t, 1, report.SchemaFallback)
+	require.Equal(t, "typed_invalid_union_root", report.Schemas[0].Reason)
 
 	tool := gjson.GetBytes(patched, `tools.#(name=="mcp__codex_app__automation_update")`)
 	require.Equal(t, "object", tool.Get("parameters.type").String())
@@ -1923,7 +1925,7 @@ func TestForwardAsChatCompletionsForGrokStopFallsBackToXAIChatCompletions(t *tes
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "raw-client-cache-key", upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Equal(t, "raw-client-cache-key", upstream.lastReq.Header.Get(grokSessionIDHeader))
-	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, result.UpstreamModel, gjson.GetBytes(upstream.lastBody, "model").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.Equal(t, "grok", result.Model)
 	require.Equal(t, "grok-4.6", result.UpstreamModel)
@@ -1934,7 +1936,7 @@ func TestForwardAsChatCompletionsForGrokStopFallsBackToXAIChatCompletions(t *tes
 	require.Equal(t, http.StatusOK, recorder.Code)
 }
 
-func TestForwardGrokResponsesStreamingDefaultsEmptyModelTo45AndSnapshots(t *testing.T) {
+func TestForwardGrokResponsesStreamingDefaultsEmptyModelToCurrentDefaultAndSnapshots(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -1980,13 +1982,13 @@ func TestForwardGrokResponsesStreamingDefaultsEmptyModelTo45AndSnapshots(t *test
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "responses=experimental", upstream.lastReq.Header.Get("OpenAI-Beta"))
-	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, xai.ResolveGrokTextResponsesModelID("", grokDefaultResponsesModel), gjson.GetBytes(upstream.lastBody, "model").String())
 	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
 	require.NotEmpty(t, identity)
 	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Equal(t, identity, upstream.lastReq.Header.Get(grokSessionIDHeader))
 	require.NotEmpty(t, upstream.lastReq.Header.Get(grokRequestIDHeader))
-	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
+	require.Equal(t, HTTPUpstreamProfileGrok, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
 	require.Equal(t, "web_search", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
 	require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
 	require.Equal(t, "none", gjson.GetBytes(upstream.lastBody, "tool_choice").String())
@@ -2659,7 +2661,7 @@ func TestForwardAsChatCompletionsForGrokStreamingStopFallsBackToRawXAIChatComple
 	require.Equal(t, xai.CLIUserAgent(xai.CLIClientVersion), upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, grokCLIVersion, upstream.lastReq.Header.Get("X-Grok-Client-Version"))
 	require.Equal(t, "native-client-conversation", upstream.lastReq.Header.Get(grokConversationIDHeader))
-	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, result.UpstreamModel, gjson.GetBytes(upstream.lastBody, "model").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
 	require.True(t, result.Stream)
 	require.Equal(t, 6, result.Usage.InputTokens)

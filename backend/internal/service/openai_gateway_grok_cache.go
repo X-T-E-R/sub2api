@@ -119,13 +119,6 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 	return generateSessionUUID(isolatedSeed)
 }
 
-func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) string {
-	if identity := explicitGrokNativeCacheIdentity(c, body); identity != "" {
-		return identity
-	}
-	return grokBridgeCacheSeed(c, body, explicitKey)
-}
-
 // explicitGrokNativeCacheIdentity returns upstream-native identity values
 // unchanged. prompt_cache_key is the strongest signal because both Codex
 // Responses and Grok Build place their cache identity directly in the body.

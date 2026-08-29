@@ -305,7 +305,7 @@ func TestOpenCodeResponsesHeaderAndBodyCacheSignalsConverge(t *testing.T) {
 	first := resolveGrokCacheIdentity(c, firstBody, "", "grok-4.5")
 	second := resolveGrokCacheIdentity(c, secondBody, "", "grok-4.5")
 	bodyOnly := resolveGrokCacheIdentity(newGrokCacheTestContext(901), secondBody, "", "grok-4.5")
-	require.NotEmpty(t, first)
+	require.Equal(t, rawSession, first, "native prompt_cache_key remains an opaque upstream identity")
 	require.Equal(t, first, second)
 	require.Equal(t, first, bodyOnly)
 
@@ -315,7 +315,7 @@ func TestOpenCodeResponsesHeaderAndBodyCacheSignalsConverge(t *testing.T) {
 	headers := make(http.Header)
 	applyGrokNativeRequestHeaders(headers, nil, second, nil)
 	require.Equal(t, second, headers.Get(grokConversationIDHeader))
-	require.NotContains(t, string(patched), rawSession)
+	require.Equal(t, rawSession, gjson.GetBytes(patched, "prompt_cache_key").String())
 }
 
 func TestResolveGrokCacheIdentityPrefersClaudeCodeSession(t *testing.T) {

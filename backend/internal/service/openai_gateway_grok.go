@@ -612,11 +612,6 @@ func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {
 	return patched, err
 }
 
-func patchGrokResponsesBodyWithClientTools(body []byte, upstreamModel string) ([]byte, apicompat.ResponsesClientToolMapping, error) {
-	patched, mapping, _, err := patchGrokResponsesBodyWithClientToolsCompatibility(body, upstreamModel, true)
-	return patched, mapping, err
-}
-
 func patchGrokResponsesBodyWithCompatibility(body []byte, upstreamModel string, compatibilityEnabled bool) ([]byte, GrokResponsesCompatibilityReport, error) {
 	return patchGrokResponsesBodyBase(body, upstreamModel, compatibilityEnabled)
 }
@@ -1691,7 +1686,6 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 	if err != nil {
 		return nil, err
 	}
-	ctx = WithHTTPUpstreamProfile(ctx, HTTPUpstreamProfileOpenAI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
