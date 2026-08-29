@@ -176,7 +176,7 @@ func TestForwardAsAnthropicGrokStripsConvertedEncryptedThinkingBeforeFirstReques
 	require.Error(t, err)
 	require.Equal(t, 1, upstream.regularCalls)
 	require.False(t, gjson.GetBytes(upstream.regularBodies[0], `input.#(type=="reasoning")`).Exists())
-	require.Equal(t, "previous answer", gjson.GetBytes(upstream.regularBodies[0], `input.#(role=="assistant").content.0.text`).String())
+	require.Equal(t, "previous answer", gjson.GetBytes(upstream.regularBodies[0], `input.#(role=="assistant").content`).String())
 }
 
 func TestForwardAsAnthropicGrokBareEOFRetriesOnceOnFreshConnection(t *testing.T) {

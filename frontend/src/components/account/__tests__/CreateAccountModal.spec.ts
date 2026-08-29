@@ -5,12 +5,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const {
   createAccountMock,
   probeUpstreamBillingMock,
+  syncUpstreamModelsMock,
+  showWarningMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
   authIsSimpleMode,
 } = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
   probeUpstreamBillingMock: vi.fn(),
+  syncUpstreamModelsMock: vi.fn(),
+  showWarningMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
   authIsSimpleMode: { value: true },
@@ -20,7 +24,7 @@ vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
     showSuccess: vi.fn(),
-    showWarning: vi.fn(),
+    showWarning: showWarningMock,
   }),
 }))
 
@@ -37,6 +41,7 @@ vi.mock('@/api/admin', () => ({
     accounts: {
       create: createAccountMock,
       probeUpstreamBilling: probeUpstreamBillingMock,
+      syncUpstreamModels: syncUpstreamModelsMock,
       checkMixedChannelRisk: vi.fn().mockResolvedValue({ has_risk: false }),
       importCodexSession: importCodexSessionMock,
       createOpenAICodexPAT: createOpenAICodexPATMock,
@@ -110,6 +115,24 @@ const GroupSelectorStub = defineComponent({
   `,
 })
 
+const ModelWhitelistSelectorStub = defineComponent({
+  name: 'ModelWhitelistSelector',
+  props: {
+    modelValue: {
+      type: Array,
+      default: () => [],
+    },
+    platform: String,
+    syncCredentials: Object,
+  },
+  emits: ['update:modelValue', 'upstream-synced'],
+  template: `<button
+    type="button"
+    data-testid="model-whitelist-selector"
+    @click="$emit('update:modelValue', ['public-glm']); $emit('upstream-synced')"
+  >models</button>`,
+})
+
 function mountModal(groups: any[] = []) {
   return mount(CreateAccountModal, {
     props: { show: true, proxies: [], groups },
@@ -124,7 +147,7 @@ function mountModal(groups: any[] = []) {
         ProxySelector: true,
         ProxyAdBanner: true,
         GroupSelector: GroupSelectorStub,
-        ModelWhitelistSelector: true,
+        ModelWhitelistSelector: ModelWhitelistSelectorStub,
         QuotaLimitCard: true,
       },
     },
@@ -176,6 +199,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     authIsSimpleMode.value = true
     createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    showWarningMock.mockReset()
     importCodexSessionMock.mockReset().mockResolvedValue({
       created: 1,
       updated: 0,
@@ -220,6 +245,71 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(false)
+  })
+
+  it('persists upstream model metadata after creating an account from preview', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('OpenCode account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="model-whitelist-selector"]').trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledOnce()
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
+  })
+
+  it('includes the current concrete model mapping in preview credentials', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="model-whitelist-selector"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('syncCredentials')).toMatchObject({
+      model_mapping: { 'public-glm': 'public-glm' }
+    })
+  })
+
+  it('runs formal capability sync after creating an account with explicit mappings', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Mapped account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    await selectButtonByText(wrapper, 'admin.accounts.addMapping')
+    await wrapper.get('input[placeholder="admin.accounts.requestModel"]').setValue('public-glm')
+    await wrapper.get('input[placeholder="admin.accounts.actualModel"]').setValue('glm-5.3')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_mapping).toEqual({
+      'public-glm': 'glm-5.3'
+    })
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
+  })
+
+  it('warns when post-create capability metadata remains incomplete', async () => {
+    syncUpstreamModelsMock.mockResolvedValue({
+      models: ['x-preview-f-free'],
+      warnings: [{ code: 'upstream_model_metadata_incomplete', message: 'metadata incomplete' }],
+    })
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('OpenCode account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="model-whitelist-selector"]').trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(showWarningMock).toHaveBeenCalledWith(
+      'admin.accounts.syncUpstreamModelsMetadataIncomplete'
+    )
   })
 
   // namespace 摊平是仅 OAuth 的兼容开关：API Key 走 chat completions 回退桥时由桥自行摊平
@@ -267,6 +357,43 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(false)
     expect(probeUpstreamBillingMock).not.toHaveBeenCalled()
+  })
+
+  it('submits adaptive Kimi protocol endpoints', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Kimi')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Kimi adaptive')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')
+
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials).toMatchObject({
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://api.moonshot.cn/v1',
+      api_base_urls: {
+        chat_completions: 'https://api.moonshot.cn/v1',
+        anthropic: 'https://api.moonshot.cn/anthropic'
+      }
+    })
+  })
+
+  it('uses the edited adaptive Chat endpoint when previewing upstream models', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Kimi')
+    await wrapper
+      .get('[data-testid="cn-adaptive-base-url-chat_completions"]')
+      .setValue('https://relay.example.com/v1')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-relay')
+
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('syncCredentials')).toMatchObject({
+      platform: 'kimi',
+      type: 'apikey',
+      base_url: 'https://relay.example.com/v1',
+      api_key: 'sk-relay'
+    })
   })
 
   it('exposes Agent Identity in the OpenAI authorization methods', async () => {
