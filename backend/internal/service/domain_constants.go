@@ -537,6 +537,9 @@ const (
 
 	// SettingKeyRateLimit429CooldownSettings stores JSON config for 429 fallback cooldown handling.
 	SettingKeyRateLimit429CooldownSettings = "rate_limit_429_cooldown_settings"
+	// SettingKeyGrokOAuthHTTP5xxCooldownSettings stores the runtime override for
+	// ordinary Grok OAuth HTTP 5xx cooldown handling.
+	SettingKeyGrokOAuthHTTP5xxCooldownSettings = "grok_oauth_http_5xx_cooldown_settings"
 	// SettingKeyOpenAIAPIKeyHealthBreakerSettings stores the opt-in OpenAI pool API-key breaker config.
 	SettingKeyOpenAIAPIKeyHealthBreakerSettings = "openai_apikey_health_breaker_settings"
 

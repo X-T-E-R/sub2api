@@ -1310,6 +1310,40 @@ export async function updateRateLimit429CooldownSettings(
   return data;
 }
 
+// ==================== Grok OAuth HTTP 5xx Cooldown Settings ====================
+
+export type GrokOAuthHttp5xxCooldownSource =
+  | "runtime_setting"
+  | "startup_config";
+
+export interface GrokOAuthHttp5xxCooldownSettings {
+  enabled: boolean;
+  cooldown_seconds: number;
+  source: GrokOAuthHttp5xxCooldownSource;
+}
+
+export interface UpdateGrokOAuthHttp5xxCooldownSettingsRequest {
+  enabled: boolean;
+  cooldown_seconds: number;
+}
+
+export async function getGrokOAuthHttp5xxCooldownSettings(): Promise<GrokOAuthHttp5xxCooldownSettings> {
+  const { data } = await apiClient.get<GrokOAuthHttp5xxCooldownSettings>(
+    "/admin/settings/grok-oauth-http-5xx-cooldown",
+  );
+  return data;
+}
+
+export async function updateGrokOAuthHttp5xxCooldownSettings(
+  settings: UpdateGrokOAuthHttp5xxCooldownSettingsRequest,
+): Promise<GrokOAuthHttp5xxCooldownSettings> {
+  const { data } = await apiClient.put<GrokOAuthHttp5xxCooldownSettings>(
+    "/admin/settings/grok-oauth-http-5xx-cooldown",
+    settings,
+  );
+  return data;
+}
+
 // ==================== Panel Rate Limit Settings ====================
 
 /**
@@ -1569,6 +1603,8 @@ export const settingsAPI = {
   updateOverloadCooldownSettings,
   getRateLimit429CooldownSettings,
   updateRateLimit429CooldownSettings,
+  getGrokOAuthHttp5xxCooldownSettings,
+  updateGrokOAuthHttp5xxCooldownSettings,
   getPanelRateLimitSettings,
   updatePanelRateLimitSettings,
   getStreamTimeoutSettings,

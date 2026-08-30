@@ -21,6 +21,8 @@ type GrokUpstreamFailureClass string
 
 type grokUpstreamFailureProvenance uint8
 
+const grokOAuthHTTP5xxCooldownDBTimeout = 5 * time.Second
+
 const (
 	GrokFailureNone          GrokUpstreamFailureClass = ""
 	GrokFailureFreeUsage     GrokUpstreamFailureClass = "subscription:free-usage-exhausted"
@@ -193,11 +195,42 @@ func classifyGrokUpstreamFailure(statusCode int, responseBody []byte, requestedM
 	return GrokUpstreamFailureDecision{Reason: text}
 }
 
+func isGrokOAuthHTTP5xxCooldownCandidate(
+	account *Account,
+	statusCode int,
+	failure GrokUpstreamFailureDecision,
+	provenance grokUpstreamFailureProvenance,
+) bool {
+	return provenance == grokUpstreamFailureProvenanceHTTPResponse &&
+		account != nil && account.IsGrokOAuth() && !account.IsPoolMode() &&
+		statusCode >= 500 && statusCode <= 599 && statusCode != 529 &&
+		failure.Class == GrokFailureServer
+}
+
+func effectiveGrokOAuthHTTP5xxCooldownSettings(
+	ctx context.Context,
+	settingService *SettingService,
+	cfg *config.Config,
+) *GrokOAuthHTTP5xxCooldownSettings {
+	if settingService != nil {
+		settingsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grokOAuthHTTP5xxCooldownDBTimeout)
+		defer cancel()
+		settings, err := settingService.GetGrokOAuthHTTP5xxCooldownSettings(settingsCtx)
+		if err == nil && settings != nil {
+			return settings
+		}
+	}
+	return startupGrokOAuthHTTP5xxCooldownSettings(cfg)
+}
+
 // resolveGrokOAuthHTTP5xxCooldown returns handled=true only for ordinary HTTP
-// 5xx server failures covered by the operator policy. A handled decision with a
-// zero cooldown means cooldown is disabled; callers must not apply their generic
+// 5xx server failures covered by the operator policy. The candidate predicate
+// runs before the DB-backed setting getter. A handled decision with a zero
+// cooldown means cooldown is disabled; callers must not apply their generic
 // 5xx fallback afterward.
 func resolveGrokOAuthHTTP5xxCooldown(
+	ctx context.Context,
+	settingService *SettingService,
 	cfg *config.Config,
 	account *Account,
 	statusCode int,
@@ -206,18 +239,11 @@ func resolveGrokOAuthHTTP5xxCooldown(
 	source string,
 	headers http.Header,
 ) (cooldown time.Duration, handled bool) {
-	if provenance != grokUpstreamFailureProvenanceHTTPResponse || account == nil || !account.IsGrokOAuth() || statusCode < 500 || statusCode > 599 || statusCode == 529 || failure.Class != GrokFailureServer {
+	if !isGrokOAuthHTTP5xxCooldownCandidate(account, statusCode, failure, provenance) {
 		return 0, false
 	}
 
-	seconds := config.DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds
-	disabled := false
-	if cfg != nil {
-		disabled = cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled
-		if cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds > 0 {
-			seconds = cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds
-		}
-	}
+	settings := effectiveGrokOAuthHTTP5xxCooldownSettings(ctx, settingService, cfg)
 
 	args := []any{
 		"source", source,
@@ -226,18 +252,19 @@ func resolveGrokOAuthHTTP5xxCooldown(
 		"account_platform", account.Platform,
 		"account_type", account.Type,
 		"status_code", statusCode,
-		"enabled", !disabled,
-		"cooldown_seconds", seconds,
+		"enabled", settings.Enabled,
+		"cooldown_seconds", settings.CooldownSeconds,
+		"policy_source", settings.Source,
 	}
 	if requestID := strings.TrimSpace(firstNonEmpty(headers.Get("x-request-id"), headers.Get("xai-request-id"))); requestID != "" {
 		args = append(args, "upstream_request_id", requestID)
 	}
 	slog.Info("grok_oauth_http_5xx_cooldown_decision", args...)
 
-	if disabled {
+	if !settings.Enabled {
 		return 0, true
 	}
-	return time.Duration(seconds) * time.Second, true
+	return time.Duration(settings.CooldownSeconds) * time.Second, true
 }
 
 func grokUpstreamErrorCorpus(statusCode int, responseBody []byte) (text, code, low string) {

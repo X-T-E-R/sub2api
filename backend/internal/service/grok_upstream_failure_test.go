@@ -161,6 +161,8 @@ func TestResolveGrokOAuthHTTP5xxCooldownLogsDecision(t *testing.T) {
 	failure := classifyGrokUpstreamFailure(http.StatusServiceUnavailable, nil, "")
 
 	cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+		context.Background(),
+		nil,
 		cfg,
 		account,
 		http.StatusServiceUnavailable,
@@ -183,7 +185,119 @@ func TestResolveGrokOAuthHTTP5xxCooldownLogsDecision(t *testing.T) {
 	require.Equal(t, float64(http.StatusServiceUnavailable), event["status_code"])
 	require.Equal(t, false, event["enabled"])
 	require.Equal(t, float64(33), event["cooldown_seconds"])
+	require.Equal(t, GrokOAuthHTTP5xxCooldownSourceStartupConfig, event["policy_source"])
 	require.Equal(t, "xai-request-123", event["upstream_request_id"])
+}
+
+func TestResolveGrokOAuthHTTP5xxCooldownRejectsBeforeSettingRead(t *testing.T) {
+	baseAccount := func(accountType string) *Account {
+		return &Account{ID: 9200, Platform: PlatformGrok, Type: accountType}
+	}
+	serverFailure := classifyGrokUpstreamFailure(http.StatusServiceUnavailable, nil, "")
+	tests := []struct {
+		name       string
+		account    *Account
+		statusCode int
+		failure    GrokUpstreamFailureDecision
+		provenance grokUpstreamFailureProvenance
+	}{
+		{name: "non HTTP provenance", account: baseAccount(AccountTypeOAuth), statusCode: http.StatusServiceUnavailable, failure: serverFailure, provenance: grokUpstreamFailureProvenanceStreamEvent},
+		{name: "unknown provenance", account: baseAccount(AccountTypeOAuth), statusCode: http.StatusServiceUnavailable, failure: serverFailure, provenance: grokUpstreamFailureProvenanceUnknown},
+		{name: "API key", account: baseAccount(AccountTypeAPIKey), statusCode: http.StatusServiceUnavailable, failure: serverFailure, provenance: grokUpstreamFailureProvenanceHTTPResponse},
+		{name: "outside 5xx", account: baseAccount(AccountTypeOAuth), statusCode: http.StatusTooManyRequests, failure: GrokUpstreamFailureDecision{Class: GrokFailureRateLimit}, provenance: grokUpstreamFailureProvenanceHTTPResponse},
+		{name: "529", account: baseAccount(AccountTypeOAuth), statusCode: 529, failure: serverFailure, provenance: grokUpstreamFailureProvenanceHTTPResponse},
+		{name: "body priority class", account: baseAccount(AccountTypeOAuth), statusCode: http.StatusBadGateway, failure: GrokUpstreamFailureDecision{Class: GrokFailureEmptyUpstream}, provenance: grokUpstreamFailureProvenanceHTTPResponse},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newGrokHTTP5xxSettingRepo()
+			repo.value = `{"enabled":true,"cooldown_seconds":31}`
+			settingService := NewSettingService(repo, &config.Config{})
+			cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+				context.Background(), settingService, &config.Config{}, tt.account,
+				tt.statusCode, tt.failure, tt.provenance, "gateway", nil,
+			)
+			require.False(t, handled)
+			require.Zero(t, cooldown)
+			require.Zero(t, repo.getValueCalls)
+		})
+	}
+}
+
+type grokHTTP5xxContextSettingRepo struct {
+	grokHTTP5xxSettingRepo
+	observedContextErr error
+}
+
+func (r *grokHTTP5xxContextSettingRepo) GetValue(ctx context.Context, _ string) (string, error) {
+	r.getValueCalls++
+	r.observedContextErr = ctx.Err()
+	if r.observedContextErr != nil {
+		return "", r.observedContextErr
+	}
+	return r.value, nil
+}
+
+type grokHTTP5xxBlockingSettingRepo struct {
+	grokHTTP5xxSettingRepo
+}
+
+func (r *grokHTTP5xxBlockingSettingRepo) GetValue(ctx context.Context, _ string) (string, error) {
+	r.getValueCalls++
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestResolveGrokOAuthHTTP5xxCooldownUsesDetachedBoundedSettingRead(t *testing.T) {
+	account := &Account{ID: 9300, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	failure := classifyGrokUpstreamFailure(http.StatusServiceUnavailable, nil, "")
+	cfg := &config.Config{}
+	cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 47
+
+	t.Run("canceled parent still reads runtime row", func(t *testing.T) {
+		base := newGrokHTTP5xxSettingRepo()
+		base.value = `{"enabled":true,"cooldown_seconds":19}`
+		repo := &grokHTTP5xxContextSettingRepo{grokHTTP5xxSettingRepo: *base}
+		settingService := NewSettingService(repo, cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+			ctx, settingService, cfg, account, http.StatusServiceUnavailable,
+			failure, grokUpstreamFailureProvenanceHTTPResponse, "gateway", nil,
+		)
+
+		require.True(t, handled)
+		require.Equal(t, 19*time.Second, cooldown)
+		require.NoError(t, repo.observedContextErr)
+		require.Equal(t, 1, repo.getValueCalls)
+	})
+
+	t.Run("blocking read falls back at deadline", func(t *testing.T) {
+		var logs bytes.Buffer
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(previous) })
+
+		repo := &grokHTTP5xxBlockingSettingRepo{grokHTTP5xxSettingRepo: *newGrokHTTP5xxSettingRepo()}
+		settingService := NewSettingService(repo, cfg)
+		started := time.Now()
+		cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+			context.Background(), settingService, cfg, account, http.StatusServiceUnavailable,
+			failure, grokUpstreamFailureProvenanceHTTPResponse, "gateway", nil,
+		)
+		elapsed := time.Since(started)
+
+		require.True(t, handled)
+		require.Equal(t, 47*time.Second, cooldown)
+		require.GreaterOrEqual(t, elapsed, grokOAuthHTTP5xxCooldownDBTimeout)
+		require.Less(t, elapsed, 10*time.Second)
+		require.Equal(t, 1, repo.getValueCalls)
+		require.Contains(t, logs.String(), `"msg":"grok_oauth_http_5xx_cooldown_settings_fallback"`)
+		require.Contains(t, logs.String(), `"reason":"db_read_error"`)
+		require.Contains(t, logs.String(), `"policy_source":"startup_config"`)
+	})
 }
 
 func TestClassifyGrokUpstreamFailure_CompatibilityDoesNotCooldown(t *testing.T) {

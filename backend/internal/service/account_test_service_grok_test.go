@@ -85,6 +85,32 @@ func TestObserveGrokTestResponseKeepsEntitlement403Cooldown(t *testing.T) {
 }
 
 func TestObserveGrokTestResponseUsesOAuthHTTP5xxCooldownPolicy(t *testing.T) {
+	t.Run("runtime override wins over startup config", func(t *testing.T) {
+		account := &Account{ID: 1903, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
+		settingRepo := newGrokHTTP5xxSettingRepo()
+		settingRepo.value = `{"enabled":true,"cooldown_seconds":7}`
+		svc := &AccountTestService{
+			accountRepo:    repo,
+			cfg:            cfg,
+			settingService: NewSettingService(settingRepo, cfg),
+		}
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary upstream failure"}}`)),
+		}
+		before := time.Now()
+
+		svc.observeGrokTestResponse(context.Background(), account, resp)
+
+		require.Equal(t, 1, settingRepo.getValueCalls)
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(7*time.Second), repo.lastTempUnschedUntil, time.Second)
+	})
+
 	t.Run("custom cooldown", func(t *testing.T) {
 		var logs bytes.Buffer
 		previous := slog.Default()
@@ -141,21 +167,48 @@ func TestObserveGrokTestResponseUsesOAuthHTTP5xxCooldownPolicy(t *testing.T) {
 		require.Equal(t, "existing block", account.TempUnschedulableReason)
 	})
 
-	t.Run("empty body keeps existing no mutation semantics", func(t *testing.T) {
+	t.Run("empty ordinary HTTP 5xx applies runtime policy", func(t *testing.T) {
 		account := &Account{ID: 1906, Platform: PlatformGrok, Type: AccountTypeOAuth}
 		repo := &grokQuotaAccountRepo{}
 		cfg := &config.Config{}
 		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
-		svc := &AccountTestService{accountRepo: repo, cfg: cfg}
+		settingRepo := newGrokHTTP5xxSettingRepo()
+		settingRepo.value = `{"enabled":true,"cooldown_seconds":7}`
+		svc := &AccountTestService{accountRepo: repo, cfg: cfg, settingService: NewSettingService(settingRepo, cfg)}
 		resp := &http.Response{
 			StatusCode: http.StatusBadGateway,
 			Header:     make(http.Header),
 			Body:       io.NopCloser(strings.NewReader("")),
 		}
+		before := time.Now()
 
 		svc.observeGrokTestResponse(context.Background(), account, resp)
 
-		require.Zero(t, repo.tempUnschedCalls)
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(7*time.Second), repo.lastTempUnschedUntil, time.Second)
+		require.Equal(t, 1, settingRepo.getValueCalls)
+	})
+
+	t.Run("nonqualifying empty body statuses do not read runtime setting", func(t *testing.T) {
+		for _, statusCode := range []int{http.StatusTooManyRequests, 529} {
+			account := &Account{ID: int64(2000 + statusCode), Platform: PlatformGrok, Type: AccountTypeOAuth}
+			repo := &grokQuotaAccountRepo{}
+			cfg := &config.Config{}
+			cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 25
+			settingRepo := newGrokHTTP5xxSettingRepo()
+			settingRepo.value = `{"enabled":true,"cooldown_seconds":7}`
+			svc := &AccountTestService{accountRepo: repo, cfg: cfg, settingService: NewSettingService(settingRepo, cfg)}
+			resp := &http.Response{
+				StatusCode: statusCode,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+			}
+
+			svc.observeGrokTestResponse(context.Background(), account, resp)
+
+			require.Zero(t, settingRepo.getValueCalls, statusCode)
+			require.Zero(t, repo.tempUnschedCalls, statusCode)
+		}
 	})
 }
 

@@ -448,6 +448,14 @@ type RateLimit429CooldownSettings struct {
 	CooldownSeconds int  `json:"cooldown_seconds"`
 }
 
+// GrokOAuthHTTP5xxCooldownSettings is the effective runtime policy. Source is
+// either runtime_setting or startup_config.
+type GrokOAuthHTTP5xxCooldownSettings struct {
+	Enabled         bool   `json:"enabled"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
+	Source          string `json:"source"`
+}
+
 // PanelRateLimitSettings 面板 API 限流配置 DTO
 type PanelRateLimitSettings struct {
 	Enabled     bool `json:"enabled"`

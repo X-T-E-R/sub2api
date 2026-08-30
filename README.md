@@ -789,7 +789,9 @@ For API-key accounts, select **Grok → API Key** in the create-account dialog. 
 
 Ordinary HTTP `500`–`599` responses from Grok OAuth upstreams temporarily remove the affected account from scheduling for 120 seconds by default while account failover continues. HTTP `529`, body-classified quota, billing, authentication, capacity, and rate-limit failures, plus transport errors such as EOF, keep their existing policies. Grok API-key accounts keep their existing two-minute non-pool cooldown, and pool-mode accounts keep their existing scheduling behavior.
 
-Set `gateway.grok.oauth_http_5xx_cooldown_seconds` in YAML or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS` in the environment to a value from 1 through 7200 seconds. Set `gateway.grok.oauth_http_5xx_cooldown_disabled: true` or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_DISABLED=true` to disable this OAuth cooldown; the seconds value must remain within range. These startup settings use environment-over-YAML precedence and require a Sub2API service restart. Disabling the cooldown does not clear an account state that was already recorded.
+Administrators can change this policy from the dashboard without restarting Sub2API. The saved runtime setting is database-backed and becomes visible to every instance on its next qualifying Grok OAuth HTTP 5xx response. Runtime values must keep `cooldown_seconds` between 1 and 7200 even when the policy is disabled.
+
+When no runtime override is saved, set `gateway.grok.oauth_http_5xx_cooldown_seconds` in YAML or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_SECONDS` in the environment. Set `gateway.grok.oauth_http_5xx_cooldown_disabled: true` or `GATEWAY_GROK_OAUTH_HTTP_5XX_COOLDOWN_DISABLED=true` to disable the startup policy; the seconds value must remain within range. Effective precedence is dashboard runtime override, environment, YAML, then the 120-second built-in default. Environment and YAML changes require a service restart. Disabling the cooldown does not clear an account state that was already recorded.
 
 ### Grok Build CLI Configuration
 

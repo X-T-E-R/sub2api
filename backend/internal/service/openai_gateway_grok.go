@@ -2183,7 +2183,7 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamErrorWithProvenance(
 					return
 				}
 			}
-			if cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(s.cfg, account, statusCode, decision, provenance, "gateway", headers); handled {
+			if cooldown, handled := resolveGrokOAuthHTTP5xxCooldown(ctx, s.settingService, s.cfg, account, statusCode, decision, provenance, "gateway", headers); handled {
 				if cooldown > 0 {
 					decision.Cooldown = cooldown
 					s.applyGrokUpstreamFailureDecision(ctx, account, decision)

@@ -565,6 +565,20 @@ type RateLimit429CooldownSettings struct {
 	CooldownSeconds int `json:"cooldown_seconds"`
 }
 
+const (
+	GrokOAuthHTTP5xxCooldownSourceRuntimeSetting = "runtime_setting"
+	GrokOAuthHTTP5xxCooldownSourceStartupConfig  = "startup_config"
+)
+
+// GrokOAuthHTTP5xxCooldownSettings controls the cooldown applied to ordinary
+// HTTP 5xx responses from non-pool Grok OAuth accounts. Source is a read-time
+// projection and is never persisted in the setting row.
+type GrokOAuthHTTP5xxCooldownSettings struct {
+	Enabled         bool   `json:"enabled"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
+	Source          string `json:"-"`
+}
+
 // OpenAIAPIKeyHealthBreakerSettings controls cross-instance failure counting for OpenAI pool API keys.
 type OpenAIAPIKeyHealthBreakerSettings struct {
 	Enabled          bool `json:"enabled"`

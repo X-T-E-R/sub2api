@@ -998,6 +998,20 @@ export default {
         saved: '429 默认回避设置保存成功',
         saveFailed: '保存 429 默认回避设置失败'
       },
+      grokOAuthHttp5xxCooldown: {
+        title: 'Grok OAuth HTTP 5xx 冷却',
+        description: 'Grok OAuth 上游返回普通 HTTP 5xx 时，临时暂停该账号调度。HTTP 529、正文已分类失败、流事件、传输错误和 API Key 账号继续使用现有策略。',
+        enabled: '启用 Grok OAuth HTTP 5xx 冷却',
+        enabledHint: '关闭后，符合条件的失败仍会切换账号，但不会添加本策略的账号冷却。',
+        cooldownSeconds: '冷却时长（秒）',
+        cooldownSecondsHint: '请输入 1–7200 的整数。',
+        sourceRuntime: '当前来源：已保存的运行时设置。',
+        sourceStartup: '当前来源：启动 YAML/环境变量配置。',
+        loadFailed: '加载 Grok OAuth HTTP 5xx 冷却设置失败。',
+        retry: '重试',
+        saved: 'Grok OAuth HTTP 5xx 冷却设置保存成功',
+        saveFailed: '保存 Grok OAuth HTTP 5xx 冷却设置失败'
+      },
       streamTimeout: {
         title: '流超时处理',
         description: '配置上游响应超时时的账户处理策略，避免问题账户持续被选中',

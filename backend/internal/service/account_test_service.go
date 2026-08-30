@@ -1033,13 +1033,21 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	} else if s.accountRepo != nil && isSuccessfulGrokRateLimitRecovery(account, &xai.QuotaSnapshot{StatusCode: resp.StatusCode}) {
 		clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
 	}
-	if s.accountRepo == nil || len(responseBody) == 0 {
+	if s.accountRepo == nil {
+		return
+	}
+	if len(responseBody) == 0 {
 		if resp.StatusCode == http.StatusPaymentRequired && s.accountRepo != nil {
 			stateCtx, cancel := openAIAccountStateContext(ctx)
 			defer cancel()
 			_ = s.accountRepo.SetTempUnschedulable(stateCtx, account.ID, now.Add(30*time.Minute), "grok payment required")
 		}
-		return
+		// A true Grok OAuth ordinary HTTP 5xx is fully identified by transport
+		// status and provenance, so an empty body still enters the shared runtime
+		// policy. Other empty-body responses retain their existing no-op behavior.
+		if !account.IsGrokOAuth() || resp.StatusCode < 500 || resp.StatusCode > 599 || resp.StatusCode == 529 {
+			return
+		}
 	}
 	if isGrokContentPolicyRejection(resp.StatusCode, responseBody) {
 		return
@@ -1062,6 +1070,8 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	cooldown := time.Duration(0)
 	reason := ""
 	if policyCooldown, handled := resolveGrokOAuthHTTP5xxCooldown(
+		ctx,
+		s.settingService,
 		s.cfg,
 		account,
 		resp.StatusCode,

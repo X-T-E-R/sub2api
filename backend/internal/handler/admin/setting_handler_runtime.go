@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"encoding/json"
+	"io"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
@@ -151,6 +153,71 @@ func (h *SettingHandler) UpdateRateLimit429CooldownSettings(c *gin.Context) {
 	response.Success(c, dto.RateLimit429CooldownSettings{
 		Enabled:         updatedSettings.Enabled,
 		CooldownSeconds: updatedSettings.CooldownSeconds,
+	})
+}
+
+// GetGrokOAuthHTTP5xxCooldownSettings returns the DB runtime override or the
+// effective startup configuration without materializing a setting row.
+// GET /api/v1/admin/settings/grok-oauth-http-5xx-cooldown
+func (h *SettingHandler) GetGrokOAuthHTTP5xxCooldownSettings(c *gin.Context) {
+	settings, err := h.settingService.GetGrokOAuthHTTP5xxCooldownSettings(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, dto.GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         settings.Enabled,
+		CooldownSeconds: settings.CooldownSeconds,
+		Source:          settings.Source,
+	})
+}
+
+type updateGrokOAuthHTTP5xxCooldownSettingsRequest struct {
+	Enabled         *bool `json:"enabled"`
+	CooldownSeconds *int  `json:"cooldown_seconds"`
+}
+
+// UpdateGrokOAuthHTTP5xxCooldownSettings strictly validates and persists one
+// complete runtime override.
+// PUT /api/v1/admin/settings/grok-oauth-http-5xx-cooldown
+func (h *SettingHandler) UpdateGrokOAuthHTTP5xxCooldownSettings(c *gin.Context) {
+	var req updateGrokOAuthHTTP5xxCooldownSettingsRequest
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		response.BadRequest(c, "Invalid request: request body must contain one JSON object")
+		return
+	}
+	if req.Enabled == nil {
+		response.BadRequest(c, "enabled is required")
+		return
+	}
+	if req.CooldownSeconds == nil {
+		response.BadRequest(c, "cooldown_seconds is required")
+		return
+	}
+	if *req.CooldownSeconds < 1 || *req.CooldownSeconds > 7200 {
+		response.BadRequest(c, "cooldown_seconds must be between 1-7200")
+		return
+	}
+
+	settings := &service.GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         *req.Enabled,
+		CooldownSeconds: *req.CooldownSeconds,
+	}
+	updated, err := h.settingService.SetGrokOAuthHTTP5xxCooldownSettings(c.Request.Context(), settings)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, dto.GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         updated.Enabled,
+		CooldownSeconds: updated.CooldownSeconds,
+		Source:          updated.Source,
 	})
 }
 

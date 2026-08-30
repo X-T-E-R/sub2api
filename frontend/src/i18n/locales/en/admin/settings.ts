@@ -1004,6 +1004,20 @@ export default {
         saved: '429 default cooldown settings saved',
         saveFailed: 'Failed to save 429 default cooldown settings'
       },
+      grokOAuthHttp5xxCooldown: {
+        title: 'Grok OAuth HTTP 5xx cooldown',
+        description: 'Temporarily removes a Grok OAuth account from scheduling after an ordinary upstream HTTP 5xx response. HTTP 529, body-classified failures, stream events, transport failures, and API-key accounts keep their existing policies.',
+        enabled: 'Enable Grok OAuth HTTP 5xx cooldown',
+        enabledHint: 'When disabled, qualifying failures still fail over but do not add this account cooldown.',
+        cooldownSeconds: 'Cooldown Duration (seconds)',
+        cooldownSecondsHint: 'Enter a whole number from 1 to 7200.',
+        sourceRuntime: 'Effective source: saved runtime setting.',
+        sourceStartup: 'Effective source: startup YAML/environment configuration.',
+        loadFailed: 'Failed to load Grok OAuth HTTP 5xx cooldown settings.',
+        retry: 'Retry',
+        saved: 'Grok OAuth HTTP 5xx cooldown settings saved',
+        saveFailed: 'Failed to save Grok OAuth HTTP 5xx cooldown settings'
+      },
       streamTimeout: {
         title: 'Stream Timeout Handling',
         description: 'Configure account handling strategy when upstream response times out',

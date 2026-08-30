@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 // IsRegistrationEnabled 检查是否开放注册
@@ -762,6 +765,103 @@ func (s *SettingService) SetRateLimit429CooldownSettings(ctx context.Context, se
 	}
 
 	return s.settingRepo.Set(ctx, SettingKeyRateLimit429CooldownSettings, string(data))
+}
+
+type storedGrokOAuthHTTP5xxCooldownSettings struct {
+	Enabled         *bool `json:"enabled"`
+	CooldownSeconds *int  `json:"cooldown_seconds"`
+}
+
+func startupGrokOAuthHTTP5xxCooldownSettings(cfg *config.Config) *GrokOAuthHTTP5xxCooldownSettings {
+	seconds := config.DefaultGatewayGrokOAuthHTTP5xxCooldownSeconds
+	enabled := true
+	if cfg != nil {
+		enabled = !cfg.Gateway.Grok.OAuthHTTP5xxCooldownDisabled
+		if configured := cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds; configured >= 1 && configured <= 7200 {
+			seconds = configured
+		}
+	}
+	return &GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         enabled,
+		CooldownSeconds: seconds,
+		Source:          GrokOAuthHTTP5xxCooldownSourceStartupConfig,
+	}
+}
+
+func decodeStoredGrokOAuthHTTP5xxCooldownSettings(value string) (*GrokOAuthHTTP5xxCooldownSettings, bool) {
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	var stored storedGrokOAuthHTTP5xxCooldownSettings
+	if err := decoder.Decode(&stored); err != nil {
+		return nil, false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, false
+	}
+	if stored.Enabled == nil || stored.CooldownSeconds == nil || *stored.CooldownSeconds < 1 || *stored.CooldownSeconds > 7200 {
+		return nil, false
+	}
+	return &GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         *stored.Enabled,
+		CooldownSeconds: *stored.CooldownSeconds,
+		Source:          GrokOAuthHTTP5xxCooldownSourceRuntimeSetting,
+	}, true
+}
+
+// GetGrokOAuthHTTP5xxCooldownSettings returns the effective runtime setting.
+// A missing row is quiet. Invalid rows and DB read failures fail open to the
+// validated startup configuration and emit a value-free warning event.
+func (s *SettingService) GetGrokOAuthHTTP5xxCooldownSettings(ctx context.Context) (*GrokOAuthHTTP5xxCooldownSettings, error) {
+	startup := startupGrokOAuthHTTP5xxCooldownSettings(nil)
+	if s != nil {
+		startup = startupGrokOAuthHTTP5xxCooldownSettings(s.cfg)
+	}
+	if s == nil || s.settingRepo == nil {
+		return startup, nil
+	}
+
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyGrokOAuthHTTP5xxCooldownSettings)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return startup, nil
+		}
+		slog.Warn("grok_oauth_http_5xx_cooldown_settings_fallback", "reason", "db_read_error")
+		return startup, nil
+	}
+	if settings, ok := decodeStoredGrokOAuthHTTP5xxCooldownSettings(value); ok {
+		return settings, nil
+	}
+	slog.Warn("grok_oauth_http_5xx_cooldown_settings_fallback", "reason", "invalid_setting")
+	return startup, nil
+}
+
+// SetGrokOAuthHTTP5xxCooldownSettings validates and atomically replaces the
+// single JSON setting row. Source is deliberately excluded from persistence.
+func (s *SettingService) SetGrokOAuthHTTP5xxCooldownSettings(ctx context.Context, settings *GrokOAuthHTTP5xxCooldownSettings) (*GrokOAuthHTTP5xxCooldownSettings, error) {
+	if settings == nil {
+		return nil, fmt.Errorf("settings cannot be nil")
+	}
+	if settings.CooldownSeconds < 1 || settings.CooldownSeconds > 7200 {
+		return nil, fmt.Errorf("cooldown_seconds must be between 1-7200")
+	}
+	data, err := json.Marshal(struct {
+		Enabled         bool `json:"enabled"`
+		CooldownSeconds int  `json:"cooldown_seconds"`
+	}{
+		Enabled:         settings.Enabled,
+		CooldownSeconds: settings.CooldownSeconds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal grok oauth HTTP 5xx cooldown settings: %w", err)
+	}
+	if err := s.settingRepo.Set(ctx, SettingKeyGrokOAuthHTTP5xxCooldownSettings, string(data)); err != nil {
+		return nil, fmt.Errorf("set grok oauth HTTP 5xx cooldown settings: %w", err)
+	}
+	return &GrokOAuthHTTP5xxCooldownSettings{
+		Enabled:         settings.Enabled,
+		CooldownSeconds: settings.CooldownSeconds,
+		Source:          GrokOAuthHTTP5xxCooldownSourceRuntimeSetting,
+	}, nil
 }
 
 // GetStreamTimeoutSettings 获取流超时处理配置

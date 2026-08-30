@@ -15,8 +15,11 @@ const {
   updateWebSearchEmulationConfig,
   getAdminApiKey,
   getOverloadCooldownSettings,
+  updateOverloadCooldownSettings,
   getRateLimit429CooldownSettings,
   updateRateLimit429CooldownSettings,
+  getGrokOAuthHttp5xxCooldownSettings,
+  updateGrokOAuthHttp5xxCooldownSettings,
   getPanelRateLimitSettings,
   updatePanelRateLimitSettings,
   getStreamTimeoutSettings,
@@ -43,8 +46,11 @@ const {
   updateWebSearchEmulationConfig: vi.fn(),
   getAdminApiKey: vi.fn(),
   getOverloadCooldownSettings: vi.fn(),
+  updateOverloadCooldownSettings: vi.fn(),
   getRateLimit429CooldownSettings: vi.fn(),
   updateRateLimit429CooldownSettings: vi.fn(),
+  getGrokOAuthHttp5xxCooldownSettings: vi.fn(),
+  updateGrokOAuthHttp5xxCooldownSettings: vi.fn(),
   getPanelRateLimitSettings: vi.fn().mockResolvedValue({
     enabled: true,
     user_rpm: 240,
@@ -90,8 +96,11 @@ vi.mock("@/api", () => ({
       updateWebSearchEmulationConfig,
       getAdminApiKey,
       getOverloadCooldownSettings,
+      updateOverloadCooldownSettings,
       getRateLimit429CooldownSettings,
       updateRateLimit429CooldownSettings,
+      getGrokOAuthHttp5xxCooldownSettings,
+      updateGrokOAuthHttp5xxCooldownSettings,
       getPanelRateLimitSettings,
       updatePanelRateLimitSettings,
       getStreamTimeoutSettings,
@@ -229,6 +238,28 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.upstreamBillingProbe.intervalHint": "范围 5–1440 分钟。",
     "admin.settings.upstreamBillingProbe.saved": "上游倍率自动探测设置已保存",
     "admin.settings.upstreamBillingProbe.saveFailed": "保存上游倍率自动探测设置失败",
+    "admin.settings.grokOAuthHttp5xxCooldown.title": "Grok OAuth HTTP 5xx 冷却",
+    "admin.settings.grokOAuthHttp5xxCooldown.description":
+      "Grok OAuth 上游返回普通 HTTP 5xx 时，临时暂停该账号调度。HTTP 529、正文已分类失败、流事件、传输错误和 API Key 账号继续使用现有策略。",
+    "admin.settings.grokOAuthHttp5xxCooldown.enabled":
+      "启用 Grok OAuth HTTP 5xx 冷却",
+    "admin.settings.grokOAuthHttp5xxCooldown.enabledHint":
+      "关闭后，符合条件的失败仍会切换账号，但不会添加本策略的账号冷却。",
+    "admin.settings.grokOAuthHttp5xxCooldown.cooldownSeconds":
+      "冷却时长（秒）",
+    "admin.settings.grokOAuthHttp5xxCooldown.cooldownSecondsHint":
+      "请输入 1–7200 的整数。",
+    "admin.settings.grokOAuthHttp5xxCooldown.sourceRuntime":
+      "当前来源：已保存的运行时设置。",
+    "admin.settings.grokOAuthHttp5xxCooldown.sourceStartup":
+      "当前来源：启动 YAML/环境变量配置。",
+    "admin.settings.grokOAuthHttp5xxCooldown.loadFailed":
+      "加载 Grok OAuth HTTP 5xx 冷却设置失败。",
+    "admin.settings.grokOAuthHttp5xxCooldown.retry": "重试",
+    "admin.settings.grokOAuthHttp5xxCooldown.saved":
+      "Grok OAuth HTTP 5xx 冷却设置保存成功",
+    "admin.settings.grokOAuthHttp5xxCooldown.saveFailed":
+      "保存 Grok OAuth HTTP 5xx 冷却设置失败",
     "admin.settings.openaiFastPolicy.summaryTargetModels": "目标模型",
     "admin.settings.openaiFastPolicy.summaryAllModels": "全部模型",
     "admin.settings.openaiFastPolicy.summaryOtherModels": "其他模型",
@@ -602,6 +633,380 @@ async function openUsersTab(wrapper: ReturnType<typeof mountView>) {
   await usersTabButton?.trigger("click");
   await flushPromises();
 }
+
+describe("admin SettingsView Grok OAuth HTTP 5xx cooldown", () => {
+  beforeEach(() => {
+    getSettings.mockReset();
+    updateSettings.mockReset();
+    getWebSearchEmulationConfig.mockReset();
+    updateWebSearchEmulationConfig.mockReset();
+    getAdminApiKey.mockReset();
+    getOverloadCooldownSettings.mockReset();
+    updateOverloadCooldownSettings.mockReset();
+    getRateLimit429CooldownSettings.mockReset();
+    updateRateLimit429CooldownSettings.mockReset();
+    getGrokOAuthHttp5xxCooldownSettings.mockReset();
+    updateGrokOAuthHttp5xxCooldownSettings.mockReset();
+    getPanelRateLimitSettings.mockReset();
+    updatePanelRateLimitSettings.mockReset();
+    getStreamTimeoutSettings.mockReset();
+    getRectifierSettings.mockReset();
+    getBetaPolicySettings.mockReset();
+    getUpstreamBillingProbeSettings.mockReset();
+    updateUpstreamBillingProbeSettings.mockReset();
+    getOllamaCloudUsageSettings.mockReset();
+    updateOllamaCloudUsageSettings.mockReset();
+    getGroups.mockReset();
+    listProxies.mockReset();
+    getProviders.mockReset();
+    updateProvider.mockReset();
+    createProvider.mockReset();
+    deleteProvider.mockReset();
+    fetchPublicSettings.mockReset();
+    adminSettingsFetch.mockReset();
+    showError.mockReset();
+    showSuccess.mockReset();
+
+    getSettings.mockResolvedValue({ ...baseSettingsResponse });
+    getWebSearchEmulationConfig.mockResolvedValue({
+      enabled: false,
+      providers: [],
+    });
+    getAdminApiKey.mockResolvedValue({ exists: false, masked_key: "" });
+    getOverloadCooldownSettings.mockResolvedValue({
+      enabled: true,
+      cooldown_minutes: 10,
+    });
+    updateOverloadCooldownSettings.mockImplementation(async (payload) => payload);
+    getRateLimit429CooldownSettings.mockResolvedValue({
+      enabled: true,
+      cooldown_seconds: 5,
+    });
+    updateRateLimit429CooldownSettings.mockImplementation(async (payload) => payload);
+    getGrokOAuthHttp5xxCooldownSettings.mockResolvedValue({
+      enabled: true,
+      cooldown_seconds: 120,
+      source: "startup_config",
+    });
+    updateGrokOAuthHttp5xxCooldownSettings.mockImplementation(
+      async (payload) => ({ ...payload, source: "runtime_setting" }),
+    );
+    getPanelRateLimitSettings.mockResolvedValue({
+      enabled: true,
+      user_rpm: 240,
+      heavy_rpm: 60,
+      exempt_admin: true,
+      public_ip_rpm: 300,
+    });
+    updatePanelRateLimitSettings.mockImplementation(async (payload) => payload);
+    getStreamTimeoutSettings.mockResolvedValue({
+      enabled: true,
+      action: "temp_unsched",
+      temp_unsched_minutes: 5,
+      threshold_count: 3,
+      threshold_window_minutes: 10,
+    });
+    getRectifierSettings.mockResolvedValue({
+      enabled: true,
+      thinking_signature_enabled: true,
+      thinking_budget_enabled: true,
+      apikey_signature_enabled: false,
+      apikey_signature_patterns: [],
+    });
+    getBetaPolicySettings.mockResolvedValue({ rules: [] });
+    getUpstreamBillingProbeSettings.mockResolvedValue({
+      enabled: true,
+      interval_minutes: 30,
+    });
+    getOllamaCloudUsageSettings.mockResolvedValue({
+      enabled: false,
+      interval_minutes: 60,
+      debounce_minutes: 1,
+    });
+    getGroups.mockResolvedValue([]);
+    listProxies.mockResolvedValue({ items: [] });
+    getProviders.mockResolvedValue({ data: [] });
+    fetchPublicSettings.mockResolvedValue(undefined);
+    adminSettingsFetch.mockResolvedValue(undefined);
+  });
+
+  it("loads and renders a disabled startup setting without hiding its seconds value", async () => {
+    let resolveSetting:
+      | ((value: {
+          enabled: boolean;
+          cooldown_seconds: number;
+          source: "startup_config";
+        }) => void)
+      | undefined;
+    getGrokOAuthHttp5xxCooldownSettings.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSetting = resolve;
+        }),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get(
+      '[data-testid="grok-oauth-http-5xx-cooldown-card"]',
+    );
+    expect(
+      card.find('[data-testid="grok-oauth-http-5xx-cooldown-loading"]').exists(),
+    ).toBe(true);
+
+    resolveSetting?.({
+      enabled: false,
+      cooldown_seconds: 360,
+      source: "startup_config",
+    });
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    expect(getGrokOAuthHttp5xxCooldownSettings).toHaveBeenCalledTimes(1);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-enabled"]',
+      ).element.checked,
+    ).toBe(false);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-seconds"]',
+      ).element.value,
+    ).toBe("360");
+    expect(
+      card.get('[data-testid="grok-oauth-http-5xx-cooldown-source"]').text(),
+    ).toBe("当前来源：启动 YAML/环境变量配置。");
+
+    const html = wrapper.html();
+    expect(html.indexOf("admin.settings.rateLimit429Cooldown.title")).toBeLessThan(
+      html.indexOf("Grok OAuth HTTP 5xx 冷却"),
+    );
+    expect(html.indexOf("Grok OAuth HTTP 5xx 冷却")).toBeLessThan(
+      html.indexOf("admin.settings.streamTimeout.title"),
+    );
+  });
+
+  it("keeps controls blocked with no effective source after initial and repeated load failures", async () => {
+    getGrokOAuthHttp5xxCooldownSettings.mockRejectedValue(
+      new Error("load failed"),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get(
+      '[data-testid="grok-oauth-http-5xx-cooldown-card"]',
+    );
+
+    expect(
+      card.get('[data-testid="grok-oauth-http-5xx-cooldown-load-error"]').text(),
+    ).toContain("加载 Grok OAuth HTTP 5xx 冷却设置失败。");
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-enabled"]',
+      ).element.disabled,
+    ).toBe(true);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-seconds"]',
+      ).element.disabled,
+    ).toBe(true);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-seconds"]',
+      ).element.value,
+    ).toBe("");
+    expect(
+      card.get<HTMLButtonElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-save"]',
+      ).element.disabled,
+    ).toBe(true);
+    expect(
+      card.find('[data-testid="grok-oauth-http-5xx-cooldown-source"]').exists(),
+    ).toBe(false);
+    expect(showError).toHaveBeenCalledWith("error");
+    const errorCountAfterInitialLoad = showError.mock.calls.length;
+
+    await card
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-save"]')
+      .trigger("click");
+    expect(updateGrokOAuthHttp5xxCooldownSettings).not.toHaveBeenCalled();
+
+    await card
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-retry"]')
+      .trigger("click");
+    await flushPromises();
+
+    expect(getGrokOAuthHttp5xxCooldownSettings).toHaveBeenCalledTimes(2);
+    expect(showError).toHaveBeenCalledTimes(errorCountAfterInitialLoad + 1);
+    expect(
+      card.get<HTMLButtonElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-save"]',
+      ).element.disabled,
+    ).toBe(true);
+    expect(
+      card.find('[data-testid="grok-oauth-http-5xx-cooldown-source"]').exists(),
+    ).toBe(false);
+  });
+
+  it("enables controls with returned state after a successful retry", async () => {
+    getGrokOAuthHttp5xxCooldownSettings
+      .mockRejectedValueOnce(new Error("load failed"))
+      .mockResolvedValueOnce({
+        enabled: true,
+        cooldown_seconds: 90,
+        source: "runtime_setting",
+      });
+
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get(
+      '[data-testid="grok-oauth-http-5xx-cooldown-card"]',
+    );
+    await card
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-retry"]')
+      .trigger("click");
+    await flushPromises();
+
+    expect(
+      card.find('[data-testid="grok-oauth-http-5xx-cooldown-load-error"]').exists(),
+    ).toBe(false);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-enabled"]',
+      ).element.disabled,
+    ).toBe(false);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-enabled"]',
+      ).element.checked,
+    ).toBe(true);
+    expect(
+      card.get<HTMLInputElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-seconds"]',
+      ).element.value,
+    ).toBe("90");
+    expect(
+      card.get<HTMLButtonElement>(
+        '[data-testid="grok-oauth-http-5xx-cooldown-save"]',
+      ).element.disabled,
+    ).toBe(false);
+    expect(
+      card.get('[data-testid="grok-oauth-http-5xx-cooldown-source"]').text(),
+    ).toBe("当前来源：已保存的运行时设置。");
+  });
+
+  it("disables save and shows an inline error for missing, fractional, and out-of-range seconds", async () => {
+    getGrokOAuthHttp5xxCooldownSettings.mockResolvedValue({
+      enabled: true,
+      cooldown_seconds: 120,
+      source: "startup_config",
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get(
+      '[data-testid="grok-oauth-http-5xx-cooldown-card"]',
+    );
+    const input = card.get<HTMLInputElement>(
+      '[data-testid="grok-oauth-http-5xx-cooldown-seconds"]',
+    );
+    const save = card.get<HTMLButtonElement>(
+      '[data-testid="grok-oauth-http-5xx-cooldown-save"]',
+    );
+
+    for (const value of ["", "1.5", "0", "7201"]) {
+      await input.setValue(value);
+      expect(save.element.disabled).toBe(true);
+      expect(
+        card.find('[data-testid="grok-oauth-http-5xx-cooldown-error"]').exists(),
+      ).toBe(true);
+    }
+
+    await save.trigger("click");
+    expect(updateGrokOAuthHttp5xxCooldownSettings).not.toHaveBeenCalled();
+  });
+
+  it("saves the exact payload and refreshes the displayed source from the response", async () => {
+    getGrokOAuthHttp5xxCooldownSettings.mockResolvedValue({
+      enabled: false,
+      cooldown_seconds: 120,
+      source: "startup_config",
+    });
+    updateGrokOAuthHttp5xxCooldownSettings.mockResolvedValue({
+      enabled: false,
+      cooldown_seconds: 45,
+      source: "runtime_setting",
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    const card = wrapper.get(
+      '[data-testid="grok-oauth-http-5xx-cooldown-card"]',
+    );
+    await card
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-seconds"]')
+      .setValue("45");
+    await card
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-save"]')
+      .trigger("click");
+    await flushPromises();
+
+    expect(updateGrokOAuthHttp5xxCooldownSettings).toHaveBeenCalledWith({
+      enabled: false,
+      cooldown_seconds: 45,
+    });
+    expect(
+      card.get('[data-testid="grok-oauth-http-5xx-cooldown-source"]').text(),
+    ).toBe("当前来源：已保存的运行时设置。");
+    expect(showSuccess).toHaveBeenCalledWith(
+      "Grok OAuth HTTP 5xx 冷却设置保存成功",
+    );
+  });
+
+  it("reports a save failure through the existing settings error channel", async () => {
+    getGrokOAuthHttp5xxCooldownSettings.mockResolvedValue({
+      enabled: true,
+      cooldown_seconds: 120,
+      source: "startup_config",
+    });
+    updateGrokOAuthHttp5xxCooldownSettings.mockRejectedValue(
+      new Error("save failed"),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper
+      .get('[data-testid="grok-oauth-http-5xx-cooldown-save"]')
+      .trigger("click");
+    await flushPromises();
+
+    expect(showError).toHaveBeenCalledWith("error");
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+
+  it("keeps English and Chinese feature copy keys aligned", () => {
+    const enCopy = enSettings.settings.grokOAuthHttp5xxCooldown;
+    const zhCopy = zhSettings.settings.grokOAuthHttp5xxCooldown;
+
+    expect(Object.keys(enCopy).sort()).toEqual(Object.keys(zhCopy).sort());
+    expect(enCopy.title).toBe("Grok OAuth HTTP 5xx cooldown");
+    expect(enCopy.description).toContain("ordinary upstream HTTP 5xx response");
+    expect(enCopy.cooldownSecondsHint).toBe(
+      "Enter a whole number from 1 to 7200.",
+    );
+    expect(enCopy.sourceRuntime).toBe(
+      "Effective source: saved runtime setting.",
+    );
+    expect(enCopy.loadFailed).toBe(
+      "Failed to load Grok OAuth HTTP 5xx cooldown settings.",
+    );
+    expect(zhCopy.title).toBe("Grok OAuth HTTP 5xx 冷却");
+    expect(zhCopy.description).toContain("普通 HTTP 5xx");
+    expect(zhCopy.cooldownSecondsHint).toBe("请输入 1–7200 的整数。");
+    expect(zhCopy.sourceStartup).toBe("当前来源：启动 YAML/环境变量配置。");
+    expect(zhCopy.retry).toBe("重试");
+  });
+});
 
 describe("admin SettingsView email domain quota copy", () => {
   it("documents the email domain quota and empty-whitelist behavior in both locales", () => {

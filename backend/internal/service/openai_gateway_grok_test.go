@@ -3038,6 +3038,52 @@ func TestHandleGrokAccountUpstreamError5xxRespectsPoolMode(t *testing.T) {
 }
 
 func TestHandleGrokAccountUpstreamErrorOAuth5xxCooldownPolicy(t *testing.T) {
+	t.Run("runtime override wins over startup config", func(t *testing.T) {
+		var logs bytes.Buffer
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(previous) })
+
+		account := &Account{ID: 619, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		settingRepo := newGrokHTTP5xxSettingRepo()
+		settingRepo.value = `{"enabled":true,"cooldown_seconds":9}`
+		svc := &OpenAIGatewayService{
+			accountRepo:    repo,
+			cfg:            cfg,
+			settingService: NewSettingService(settingRepo, cfg),
+		}
+		before := time.Now()
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusServiceUnavailable, nil, nil)
+
+		require.Equal(t, 1, settingRepo.getValueCalls)
+		require.Equal(t, 1, repo.tempUnschedCalls)
+		require.WithinDuration(t, before.Add(9*time.Second), repo.lastTempUnschedUntil, time.Second)
+		require.Equal(t, GrokOAuthHTTP5xxCooldownSourceRuntimeSetting, gjson.Get(logs.String(), "policy_source").String())
+	})
+
+	t.Run("runtime disabled blocks startup fallback", func(t *testing.T) {
+		account := &Account{ID: 618, Platform: PlatformGrok, Type: AccountTypeOAuth}
+		repo := &grokQuotaAccountRepo{}
+		cfg := &config.Config{}
+		cfg.Gateway.Grok.OAuthHTTP5xxCooldownSeconds = 17
+		settingRepo := newGrokHTTP5xxSettingRepo()
+		settingRepo.value = `{"enabled":false,"cooldown_seconds":9}`
+		svc := &OpenAIGatewayService{
+			accountRepo:    repo,
+			cfg:            cfg,
+			settingService: NewSettingService(settingRepo, cfg),
+		}
+
+		svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusInternalServerError, nil, nil)
+
+		require.Equal(t, 1, settingRepo.getValueCalls)
+		require.Zero(t, repo.tempUnschedCalls)
+	})
+
 	t.Run("custom cooldown", func(t *testing.T) {
 		account := &Account{ID: 620, Platform: PlatformGrok, Type: AccountTypeOAuth}
 		repo := &grokQuotaAccountRepo{}

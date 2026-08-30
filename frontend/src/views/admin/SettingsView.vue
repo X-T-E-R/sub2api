@@ -411,6 +411,183 @@
             </div>
           </div>
 
+          <!-- Grok OAuth HTTP 5xx Cooldown Settings -->
+          <div class="card" data-testid="grok-oauth-http-5xx-cooldown-card">
+            <div
+              class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
+            >
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t("admin.settings.grokOAuthHttp5xxCooldown.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.grokOAuthHttp5xxCooldown.description") }}
+              </p>
+            </div>
+            <div class="space-y-5 p-6">
+              <div
+                v-if="grokOAuthHttp5xxCooldownLoading"
+                class="flex items-center gap-2 text-gray-500"
+                data-testid="grok-oauth-http-5xx-cooldown-loading"
+              >
+                <div
+                  class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"
+                ></div>
+                {{ t("common.loading") }}
+              </div>
+
+              <template v-else>
+                <div
+                  v-if="grokOAuthHttp5xxCooldownLoadError"
+                  class="flex items-center justify-between gap-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 dark:border-red-900/60 dark:bg-red-950/30"
+                  data-testid="grok-oauth-http-5xx-cooldown-load-error"
+                >
+                  <p class="text-sm text-red-700 dark:text-red-300">
+                    {{
+                      t("admin.settings.grokOAuthHttp5xxCooldown.loadFailed")
+                    }}
+                  </p>
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm flex-shrink-0"
+                    @click="loadGrokOAuthHttp5xxCooldownSettings"
+                    data-testid="grok-oauth-http-5xx-cooldown-retry"
+                  >
+                    {{ t("admin.settings.grokOAuthHttp5xxCooldown.retry") }}
+                  </button>
+                </div>
+
+                <div class="flex items-center justify-between">
+                  <div>
+                    <label class="font-medium text-gray-900 dark:text-white">{{
+                      t("admin.settings.grokOAuthHttp5xxCooldown.enabled")
+                    }}</label>
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                      {{
+                        t("admin.settings.grokOAuthHttp5xxCooldown.enabledHint")
+                      }}
+                    </p>
+                  </div>
+                  <Toggle
+                    v-model="grokOAuthHttp5xxCooldownForm.enabled"
+                    :disabled="!grokOAuthHttp5xxCooldownLoaded"
+                    data-testid="grok-oauth-http-5xx-cooldown-enabled"
+                  />
+                </div>
+
+                <div
+                  class="space-y-4 border-t border-gray-100 pt-4 dark:border-dark-700"
+                >
+                  <div>
+                    <label
+                      for="grok-oauth-http-5xx-cooldown-seconds"
+                      class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                    >
+                      {{
+                        t(
+                          "admin.settings.grokOAuthHttp5xxCooldown.cooldownSeconds",
+                        )
+                      }}
+                    </label>
+                    <input
+                      id="grok-oauth-http-5xx-cooldown-seconds"
+                      v-model.number="grokOAuthHttp5xxCooldownForm.cooldown_seconds"
+                      type="number"
+                      min="1"
+                      max="7200"
+                      step="1"
+                      :disabled="!grokOAuthHttp5xxCooldownLoaded"
+                      :aria-invalid="
+                        grokOAuthHttp5xxCooldownLoaded &&
+                        !grokOAuthHttp5xxCooldownValid
+                      "
+                      aria-describedby="grok-oauth-http-5xx-cooldown-seconds-help"
+                      class="input w-32"
+                      data-testid="grok-oauth-http-5xx-cooldown-seconds"
+                    />
+                    <p
+                      id="grok-oauth-http-5xx-cooldown-seconds-help"
+                      class="mt-1.5 text-xs"
+                      :class="
+                        !grokOAuthHttp5xxCooldownLoaded ||
+                        grokOAuthHttp5xxCooldownValid
+                          ? 'text-gray-500 dark:text-gray-400'
+                          : 'text-red-600 dark:text-red-400'
+                      "
+                      :data-testid="
+                        !grokOAuthHttp5xxCooldownLoaded ||
+                        grokOAuthHttp5xxCooldownValid
+                          ? undefined
+                          : 'grok-oauth-http-5xx-cooldown-error'
+                      "
+                    >
+                      {{
+                        t(
+                          "admin.settings.grokOAuthHttp5xxCooldown.cooldownSecondsHint",
+                        )
+                      }}
+                    </p>
+                  </div>
+
+                  <p
+                    v-if="grokOAuthHttp5xxCooldownLoaded"
+                    class="text-xs text-gray-500 dark:text-gray-400"
+                    data-testid="grok-oauth-http-5xx-cooldown-source"
+                  >
+                    {{
+                      t(
+                        grokOAuthHttp5xxCooldownForm.source === "runtime_setting"
+                          ? "admin.settings.grokOAuthHttp5xxCooldown.sourceRuntime"
+                          : "admin.settings.grokOAuthHttp5xxCooldown.sourceStartup",
+                      )
+                    }}
+                  </p>
+                </div>
+
+                <div
+                  class="flex justify-end border-t border-gray-100 pt-4 dark:border-dark-700"
+                >
+                  <button
+                    type="button"
+                    @click="saveGrokOAuthHttp5xxCooldownSettings"
+                    :disabled="
+                      !grokOAuthHttp5xxCooldownLoaded ||
+                      grokOAuthHttp5xxCooldownSaving ||
+                      !grokOAuthHttp5xxCooldownValid
+                    "
+                    class="btn btn-primary btn-sm"
+                    data-testid="grok-oauth-http-5xx-cooldown-save"
+                  >
+                    <svg
+                      v-if="grokOAuthHttp5xxCooldownSaving"
+                      class="mr-1 h-4 w-4 animate-spin"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        class="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        stroke-width="4"
+                      ></circle>
+                      <path
+                        class="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                    {{
+                      grokOAuthHttp5xxCooldownSaving
+                        ? t("common.saving")
+                        : t("common.save")
+                    }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <!-- Stream Timeout Settings -->
           <div class="card">
             <div
@@ -8963,6 +9140,32 @@ const rateLimit429CooldownForm = reactive({
   cooldown_seconds: 5,
 });
 
+// Grok OAuth HTTP 5xx Cooldown 状态
+const grokOAuthHttp5xxCooldownLoading = ref(true);
+const grokOAuthHttp5xxCooldownSaving = ref(false);
+const grokOAuthHttp5xxCooldownLoaded = ref(false);
+const grokOAuthHttp5xxCooldownLoadError = ref(false);
+const grokOAuthHttp5xxCooldownForm = reactive<{
+  enabled: boolean;
+  cooldown_seconds: number | string;
+  source: "runtime_setting" | "startup_config" | null;
+}>({
+  enabled: false,
+  cooldown_seconds: "",
+  source: null,
+});
+const grokOAuthHttp5xxCooldownValid = computed(
+  () => {
+    const value = grokOAuthHttp5xxCooldownForm.cooldown_seconds;
+    return (
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 1 &&
+      value <= 7200
+    );
+  },
+);
+
 // Panel API Rate Limit 状态
 const panelRateLimitLoading = ref(true);
 const panelRateLimitSaving = ref(false);
@@ -11879,6 +12082,65 @@ async function saveRateLimit429CooldownSettings() {
   }
 }
 
+// Grok OAuth HTTP 5xx Cooldown 方法
+async function loadGrokOAuthHttp5xxCooldownSettings() {
+  grokOAuthHttp5xxCooldownLoading.value = true;
+  grokOAuthHttp5xxCooldownLoaded.value = false;
+  grokOAuthHttp5xxCooldownLoadError.value = false;
+  try {
+    const settings =
+      await adminAPI.settings.getGrokOAuthHttp5xxCooldownSettings();
+    Object.assign(grokOAuthHttp5xxCooldownForm, settings);
+    grokOAuthHttp5xxCooldownLoaded.value = true;
+  } catch (error: unknown) {
+    grokOAuthHttp5xxCooldownLoadError.value = true;
+    grokOAuthHttp5xxCooldownForm.enabled = false;
+    grokOAuthHttp5xxCooldownForm.cooldown_seconds = "";
+    grokOAuthHttp5xxCooldownForm.source = null;
+    appStore.showError(
+      extractApiErrorMessage(
+        error,
+        t("admin.settings.grokOAuthHttp5xxCooldown.loadFailed"),
+      ),
+    );
+  } finally {
+    grokOAuthHttp5xxCooldownLoading.value = false;
+  }
+}
+
+async function saveGrokOAuthHttp5xxCooldownSettings() {
+  const cooldownSeconds = grokOAuthHttp5xxCooldownForm.cooldown_seconds;
+  if (
+    !grokOAuthHttp5xxCooldownLoaded.value ||
+    !grokOAuthHttp5xxCooldownValid.value ||
+    typeof cooldownSeconds !== "number"
+  ) {
+    return;
+  }
+
+  grokOAuthHttp5xxCooldownSaving.value = true;
+  try {
+    const updated =
+      await adminAPI.settings.updateGrokOAuthHttp5xxCooldownSettings({
+        enabled: grokOAuthHttp5xxCooldownForm.enabled,
+        cooldown_seconds: cooldownSeconds,
+      });
+    Object.assign(grokOAuthHttp5xxCooldownForm, updated);
+    appStore.showSuccess(
+      t("admin.settings.grokOAuthHttp5xxCooldown.saved"),
+    );
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(
+        error,
+        t("admin.settings.grokOAuthHttp5xxCooldown.saveFailed"),
+      ),
+    );
+  } finally {
+    grokOAuthHttp5xxCooldownSaving.value = false;
+  }
+}
+
 // Stream Timeout 方法
 async function loadStreamTimeoutSettings() {
   streamTimeoutLoading.value = true;
@@ -12521,6 +12783,7 @@ onMounted(() => {
   loadOllamaCloudUsageSettings();
   loadOverloadCooldownSettings();
   loadRateLimit429CooldownSettings();
+  loadGrokOAuthHttp5xxCooldownSettings();
   loadPanelRateLimitSettings();
   loadStreamTimeoutSettings();
   loadRectifierSettings();
