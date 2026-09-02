@@ -3607,13 +3607,6 @@ func findBlockedCyberSession(ctx context.Context, gatewayService *service.OpenAI
 	return gatewayService.FindCyberSessionBlockedForRequest(ctx, apiKeyID, c, body, clientIP, userAgent)
 }
 
-func cyberSessionScopeKey(apiKeyID int64, c *gin.Context) string {
-	if c == nil {
-		return ""
-	}
-	return service.CyberSessionScopeKey(apiKeyID, strings.TrimSpace(ip.GetClientIP(c)), c.GetHeader("User-Agent"))
-}
-
 // enqueueCyberSessionBlockedOpsEntry captures request meta and enqueues the
 // ops_error_logs entry for a locally blocked request.
 func (h *OpenAIGatewayHandler) enqueueCyberSessionBlockedOpsEntry(c *gin.Context, apiKey *service.APIKey, model string, receipt service.CyberSessionBlockReceipt) {

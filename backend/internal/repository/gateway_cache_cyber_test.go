@@ -101,7 +101,8 @@ func TestGatewayCacheCyberV2PrefixesAreExclusiveAndExpire(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	store := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	store, ok := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	require.True(t, ok)
 	ctx := context.Background()
 
 	require.NoError(t, client.Set(ctx, "cyber_session_block:same", "1", time.Minute).Err())
@@ -123,7 +124,8 @@ func TestGatewayCacheCyberLookupSkipsExpiredAndNoTTLBeforeLaterMatch(t *testing.
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	store := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	store, ok := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	require.True(t, ok)
 	ctx := context.Background()
 
 	require.NoError(t, client.Set(ctx, cyberSessionTranscriptBlockPrefix+"expired", "1", time.Second).Err())
