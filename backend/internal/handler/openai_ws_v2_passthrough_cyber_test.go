@@ -57,7 +57,9 @@ func newOpenAIWSPassthroughHandlerHarnessWithAudit(t *testing.T, upstreamURL str
 	t.Helper()
 	gatewayCache := testutil.NewRedisGatewayCache(t)
 	if failCyberWrite {
-		gatewayCache = &failingCyberWriteGatewayCache{GatewayCache: gatewayCache, store: gatewayCache.(service.CyberSessionBlockStore)}
+		store, ok := gatewayCache.(service.CyberSessionBlockStore)
+		require.True(t, ok)
+		gatewayCache = &failingCyberWriteGatewayCache{GatewayCache: gatewayCache, store: store}
 	}
 
 	settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
@@ -277,7 +279,8 @@ func TestOpenAIResponsesWebSocketV2FirstTurnLocalCyberBlockPrecedesSecurityAudit
 	keyCtx.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(string(payload)))
 	digest := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, keyCtx, payload)
 	require.NotEmpty(t, digest)
-	store := harness.gatewayCache.(service.CyberSessionBlockStore)
+	store, ok := harness.gatewayCache.(service.CyberSessionBlockStore)
+	require.True(t, ok)
 	require.NoError(t, store.SetCyberSessionBlocked(context.Background(), service.CyberSessionBlockKindExplicit, "", digest, time.Minute))
 
 	writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
