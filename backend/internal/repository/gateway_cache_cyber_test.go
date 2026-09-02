@@ -2,7 +2,7 @@ package repository
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -57,15 +57,17 @@ func TestGatewayCacheCyberBlockWritesScopeAndExactKeysTogether(t *testing.T) {
 	require.True(t, ok)
 
 	ctx := context.Background()
-	require.NoError(t, store.SetCyberSessionBlocked(ctx, "scope-1", []string{"block-1", "block-2"}, time.Minute))
+	require.NoError(t, store.SetCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, "scope-1", "block-1", time.Minute))
 	active, err := store.IsCyberSessionScopeActive(ctx, "scope-1")
 	require.NoError(t, err)
 	require.True(t, active)
-	matched, err := store.FindCyberSessionBlocked(ctx, []string{"missing", "block-1", "block-2"})
+	matched, ttl, err := store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, []string{"missing", "block-1"})
 	require.NoError(t, err)
 	require.Equal(t, "block-1", matched)
+	require.Greater(t, ttl, time.Duration(0))
 	require.Greater(t, server.TTL(cyberSessionScopePrefix+"scope-1"), time.Duration(0))
-	require.Equal(t, server.TTL(cyberSessionBlockPrefix+"block-1"), server.TTL(cyberSessionBlockPrefix+"block-2"))
+	require.Greater(t, server.TTL(cyberSessionTranscriptBlockPrefix+"block-1"), time.Duration(0))
+	require.False(t, server.Exists("cyber_session_block:block-1"), "v1 prefix must remain untouched")
 }
 
 func TestGatewayCacheCyberBlockCommandsAreBoundedAndLookupShortCircuits(t *testing.T) {
@@ -77,21 +79,65 @@ func TestGatewayCacheCyberBlockCommandsAreBoundedAndLookupShortCircuits(t *testi
 	store, ok := NewGatewayCache(client).(service.CyberSessionBlockStore)
 	require.True(t, ok)
 
-	keys := make([]string, cyberSessionRedisCommandMaxKeys*2+44)
+	keys := make([]string, cyberSessionRedisCommandMaxKeys*2)
 	for i := range keys {
-		keys[i] = "block-" + strconv.Itoa(i)
+		keys[i] = fmt.Sprintf("block-%d", i)
 	}
 	ctx := context.Background()
-	require.NoError(t, store.SetCyberSessionBlocked(ctx, "large-scope", keys, time.Minute))
-	require.Equal(t, []int{cyberSessionRedisCommandMaxKeys, cyberSessionRedisCommandMaxKeys, 44}, hook.setBatchSizes)
+	require.NoError(t, store.SetCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, "large-scope", keys[cyberSessionRedisCommandMaxKeys+3], time.Minute))
 
 	lookup := make([]string, len(keys))
 	for i := range lookup {
-		lookup[i] = "missing-" + strconv.Itoa(i)
+		lookup[i] = fmt.Sprintf("missing-%d", i)
 	}
 	lookup[cyberSessionRedisCommandMaxKeys+3] = keys[cyberSessionRedisCommandMaxKeys+3]
-	matched, err := store.FindCyberSessionBlocked(ctx, lookup)
+	matched, _, err := store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, lookup)
 	require.NoError(t, err)
 	require.Equal(t, keys[cyberSessionRedisCommandMaxKeys+3], matched)
 	require.Equal(t, []int{cyberSessionRedisCommandMaxKeys, cyberSessionRedisCommandMaxKeys}, hook.mgetKeyCounts)
+}
+
+func TestGatewayCacheCyberV2PrefixesAreExclusiveAndExpire(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	ctx := context.Background()
+
+	require.NoError(t, client.Set(ctx, "cyber_session_block:same", "1", time.Minute).Err())
+	matched, _, err := store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindExplicit, []string{"same"})
+	require.NoError(t, err)
+	require.Empty(t, matched, "v1 keys must be ignored")
+	require.NoError(t, store.SetCyberSessionBlocked(ctx, service.CyberSessionBlockKindExplicit, "ignored", "same", time.Second))
+	require.True(t, server.Exists(cyberSessionExplicitBlockPrefix+"same"))
+	require.False(t, server.Exists(cyberSessionTranscriptBlockPrefix+"same"))
+	require.False(t, server.Exists(cyberSessionScopePrefix+"ignored"), "explicit mode never writes scope")
+
+	server.FastForward(2 * time.Second)
+	matched, _, err = store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindExplicit, []string{"same"})
+	require.NoError(t, err)
+	require.Empty(t, matched)
+}
+
+func TestGatewayCacheCyberLookupSkipsExpiredAndNoTTLBeforeLaterMatch(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewGatewayCache(client).(service.CyberSessionBlockStore)
+	ctx := context.Background()
+
+	require.NoError(t, client.Set(ctx, cyberSessionTranscriptBlockPrefix+"expired", "1", time.Second).Err())
+	require.NoError(t, client.Set(ctx, cyberSessionTranscriptBlockPrefix+"persistent", "1", 0).Err())
+	require.NoError(t, client.Set(ctx, cyberSessionTranscriptBlockPrefix+"valid", "1", time.Minute).Err())
+	server.FastForward(2 * time.Second)
+
+	matched, ttl, err := store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, []string{"expired", "persistent", "valid"})
+	require.NoError(t, err)
+	require.Equal(t, "valid", matched)
+	require.Greater(t, ttl, time.Duration(0))
+
+	matched, ttl, err = store.FindCyberSessionBlocked(ctx, service.CyberSessionBlockKindTranscript, []string{"expired", "persistent", "missing"})
+	require.NoError(t, err)
+	require.Empty(t, matched)
+	require.Zero(t, ttl)
 }

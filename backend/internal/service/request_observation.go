@@ -23,23 +23,24 @@ const (
 // It intentionally contains no request/response body, headers, URL, credentials,
 // or raw error text.
 type RequestAttemptEvidence struct {
-	Sequence           int    `json:"sequence"`
-	AccountID          int64  `json:"account_id"`
-	Platform           string `json:"platform,omitempty"`
-	StartedOffsetMs    int    `json:"started_offset_ms"`
-	SelectionMs        int    `json:"selection_ms"`
-	SlotWaitMs         int    `json:"slot_wait_ms"`
-	ForwardMs          int    `json:"forward_ms"`
-	StatusCode         *int   `json:"status_code,omitempty"`
-	Outcome            string `json:"outcome"`
-	Stage              string `json:"stage,omitempty"`
-	Scope              string `json:"scope,omitempty"`
-	Reason             string `json:"reason,omitempty"`
-	NextAction         string `json:"next_action,omitempty"`
-	WaitAfterMs        int    `json:"wait_after_ms,omitempty"`
-	UpstreamRequestID  string `json:"upstream_request_id,omitempty"`
-	TerminalKind       string `json:"terminal_kind,omitempty"`
-	SemanticOutputSeen bool   `json:"semantic_output_seen"`
+	Sequence           int                       `json:"sequence"`
+	AccountID          int64                     `json:"account_id"`
+	Platform           string                    `json:"platform,omitempty"`
+	StartedOffsetMs    int                       `json:"started_offset_ms"`
+	SelectionMs        int                       `json:"selection_ms"`
+	SlotWaitMs         int                       `json:"slot_wait_ms"`
+	ForwardMs          int                       `json:"forward_ms"`
+	StatusCode         *int                      `json:"status_code,omitempty"`
+	Outcome            string                    `json:"outcome"`
+	Stage              string                    `json:"stage,omitempty"`
+	Scope              string                    `json:"scope,omitempty"`
+	Reason             string                    `json:"reason,omitempty"`
+	NextAction         string                    `json:"next_action,omitempty"`
+	WaitAfterMs        int                       `json:"wait_after_ms,omitempty"`
+	UpstreamRequestID  string                    `json:"upstream_request_id,omitempty"`
+	TerminalKind       string                    `json:"terminal_kind,omitempty"`
+	SemanticOutputSeen bool                      `json:"semantic_output_seen"`
+	CyberSession       *CyberSessionBlockReceipt `json:"cyber_session,omitempty"`
 }
 
 type RequestAttemptFoldedEvidence struct {
@@ -176,6 +177,14 @@ func RecordRequestObservationRetryWait(c *gin.Context, duration time.Duration) {
 func RecordRequestObservationAccountSwitch(c *gin.Context) {
 	if observer := requestObservationFromGin(c); observer != nil {
 		observer.recordAccountSwitch()
+	}
+}
+
+// RecordRequestObservationCyberSessionReceipt attaches only the opaque,
+// content-free matcher receipt to the current Forward attempt.
+func RecordRequestObservationCyberSessionReceipt(c *gin.Context, receipt CyberSessionBlockReceipt) {
+	if observer := requestObservationFromGin(c); observer != nil {
+		observer.recordCyberSessionReceipt(receipt)
 	}
 }
 
@@ -328,6 +337,15 @@ func (o *requestObservation) recordAccountSwitch() {
 	o.switchStartedAt = o.now()
 	if entry := o.lastAttempt(); entry != nil {
 		entry.NextAction = "switch_account"
+	}
+}
+
+func (o *requestObservation) recordCyberSessionReceipt(receipt CyberSessionBlockReceipt) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if entry := o.lastAttempt(); entry != nil {
+		copy := receipt
+		entry.CyberSession = &copy
 	}
 }
 

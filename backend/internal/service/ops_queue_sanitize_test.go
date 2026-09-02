@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,10 @@ func TestSanitizeOpsUpstreamErrorsForQueueBoundsAndRedacts(t *testing.T) {
 			UpstreamResponseBody: `{"authorization":"Bearer secret","message":"` + strings.Repeat("x", 10_000) + `"}`,
 			Message:              strings.Repeat("m", 3000),
 			Detail:               `{"api_key":"secret","detail":"` + strings.Repeat("y", 10_000) + `"}`,
+			CyberSession: &CyberSessionBlockReceipt{
+				Digest: hex.EncodeToString(make([]byte, sha256.Size)), Kind: CyberSessionBlockKindExplicit,
+				Source: "header:session_id", Count: 999, Stored: true,
+			},
 		})
 	}
 
@@ -44,6 +50,9 @@ func TestSanitizeOpsUpstreamErrorsForQueueBoundsAndRedacts(t *testing.T) {
 		}
 		if strings.Contains(event.UpstreamResponseBody, "Bearer secret") || strings.Contains(event.Detail, `"secret"`) {
 			t.Fatal("credential material was not redacted")
+		}
+		if event.CyberSession == nil || event.CyberSession.Count != maxOpenAICyberTranscriptLookupKeys {
+			t.Fatalf("cyber receipt was not retained and bounded: %+v", event.CyberSession)
 		}
 	}
 }

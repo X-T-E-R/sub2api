@@ -66,6 +66,7 @@ type CyberPolicyUsageInput struct {
 	SessionID          string
 	RequestPayloadHash string
 	APIKeyService      APIKeyQuotaUpdater
+	RequestObservation *RequestObservationSnapshot
 	ChannelUsageFields
 }
 
@@ -103,6 +104,7 @@ func (s *OpenAIGatewayService) RecordCyberPolicyUsageLog(ctx context.Context, in
 		APIKeyService:      in.APIKeyService,
 		ChannelUsageFields: in.ChannelUsageFields,
 		CyberBlocked:       true,
+		RequestObservation: in.RequestObservation,
 	}); err != nil {
 		logger.LegacyPrintf("service.openai_gateway", "cyber usage record failed: request_id=%s err=%v", in.RequestID, err)
 	}

@@ -384,14 +384,62 @@ type OpsUpstreamErrorEvent struct {
 	Scope  string `json:"scope,omitempty"`
 	Reason string `json:"reason,omitempty"`
 
-	Message string `json:"message,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	Message      string                    `json:"message,omitempty"`
+	Detail       string                    `json:"detail,omitempty"`
+	CyberSession *CyberSessionBlockReceipt `json:"cyber_session,omitempty"`
 
 	// SkipMonitoring is request-local rule state. It is intentionally excluded
 	// from persisted attempt JSON. The logger consults it only when this event is
 	// the final client-visible failure; recovered attempts remain provider-health
 	// telemetry and do not count as failed requests.
 	SkipMonitoring bool `json:"-"`
+}
+
+// AttachOpsCyberSessionReceipt adds the sanitized matcher receipt to the most
+// recent upstream event for this request. The event already owns the matching
+// Forward attempt; raw request identity and transcript bytes never enter it.
+func AttachOpsCyberSessionReceipt(c *gin.Context, receipt CyberSessionBlockReceipt) {
+	if c == nil {
+		return
+	}
+	value, ok := c.Get(OpsUpstreamErrorsKey)
+	if !ok {
+		return
+	}
+	events, ok := value.([]*OpsUpstreamErrorEvent)
+	if !ok || len(events) == 0 || events[len(events)-1] == nil {
+		return
+	}
+	copy := receipt
+	events[len(events)-1].CyberSession = &copy
+}
+
+func SnapshotOpsUpstreamErrors(c *gin.Context) []*OpsUpstreamErrorEvent {
+	if c == nil {
+		return nil
+	}
+	value, ok := c.Get(OpsUpstreamErrorsKey)
+	if !ok {
+		return nil
+	}
+	events, ok := value.([]*OpsUpstreamErrorEvent)
+	if !ok || len(events) == 0 {
+		return nil
+	}
+	out := make([]*OpsUpstreamErrorEvent, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			out = append(out, nil)
+			continue
+		}
+		copy := *event
+		if event.CyberSession != nil {
+			receiptCopy := *event.CyberSession
+			copy.CyberSession = &receiptCopy
+		}
+		out = append(out, &copy)
+	}
+	return out
 }
 
 func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {

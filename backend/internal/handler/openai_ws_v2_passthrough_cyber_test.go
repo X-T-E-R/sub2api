@@ -2,13 +2,16 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/testutil"
@@ -24,15 +27,42 @@ type openAIWSPassthroughHandlerHarness struct {
 	moderationRepo *contentModerationHandlerTestRepo
 	gatewayCache   service.GatewayCache
 	apiKey         *service.APIKey
+	settingService *service.SettingService
 }
 
 func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string) *openAIWSPassthroughHandlerHarness {
+	return newOpenAIWSPassthroughHandlerHarnessWithAudit(t, upstreamURL, true, false, nil)
+}
+
+type failingCyberWriteGatewayCache struct {
+	service.GatewayCache
+	store service.CyberSessionBlockStore
+}
+
+func (c *failingCyberWriteGatewayCache) SetCyberSessionBlocked(context.Context, service.CyberSessionBlockKind, string, string, time.Duration) error {
+	return errors.New("redis write failed")
+}
+func (c *failingCyberWriteGatewayCache) IsCyberSessionScopeActive(ctx context.Context, key string) (bool, error) {
+	return c.store.IsCyberSessionScopeActive(ctx, key)
+}
+func (c *failingCyberWriteGatewayCache) FindCyberSessionBlocked(ctx context.Context, kind service.CyberSessionBlockKind, keys []string) (string, time.Duration, error) {
+	return c.store.FindCyberSessionBlocked(ctx, kind, keys)
+}
+
+func newOpenAIWSPassthroughHandlerHarnessWithOptions(t *testing.T, upstreamURL string, cyberEnabled, failCyberWrite bool) *openAIWSPassthroughHandlerHarness {
+	return newOpenAIWSPassthroughHandlerHarnessWithAudit(t, upstreamURL, cyberEnabled, failCyberWrite, nil)
+}
+
+func newOpenAIWSPassthroughHandlerHarnessWithAudit(t *testing.T, upstreamURL string, cyberEnabled, failCyberWrite bool, coordinator *securityaudit.Coordinator) *openAIWSPassthroughHandlerHarness {
 	t.Helper()
 	gatewayCache := testutil.NewRedisGatewayCache(t)
+	if failCyberWrite {
+		gatewayCache = &failingCyberWriteGatewayCache{GatewayCache: gatewayCache, store: gatewayCache.(service.CyberSessionBlockStore)}
+	}
 
 	settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
 		service.SettingKeyRiskControlEnabled:          "true",
-		service.SettingKeyCyberSessionBlockEnabled:    "true",
+		service.SettingKeyCyberSessionBlockEnabled:    strconv.FormatBool(cyberEnabled),
 		service.SettingKeyCyberSessionBlockTTLSeconds: "60",
 	}}
 	moderationRepo := &contentModerationHandlerTestRepo{}
@@ -85,6 +115,7 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string) *ope
 		billingCacheService:      billingCacheSvc,
 		apiKeyService:            &service.APIKeyService{},
 		contentModerationService: moderationSvc,
+		securityAuditCoordinator: coordinator,
 		concurrencyHelper:        NewConcurrencyHelper(service.NewConcurrencyService(concurrencyCache), SSEPingFormatNone, time.Second),
 	}
 
@@ -121,6 +152,7 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string) *ope
 		moderationRepo: moderationRepo,
 		gatewayCache:   gatewayCache,
 		apiKey:         apiKey,
+		settingService: settingSvc,
 	}
 }
 
@@ -163,7 +195,7 @@ func TestOpenAIResponsesWebSocketV2PassthroughCyberMarkIsConsumedAfterTurn(t *te
 	defer upstreamServer.Close()
 	harness := newOpenAIWSPassthroughHandlerHarness(t, upstreamServer.URL)
 
-	requestPayload := `{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"cyber-session-1","input":"test"}`
+	requestPayload := `{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"shared-cache","client_metadata":{"session_id":"cyber-session-1"},"input":"test"}`
 	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
 	err := harness.clientConn.Write(writeCtx, coderws.MessageText, []byte(requestPayload))
 	cancelWrite()
@@ -188,14 +220,21 @@ func TestOpenAIResponsesWebSocketV2PassthroughCyberMarkIsConsumedAfterTurn(t *te
 	store, ok := harness.gatewayCache.(service.CyberSessionBlockStore)
 	require.True(t, ok)
 	require.Eventually(t, func() bool {
-		matched, findErr := store.FindCyberSessionBlocked(context.Background(), []string{blockKey})
+		matched, _, findErr := store.FindCyberSessionBlocked(context.Background(), service.CyberSessionBlockKindExplicit, []string{blockKey})
 		return findErr == nil && matched == blockKey
 	}, 3*time.Second, 10*time.Millisecond, "handler AfterTurn must write the cyber session block table")
 
 	writeCtx, cancelWrite = context.WithTimeout(context.Background(), 3*time.Second)
-	err = harness.clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"cyber-session-1","input":"follow-up"}`))
+	err = harness.clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"shared-cache","client_metadata":{"session_id":"cyber-session-1"},"input":"follow-up"}`))
 	cancelWrite()
 	require.NoError(t, err)
+
+	readCtx, cancelRead = context.WithTimeout(context.Background(), 3*time.Second)
+	_, blockedEvent, err := harness.clientConn.Read(readCtx)
+	cancelRead()
+	require.NoError(t, err)
+	require.Equal(t, "error", gjson.GetBytes(blockedEvent, "type").String())
+	require.Equal(t, "session_blocked_by_cyber_policy", gjson.GetBytes(blockedEvent, "error.code").String())
 
 	readCtx, cancelRead = context.WithTimeout(context.Background(), 3*time.Second)
 	_, _, err = harness.clientConn.Read(readCtx)
@@ -219,6 +258,48 @@ func TestOpenAIResponsesWebSocketV2PassthroughCyberMarkIsConsumedAfterTurn(t *te
 	select {
 	case second := <-secondUpstreamFrame:
 		t.Fatalf("blocked follow-up reached upstream: %s", second)
+	default:
+	}
+}
+
+func TestOpenAIResponsesWebSocketV2FirstTurnLocalCyberBlockPrecedesSecurityAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamHit := make(chan struct{}, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHit <- struct{}{}
+		http.Error(w, "unexpected upstream", http.StatusInternalServerError)
+	}))
+	defer upstreamServer.Close()
+	engine := &turnCountingEngine{mode: securityaudit.ModeBlocking}
+	harness := newOpenAIWSPassthroughHandlerHarnessWithAudit(t, upstreamServer.URL, true, false, securityaudit.NewCoordinator(nil, engine))
+	payload := []byte(`{"type":"response.create","model":"gpt-5.1","client_metadata":{"session_id":"blocked-first-turn"},"input":"must not audit"}`)
+	keyCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	keyCtx.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(string(payload)))
+	digest := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, keyCtx, payload)
+	require.NotEmpty(t, digest)
+	store := harness.gatewayCache.(service.CyberSessionBlockStore)
+	require.NoError(t, store.SetCyberSessionBlocked(context.Background(), service.CyberSessionBlockKindExplicit, "", digest, time.Minute))
+
+	writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err := harness.clientConn.Write(writeCtx, coderws.MessageText, payload)
+	cancel()
+	require.NoError(t, err)
+	readCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_, event, err := harness.clientConn.Read(readCtx)
+	cancel()
+	require.NoError(t, err)
+	require.Equal(t, "session_blocked_by_cyber_policy", gjson.GetBytes(event, "error.code").String())
+	readCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	_, _, err = harness.clientConn.Read(readCtx)
+	cancel()
+	var closeErr coderws.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
+	require.Zero(t, engine.evaluates.Load())
+	require.Empty(t, harness.moderationRepo.logSnapshot())
+	select {
+	case <-upstreamHit:
+		t.Fatal("locally blocked first turn reached upstream")
 	default:
 	}
 }
@@ -292,12 +373,7 @@ func TestOpenAIResponsesWebSocketV2PassthroughNonCyberTurnAllowsFollowup(t *test
 	keyCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	keyCtx.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(firstPayload))
 	blockKey := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, keyCtx, []byte(firstPayload))
-	require.NotEmpty(t, blockKey)
-	store, ok := harness.gatewayCache.(service.CyberSessionBlockStore)
-	require.True(t, ok)
-	matched, findErr := store.FindCyberSessionBlocked(context.Background(), []string{blockKey})
-	require.NoError(t, findErr)
-	require.Empty(t, matched)
+	require.Empty(t, blockKey, "prompt_cache_key alone must never become cyber identity")
 
 	require.NoError(t, harness.clientConn.Close(coderws.StatusNormalClosure, "done"))
 	select {
@@ -315,5 +391,82 @@ func TestOpenAIResponsesWebSocketV2PassthroughNonCyberTurnAllowsFollowup(t *test
 		require.JSONEq(t, secondPayload, string(second))
 	default:
 		t.Fatal("non-cyber follow-up did not reach upstream")
+	}
+}
+
+func TestOpenAIResponsesWebSocketV2CyberFailedWriteOrDisabledRuntimeAllowsLaterTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		initiallyEnabled bool
+		failWrite        bool
+		disableAfterHit  bool
+	}{
+		{name: "disabled", initiallyEnabled: false},
+		{name: "write_error", initiallyEnabled: true, failWrite: true},
+		{name: "disabled_between_turns", initiallyEnabled: true, disableAfterHit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			secondUpstreamFrame := make(chan []byte, 1)
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := coderws.Accept(w, r, nil)
+				require.NoError(t, err)
+				defer func() { _ = conn.CloseNow() }()
+				readCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+				_, _, err = conn.Read(readCtx)
+				cancel()
+				require.NoError(t, err)
+				writeCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+				err = conn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.failed","response":{"id":"resp_cyber_first","model":"gpt-5.1","error":{"code":"cyber_policy","message":"blocked"},"usage":{"input_tokens":1,"output_tokens":0}}}`))
+				cancel()
+				require.NoError(t, err)
+				readCtx, cancel = context.WithTimeout(r.Context(), 3*time.Second)
+				_, second, err := conn.Read(readCtx)
+				cancel()
+				require.NoError(t, err)
+				secondUpstreamFrame <- append([]byte(nil), second...)
+				writeCtx, cancel = context.WithTimeout(r.Context(), 3*time.Second)
+				err = conn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.completed","response":{"id":"resp_after_cyber","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`))
+				cancel()
+				require.NoError(t, err)
+			}))
+			defer upstreamServer.Close()
+
+			harness := newOpenAIWSPassthroughHandlerHarnessWithOptions(t, upstreamServer.URL, tc.initiallyEnabled, tc.failWrite)
+			first := []byte(`{"type":"response.create","model":"gpt-5.1","client_metadata":{"session_id":"ws-runtime-session"},"input":"first"}`)
+			writeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			err := harness.clientConn.Write(writeCtx, coderws.MessageText, first)
+			cancel()
+			require.NoError(t, err)
+			readCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, firstEvent, err := harness.clientConn.Read(readCtx)
+			cancel()
+			require.NoError(t, err)
+			require.Equal(t, "response.failed", gjson.GetBytes(firstEvent, "type").String())
+			require.Eventually(t, func() bool { return len(harness.moderationRepo.logSnapshot()) == 1 }, 3*time.Second, 10*time.Millisecond)
+
+			if tc.disableAfterHit {
+				require.NoError(t, harness.settingService.UpdateSettings(context.Background(), &service.SystemSettings{
+					CyberSessionBlockEnabled: false, CyberSessionBlockTTLSeconds: 60,
+				}))
+			}
+			second := []byte(`{"type":"response.create","model":"gpt-5.1","client_metadata":{"session_id":"ws-runtime-session"},"input":"second"}`)
+			writeCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+			err = harness.clientConn.Write(writeCtx, coderws.MessageText, second)
+			cancel()
+			require.NoError(t, err)
+			readCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+			_, secondEvent, err := harness.clientConn.Read(readCtx)
+			cancel()
+			require.NoError(t, err)
+			require.Equal(t, "resp_after_cyber", gjson.GetBytes(secondEvent, "response.id").String())
+			select {
+			case got := <-secondUpstreamFrame:
+				require.JSONEq(t, string(second), string(got))
+			case <-time.After(3 * time.Second):
+				t.Fatal("later websocket turn did not reach upstream")
+			}
+			require.NoError(t, harness.clientConn.Close(coderws.StatusNormalClosure, "done"))
+		})
 	}
 }

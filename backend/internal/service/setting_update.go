@@ -44,10 +44,15 @@ func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *S
 	}
 	omitted.dropFrom(updates)
 
+	s.cyberSessionBlockRuntimeMu.Lock()
 	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+		s.cyberSessionBlockRuntimeMu.Unlock()
 		return err
 	}
+	s.refreshCyberSessionBlockRuntimeAfterWrite(ctx, settings, omitted)
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
+	s.cyberSessionBlockRuntimeMu.Unlock()
+	s.notifySettingsUpdated()
 	return nil
 }
 
@@ -74,10 +79,15 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 	}
 	omitted.dropFrom(updates)
 
+	s.cyberSessionBlockRuntimeMu.Lock()
 	if err := s.settingRepo.SetMultiple(ctx, updates); err != nil {
+		s.cyberSessionBlockRuntimeMu.Unlock()
 		return err
 	}
+	s.refreshCyberSessionBlockRuntimeAfterWrite(ctx, settings, omitted)
 	s.refreshCachedSettingsAfterWrite(ctx, settings, omitted)
+	s.cyberSessionBlockRuntimeMu.Unlock()
+	s.notifySettingsUpdated()
 	return nil
 }
 
@@ -96,6 +106,53 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 		return
 	}
 	s.refreshCachedSettings(stored)
+}
+
+// refreshCyberSessionBlockRuntimeAfterWrite commits the authoritative cyber
+// pair while the update/refresh mutex is held. Partial writes resolve omitted
+// members from one post-write repository snapshot, independently of the broad
+// GetAll refresh used by unrelated caches.
+func (s *SettingService) refreshCyberSessionBlockRuntimeAfterWrite(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) {
+	if settings == nil || len(omitted) == 0 {
+		return
+	}
+	_, enabledOmitted := omitted[SettingKeyCyberSessionBlockEnabled]
+	_, ttlOmitted := omitted[SettingKeyCyberSessionBlockTTLSeconds]
+	if enabledOmitted && ttlOmitted {
+		return
+	}
+	enabled := settings.CyberSessionBlockEnabled
+	ttl := time.Duration(settings.CyberSessionBlockTTLSeconds) * time.Second
+	if enabledOmitted || ttlOmitted {
+		values, err := s.settingRepo.GetMultiple(ctx, []string{
+			SettingKeyCyberSessionBlockEnabled,
+			SettingKeyCyberSessionBlockTTLSeconds,
+		})
+		if err == nil {
+			if enabledOmitted {
+				enabled = strings.TrimSpace(values[SettingKeyCyberSessionBlockEnabled]) == "true"
+			}
+			if ttlOmitted {
+				if seconds, parseErr := strconv.Atoi(strings.TrimSpace(values[SettingKeyCyberSessionBlockTTLSeconds])); parseErr == nil && seconds > 0 {
+					ttl = time.Duration(seconds) * time.Second
+				}
+			}
+		} else if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
+			if enabledOmitted {
+				enabled = cached.enabled
+			}
+			if ttlOmitted {
+				ttl = cached.ttl
+			}
+		}
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	s.cyberSessionBlockRuntimeCache.Store(&cachedCyberSessionBlockRuntime{
+		enabled: enabled, ttl: ttl,
+		expiresAt: time.Now().Add(cyberSessionBlockRuntimeCacheTTL).UnixNano(),
+	})
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
@@ -682,6 +739,15 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	if settings == nil {
 		return
 	}
+	cyberTTL := time.Hour
+	if settings.CyberSessionBlockTTLSeconds > 0 {
+		cyberTTL = time.Duration(settings.CyberSessionBlockTTLSeconds) * time.Second
+	}
+	s.cyberSessionBlockRuntimeCache.Store(&cachedCyberSessionBlockRuntime{
+		enabled:   settings.CyberSessionBlockEnabled,
+		ttl:       cyberTTL,
+		expiresAt: time.Now().Add(cyberSessionBlockRuntimeCacheTTL).UnixNano(),
+	})
 
 	// 先使 inflight singleflight 失效，再刷新缓存，缩小旧值覆盖新值的竞态窗口
 	versionBoundsSF.Forget("version_bounds")
@@ -782,8 +848,11 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	// codex_cli_only 加固策略缓存：设置更新后强制下次重载（涉及 4 个键 + JSON 解析，直接置过期）。
 	s.codexRestrictionPolicySF.Forget("codex_restriction_policy")
 	s.codexRestrictionPolicyCache.Store(&cachedCodexRestrictionPolicy{expiresAt: 0})
+}
+
+func (s *SettingService) notifySettingsUpdated() {
 	if s.onUpdate != nil {
-		s.onUpdate() // Invalidate cache after settings update
+		s.onUpdate()
 	}
 	s.notifyChannelMonitorRuntimeListeners()
 }

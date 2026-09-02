@@ -170,7 +170,7 @@ func normalizeCompatSeedJSON(v json.RawMessage) string {
 		return ""
 	}
 	var tmp any
-	if err := json.Unmarshal(v, &tmp); err != nil {
+	if err := decodeOpenAIJSONUseNumber(v, &tmp); err != nil {
 		return string(v)
 	}
 	out, err := json.Marshal(tmp)

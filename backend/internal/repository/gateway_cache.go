@@ -270,47 +270,37 @@ func (c *gatewayCache) GetReasoningContent(ctx context.Context, itemID string) (
 }
 
 const (
-	cyberSessionBlockPrefix         = "cyber_session_block:"
-	cyberSessionScopePrefix         = "cyber_session_scope:"
-	cyberSessionRedisCommandMaxKeys = 128
+	cyberSessionExplicitBlockPrefix   = "cyber_session_block:v2:e:"
+	cyberSessionTranscriptBlockPrefix = "cyber_session_block:v2:t:"
+	cyberSessionScopePrefix           = "cyber_session_scope:v2:"
+	cyberSessionRedisCommandMaxKeys   = 128
 )
 
-// SetCyberSessionBlocked writes exact blocks in bounded transactions. The
-// coarse scope is activated only after all exact blocks have been stored.
-func (c *gatewayCache) SetCyberSessionBlocked(ctx context.Context, scopeKey string, keys []string, ttl time.Duration) error {
-	if len(keys) == 0 {
+func cyberSessionBlockPrefix(kind service.CyberSessionBlockKind) string {
+	switch kind {
+	case service.CyberSessionBlockKindExplicit:
+		return cyberSessionExplicitBlockPrefix
+	case service.CyberSessionBlockKindTranscript:
+		return cyberSessionTranscriptBlockPrefix
+	default:
+		return ""
+	}
+}
+
+// SetCyberSessionBlocked writes one exact v2 key and its optional transcript
+// scope atomically in a bounded Redis transaction.
+func (c *gatewayCache) SetCyberSessionBlocked(ctx context.Context, kind service.CyberSessionBlockKind, scopeKey, digest string, ttl time.Duration) error {
+	prefix := cyberSessionBlockPrefix(kind)
+	if prefix == "" || digest == "" || ttl <= 0 {
 		return nil
 	}
-	exactKeys := make([]string, 0, cyberSessionRedisCommandMaxKeys)
-	flush := func() error {
-		if len(exactKeys) == 0 {
-			return nil
-		}
-		pipe := c.rdb.TxPipeline()
-		for _, key := range exactKeys {
-			pipe.Set(ctx, cyberSessionBlockPrefix+key, "1", ttl)
-		}
-		_, err := pipe.Exec(ctx)
-		exactKeys = exactKeys[:0]
-		return err
+	pipe := c.rdb.TxPipeline()
+	pipe.Set(ctx, prefix+digest, "1", ttl)
+	if kind == service.CyberSessionBlockKindTranscript && scopeKey != "" {
+		pipe.Set(ctx, cyberSessionScopePrefix+scopeKey, "1", ttl)
 	}
-	for _, key := range keys {
-		if key != "" {
-			exactKeys = append(exactKeys, key)
-			if len(exactKeys) == cyberSessionRedisCommandMaxKeys {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if err := flush(); err != nil {
-		return err
-	}
-	if scopeKey != "" {
-		return c.rdb.Set(ctx, cyberSessionScopePrefix+scopeKey, "1", ttl).Err()
-	}
-	return nil
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 func (c *gatewayCache) IsCyberSessionScopeActive(ctx context.Context, scopeKey string) (bool, error) {
@@ -321,11 +311,12 @@ func (c *gatewayCache) IsCyberSessionScopeActive(ctx context.Context, scopeKey s
 	return n > 0, nil
 }
 
-// FindCyberSessionBlocked checks bounded batches in caller order and stops at
-// the first blocked key, preserving the original earliest-match behavior.
-func (c *gatewayCache) FindCyberSessionBlocked(ctx context.Context, keys []string) (string, error) {
-	if len(keys) == 0 {
-		return "", nil
+// FindCyberSessionBlocked checks bounded batches in caller order and returns
+// the remaining TTL of the first exact v2 match.
+func (c *gatewayCache) FindCyberSessionBlocked(ctx context.Context, kind service.CyberSessionBlockKind, keys []string) (string, time.Duration, error) {
+	prefix := cyberSessionBlockPrefix(kind)
+	if prefix == "" || len(keys) == 0 {
+		return "", 0, nil
 	}
 	for start := 0; start < len(keys); start += cyberSessionRedisCommandMaxKeys {
 		end := start + cyberSessionRedisCommandMaxKeys
@@ -334,19 +325,25 @@ func (c *gatewayCache) FindCyberSessionBlocked(ctx context.Context, keys []strin
 		}
 		redisKeys := make([]string, end-start)
 		for i, key := range keys[start:end] {
-			redisKeys[i] = cyberSessionBlockPrefix + key
+			redisKeys[i] = prefix + key
 		}
 		values, err := c.rdb.MGet(ctx, redisKeys...).Result()
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		for i, value := range values {
 			if value != nil {
-				return keys[start+i], nil
+				ttl, ttlErr := c.rdb.PTTL(ctx, redisKeys[i]).Result()
+				if ttlErr != nil {
+					return "", 0, ttlErr
+				}
+				if ttl > 0 {
+					return keys[start+i], ttl, nil
+				}
 			}
 		}
 	}
-	return "", nil
+	return "", 0, nil
 }
 
 var claimLiveControllerScript = redis.NewScript(`

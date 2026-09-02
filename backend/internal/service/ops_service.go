@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -556,6 +558,10 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 			continue
 		}
 		out := *ev
+		if ev.CyberSession != nil {
+			receipt := sanitizeOpsCyberSessionReceipt(*ev.CyberSession)
+			out.CyberSession = &receipt
+		}
 
 		out.Platform = truncateString(strings.TrimSpace(out.Platform), 32)
 		out.AccountName = truncateString(strings.TrimSpace(out.AccountName), 128)
@@ -595,7 +601,7 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		}
 
 		// Drop fully-empty events (can happen if only status code was known).
-		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" {
+		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" && out.CyberSession == nil {
 			continue
 		}
 
@@ -606,6 +612,29 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 	entry.UpstreamErrorsJSON = marshalOpsUpstreamErrors(sanitized)
 	entry.UpstreamErrors = nil
 	return nil
+}
+
+func sanitizeOpsCyberSessionReceipt(receipt CyberSessionBlockReceipt) CyberSessionBlockReceipt {
+	if len(receipt.Digest) != sha256.Size*2 {
+		receipt.Digest = ""
+	} else if _, err := hex.DecodeString(receipt.Digest); err != nil {
+		receipt.Digest = ""
+	}
+	switch receipt.Kind {
+	case CyberSessionBlockKindExplicit, CyberSessionBlockKindTranscript:
+	default:
+		receipt.Kind = ""
+	}
+	receipt.Source = truncateString(strings.TrimSpace(receipt.Source), 64)
+	if receipt.Count < 0 {
+		receipt.Count = 0
+	} else if receipt.Count > maxOpenAICyberTranscriptLookupKeys {
+		receipt.Count = maxOpenAICyberTranscriptLookupKeys
+	}
+	if receipt.ExpiryUnixMs < 0 {
+		receipt.ExpiryUnixMs = 0
+	}
+	return receipt
 }
 
 func (s *OpsService) GetErrorLogs(ctx context.Context, filter *OpsErrorLogFilter) (*OpsErrorLogList, error) {

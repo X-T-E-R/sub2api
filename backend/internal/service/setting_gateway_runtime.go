@@ -157,58 +157,48 @@ const openAIQuotaAutoPauseSettingsRefreshKey = "openai_quota_auto_pause_settings
 
 // GetCyberSessionBlockRuntime 返回 (开关, TTL)，进程内缓存 ~60s，
 // 供网关热路径读取时避免 DB 往返。
-// 两个 setting key 在单次 singleflight 里一起读取，减少 DB 往返。
+// 两个 setting key 通过一次 GetMultiple 获取同一存储快照。刷新与设置更新
+// 共用互斥锁，旧的并发读取不会在成功更新后覆盖新值。
 // 默认值：开关 false，TTL 1h（与粘性会话对齐）。
 func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool, time.Duration) {
+	if s == nil || s.settingRepo == nil {
+		return false, time.Hour
+	}
 	if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
 		if time.Now().UnixNano() < cached.expiresAt {
 			return cached.enabled, cached.ttl
 		}
 	}
-	result, _, _ := s.cyberSessionBlockRuntimeSF.Do("cyber_session_block_runtime", func() (any, error) {
-		if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
-			if time.Now().UnixNano() < cached.expiresAt {
-				return cached, nil
-			}
+	s.cyberSessionBlockRuntimeMu.Lock()
+	defer s.cyberSessionBlockRuntimeMu.Unlock()
+	if cached, ok := s.cyberSessionBlockRuntimeCache.Load().(*cachedCyberSessionBlockRuntime); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.enabled, cached.ttl
 		}
-		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cyberSessionBlockRuntimeDBTimeout)
-		defer cancel()
-
-		enabledVal, enabledErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockEnabled)
-		ttlVal, ttlErr := s.settingRepo.GetValue(dbCtx, SettingKeyCyberSessionBlockTTLSeconds)
-
-		if enabledErr != nil && !errors.Is(enabledErr, ErrSettingNotFound) {
-			slog.Warn("failed to get cyber_session_block_enabled setting", "error", enabledErr)
-			entry := &cachedCyberSessionBlockRuntime{
-				enabled:   false,
-				ttl:       time.Hour,
-				expiresAt: time.Now().Add(cyberSessionBlockRuntimeErrorTTL).UnixNano(),
-			}
-			s.cyberSessionBlockRuntimeCache.Store(entry)
-			return entry, nil
-		}
-
-		enabled := enabledErr == nil && strings.TrimSpace(enabledVal) == "true"
-
-		ttl := time.Hour
-		if ttlErr == nil {
-			if n, perr := strconv.Atoi(strings.TrimSpace(ttlVal)); perr == nil && n > 0 {
-				ttl = time.Duration(n) * time.Second
-			}
-		}
-
-		entry := &cachedCyberSessionBlockRuntime{
-			enabled:   enabled,
-			ttl:       ttl,
-			expiresAt: time.Now().Add(cyberSessionBlockRuntimeCacheTTL).UnixNano(),
-		}
-		s.cyberSessionBlockRuntimeCache.Store(entry)
-		return entry, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cyberSessionBlockRuntimeDBTimeout)
+	defer cancel()
+	values, err := s.settingRepo.GetMultiple(dbCtx, []string{
+		SettingKeyCyberSessionBlockEnabled,
+		SettingKeyCyberSessionBlockTTLSeconds,
 	})
-	if entry, ok := result.(*cachedCyberSessionBlockRuntime); ok && entry != nil {
+	if err != nil {
+		slog.Warn("failed to get cyber session block runtime settings", "error", err)
+		entry := &cachedCyberSessionBlockRuntime{enabled: false, ttl: time.Hour, expiresAt: time.Now().Add(cyberSessionBlockRuntimeErrorTTL).UnixNano()}
+		s.cyberSessionBlockRuntimeCache.Store(entry)
 		return entry.enabled, entry.ttl
 	}
-	return false, time.Hour
+	enabled := strings.TrimSpace(values[SettingKeyCyberSessionBlockEnabled]) == "true"
+	ttl := time.Hour
+	if n, parseErr := strconv.Atoi(strings.TrimSpace(values[SettingKeyCyberSessionBlockTTLSeconds])); parseErr == nil && n > 0 {
+		ttl = time.Duration(n) * time.Second
+	}
+	entry := &cachedCyberSessionBlockRuntime{enabled: enabled, ttl: ttl, expiresAt: time.Now().Add(cyberSessionBlockRuntimeCacheTTL).UnixNano()}
+	s.cyberSessionBlockRuntimeCache.Store(entry)
+	return entry.enabled, entry.ttl
 }
 
 // GetAntigravityUserAgentVersion 返回 Antigravity 上游请求使用的版本号。

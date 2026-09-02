@@ -1,11 +1,18 @@
 package handler
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/testutil"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -115,13 +122,14 @@ func TestBuildCyberSessionBlockedOpsEntry(t *testing.T) {
 	require.True(t, entry.IsBusinessLimited)
 	require.Equal(t, "gateway_local", entry.ErrorSource)
 	require.Equal(t, "platform", entry.ErrorOwner)
-	require.Empty(t, entry.ErrorBody, "no session block key → ErrorBody must be empty")
+	require.Empty(t, entry.ErrorBody, "no matcher receipt → ErrorBody must be empty")
 
 	entryWithKey := buildCyberSessionBlockedOpsEntry(cyberPolicyOpsErrorMeta{
 		RequestID: "req-9", Model: "gpt-5", RequestPath: "/openai/v1/responses",
-		SessionBlockKey: "abc123",
+		CyberSession: service.CyberSessionBlockReceipt{Digest: "abc123", Kind: service.CyberSessionBlockKindExplicit, Source: "header:session_id", Count: 1, Stored: true},
 	})
-	require.Equal(t, "session_block_key=abc123", entryWithKey.ErrorBody)
+	require.Contains(t, entryWithKey.ErrorBody, `"digest":"abc123"`)
+	require.NotContains(t, entryWithKey.ErrorBody, "sess-explicit")
 }
 
 // TestRejectIfCyberSessionBlocked_FailOpen verifies fail-open paths: nil handler
@@ -139,7 +147,64 @@ func TestRejectIfCyberSessionBlocked_FailOpen(t *testing.T) {
 	require.False(t, h2.rejectIfCyberSessionBlocked(c, key, []byte(`{}`), "gpt-5", cyberBlockFormatResponses), "nil gateway service → pass")
 }
 
-func TestBuildCyberSessionBlockWritePlanCombinesExplicitAndTranscriptKeys(t *testing.T) {
+func TestOpenAIHTTPLocalCyberBlockPrecedesSecurityAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cache := testutil.NewRedisGatewayCache(t)
+	settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
+		service.SettingKeyCyberSessionBlockEnabled: "true", service.SettingKeyCyberSessionBlockTTLSeconds: "60",
+	}}
+	settingSvc := service.NewSettingService(settingRepo, nil)
+	cfg := &config.Config{}
+	cfg.RunMode = config.RunModeSimple
+	cfg.Default.RateMultiplier = 1
+	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingCache.Stop)
+	gatewaySvc := service.NewOpenAIGatewayService(
+		nil, nil, nil, nil, nil, nil, cache, cfg, nil, nil,
+		service.NewBillingService(cfg, nil), nil, billingCache, nil, &service.DeferredService{},
+		nil, nil, nil, nil, nil, settingSvc, nil,
+	)
+	engine := &turnCountingEngine{mode: securityaudit.ModeBlocking}
+	h := &OpenAIGatewayHandler{
+		gatewayService: gatewaySvc, billingCacheService: billingCache,
+		apiKeyService: &service.APIKeyService{}, securityAuditCoordinator: securityaudit.NewCoordinator(nil, engine),
+		concurrencyHelper: NewConcurrencyHelper(service.NewConcurrencyService(nil), SSEPingFormatNone, time.Second),
+		cfg:               cfg,
+	}
+	groupID := int64(77)
+	apiKey := &service.APIKey{ID: 901, Key: "sk-cyber-ordering", GroupID: &groupID, User: &service.User{ID: 902}, Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, AllowMessagesDispatch: true}}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+		call func(*gin.Context)
+	}{
+		{name: "responses", path: "/openai/v1/responses", body: `{"model":"gpt-5","input":"blocked"}`, call: h.Responses},
+		{name: "messages", path: "/v1/messages", body: `{"model":"gpt-5","messages":[{"role":"user","content":"blocked"}]}`, call: h.Messages},
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"gpt-5","messages":[{"role":"user","content":"blocked"}]}`, call: h.ChatCompletions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.Header.Set("session_id", "blocked-"+tc.name)
+			c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+			plan := service.ResolveCyberSessionBlockWritePlan(apiKey.ID, c, []byte(tc.body), "", "")
+			require.True(t, gatewaySvc.MarkCyberSessionBlocked(context.Background(), plan).Stored)
+
+			tc.call(c)
+			require.Equal(t, http.StatusForbidden, recorder.Code)
+			require.Contains(t, recorder.Body.String(), "This session is blocked by cyber-security policy")
+		})
+	}
+	require.Zero(t, engine.evaluates.Load(), "matched local blocks must not enter blocking security audit")
+	require.Zero(t, engine.enqueues.Load(), "matched local blocks must not enqueue async security audit")
+}
+
+func TestBuildCyberSessionBlockWritePlanSelectsExclusiveMode(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"setup"},{"role":"assistant","content":"ready"},{"role":"user","content":"trigger"}]}`)
 	c := newTestGinContext()
 	c.Request = httptest.NewRequest("POST", "/openai/v1/responses", strings.NewReader(string(body)))
@@ -147,13 +212,15 @@ func TestBuildCyberSessionBlockWritePlanCombinesExplicitAndTranscriptKeys(t *tes
 	c.Request.Header.Set("User-Agent", "client/1.2.3")
 
 	plan := buildCyberSessionBlockWritePlan(7, c, body)
-	require.Len(t, plan.keys, 2)
-	require.NotEmpty(t, plan.scopeKey)
+	require.Equal(t, service.CyberSessionBlockKindTranscript, plan.Kind)
+	require.NotEmpty(t, plan.Digest)
+	require.NotEmpty(t, plan.ScopeKey)
 
 	c.Request.Header.Set("session_id", "sess-explicit")
 	plan = buildCyberSessionBlockWritePlan(7, c, body)
-	require.Len(t, plan.keys, 3)
-	require.NotEmpty(t, plan.scopeKey)
+	require.Equal(t, service.CyberSessionBlockKindExplicit, plan.Kind)
+	require.NotEmpty(t, plan.Digest)
+	require.Empty(t, plan.ScopeKey)
 }
 
 // TestRecordCyberPolicyIfMarked_BlockKeyPlumbed verifies the 6th param is
