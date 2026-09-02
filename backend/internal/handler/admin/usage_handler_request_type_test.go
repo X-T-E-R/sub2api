@@ -18,6 +18,14 @@ type adminUsageRepoCapture struct {
 	listParams   pagination.PaginationParams
 	listFilters  usagestats.UsageLogFilters
 	statsFilters usagestats.UsageLogFilters
+	getByIDLog   *service.UsageLog
+}
+
+func (s *adminUsageRepoCapture) GetByID(context.Context, int64) (*service.UsageLog, error) {
+	if s.getByIDLog != nil {
+		return s.getByIDLog, nil
+	}
+	return nil, service.ErrUsageLogNotFound
 }
 
 func (s *adminUsageRepoCapture) ListWithFilters(ctx context.Context, params pagination.PaginationParams, filters usagestats.UsageLogFilters) ([]service.UsageLog, *pagination.PaginationResult, error) {
@@ -43,6 +51,7 @@ func newAdminUsageRequestTypeTestRouter(repo *adminUsageRepoCapture) *gin.Engine
 	router := gin.New()
 	router.GET("/admin/usage", handler.List)
 	router.GET("/admin/usage/stats", handler.Stats)
+	router.GET("/admin/usage/records/:id/observability", handler.GetObservability)
 	return router
 }
 
@@ -117,6 +126,34 @@ func TestAdminUsageListRequestIDFilter(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "req-0123", repo.listFilters.RequestID)
+}
+
+func TestAdminUsageListCorrelationIDFilter(t *testing.T) {
+	repo := &adminUsageRepoCapture{}
+	router := newAdminUsageRequestTypeTestRouter(repo)
+	req := httptest.NewRequest(http.MethodGet, "/admin/usage?correlation_id=gateway-0123", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "gateway-0123", repo.listFilters.CorrelationID)
+}
+
+func TestAdminUsageObservabilityDetailIncludesLedger(t *testing.T) {
+	semantic := false
+	repo := &adminUsageRepoCapture{getByIDLog: &service.UsageLog{
+		ID: 77, SemanticOutputSeen: &semantic, AttemptLedger: &service.RequestAttemptLedger{
+			Version: 1, TotalAttempts: 1,
+			Attempts: []service.RequestAttemptEvidence{{Sequence: 1, AccountID: 9, Outcome: "success", TerminalKind: "response.completed"}},
+		},
+	}}
+	router := newAdminUsageRequestTypeTestRouter(repo)
+	req := httptest.NewRequest(http.MethodGet, "/admin/usage/records/77/observability", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"attempt_ledger"`)
+	require.Contains(t, rec.Body.String(), `"account_id":9`)
+	require.Contains(t, rec.Body.String(), `"semantic_output_seen":false`)
 }
 
 func TestAdminUsageListInvalidExactTotal(t *testing.T) {

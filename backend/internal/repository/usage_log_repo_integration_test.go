@@ -87,6 +87,67 @@ func (s *UsageLogRepoSuite) TestCreate() {
 	s.Require().NotZero(log.ID)
 }
 
+func (s *UsageLogRepoSuite) TestRequestObservabilityRoundTripCorrelationDedupAndCleanup() {
+	user := mustCreateUser(s.T(), s.client, &service.User{Email: "observability@test.com"})
+	apiKey := mustCreateApiKey(s.T(), s.client, &service.APIKey{UserID: user.ID, Key: "sk-observability", Name: "observability"})
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-observability"})
+	handlerMs, visibleMs, attempts, switches := 900, 700, 2, 1
+	failedMs, retryMs, switchMs := 150, 25, 40
+	semantic := true
+	terminal, gatewayID, clientID := "response.completed", "gateway-observability", "client-observability"
+	log := &service.UsageLog{
+		UserID: user.ID, APIKeyID: apiKey.ID, AccountID: account.ID,
+		RequestID: "request-observability", Model: "gpt-5", CreatedAt: time.Now().UTC(),
+		HandlerDurationMs: &handlerMs, FirstVisibleOutputMs: &visibleMs,
+		SemanticOutputSeen: &semantic, TerminalKind: &terminal,
+		AttemptCount: &attempts, AccountSwitchCount: &switches,
+		FailedAttemptDurationMs: &failedMs, RetryWaitMs: &retryMs, AccountSwitchMs: &switchMs,
+		GatewayRequestID: &gatewayID, ClientRequestID: &clientID,
+		AttemptLedger: &service.RequestAttemptLedger{
+			Version: 1, TotalAttempts: 2,
+			Attempts: []service.RequestAttemptEvidence{
+				{Sequence: 1, AccountID: account.ID, Platform: "openai", ForwardMs: 150, Outcome: "failover", Reason: "http_503"},
+				{Sequence: 2, AccountID: account.ID, Platform: "openai", ForwardMs: 300, Outcome: "success", TerminalKind: terminal, SemanticOutputSeen: true},
+			},
+		},
+	}
+	inserted, err := s.repo.Create(s.ctx, log)
+	s.Require().NoError(err)
+	s.Require().True(inserted)
+
+	got, err := s.repo.GetByID(s.ctx, log.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(handlerMs, *got.HandlerDurationMs)
+	s.Require().Equal(visibleMs, *got.FirstVisibleOutputMs)
+	s.Require().True(*got.SemanticOutputSeen)
+	s.Require().Equal(2, got.AttemptLedger.TotalAttempts)
+	s.Require().Equal("http_503", got.AttemptLedger.Attempts[0].Reason)
+
+	for _, correlationID := range []string{gatewayID, clientID, log.RequestID} {
+		items, page, listErr := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, usagestats.UsageLogFilters{CorrelationID: correlationID, ExactTotal: true})
+		s.Require().NoError(listErr)
+		s.Require().Len(items, 1)
+		s.Require().Equal(int64(1), page.Total)
+		s.Require().True(items[0].AttemptLedgerAvailable)
+		s.Require().Nil(items[0].AttemptLedger, "list query must not hydrate the ledger")
+	}
+
+	duplicate := *log
+	duplicate.ID = 0
+	changedHandlerMs := 9999
+	duplicate.HandlerDurationMs = &changedHandlerMs
+	inserted, err = s.repo.Create(s.ctx, &duplicate)
+	s.Require().NoError(err)
+	s.Require().False(inserted)
+	got, err = s.repo.GetByID(s.ctx, log.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(handlerMs, *got.HandlerDurationMs, "first deduplicated row remains authoritative")
+
+	s.Require().NoError(s.repo.Delete(s.ctx, log.ID))
+	_, err = s.repo.GetByID(s.ctx, log.ID)
+	s.Require().ErrorIs(err, service.ErrUsageLogNotFound)
+}
+
 func TestUsageLogRepositoryCreate_BatchPathConcurrent(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)

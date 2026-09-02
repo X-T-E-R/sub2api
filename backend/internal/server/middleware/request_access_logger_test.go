@@ -7,9 +7,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -198,6 +200,35 @@ func TestLogger_AccessLogIncludesCoreFields(t *testing.T) {
 	if !found {
 		t.Fatalf("access log event not found")
 	}
+}
+
+func TestLogger_AccessLogIncludesRequestObservationSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+	r := gin.New()
+	r.Use(Logger())
+	r.POST("/v1/responses", func(c *gin.Context) {
+		service.BeginOpenAIRequestObservation(c, time.Now().Add(-100*time.Millisecond))
+		sequence := service.BeginRequestObservationAttempt(c, 9, service.PlatformOpenAI)
+		service.ObserveOpenAIRequestEvent(c, []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":1}}}`), "response.completed")
+		service.FinishRequestObservationAttempt(c, sequence, &service.OpenAIForwardResult{Stream: true}, nil, 25*time.Millisecond)
+		c.Status(http.StatusOK)
+	})
+
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+	for _, event := range sink.list() {
+		if event == nil || event.Message != "http request completed" {
+			continue
+		}
+		if event.Fields["terminal_kind"] != "response.completed" || event.Fields["semantic_output_seen"] != false {
+			t.Fatalf("observation summary mismatch: %+v", event.Fields)
+		}
+		if event.Fields["attempt_count"] != int64(1) && event.Fields["attempt_count"] != 1 {
+			t.Fatalf("attempt_count mismatch: %+v", event.Fields["attempt_count"])
+		}
+		return
+	}
+	t.Fatal("access log observation event not found")
 }
 
 func TestLogger_IngressRejectRemainsInStandardAccessLog(t *testing.T) {

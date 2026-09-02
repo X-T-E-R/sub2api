@@ -83,7 +83,11 @@
       <div class="rounded-lg bg-purple-100 p-2 dark:bg-purple-900/30 text-purple-600">
         <Icon name="clock" size="md" />
       </div>
-      <div><p class="text-xs font-medium text-gray-500">{{ t('usage.avgDuration') }}</p><p class="text-xl font-bold">{{ formatDuration(stats?.average_duration_ms || 0) }}</p></div>
+      <div>
+        <p class="text-xs font-medium text-gray-500">{{ handlerDurationSampleCount > 0 ? t('usage.avgHandlerDuration') : t('usage.avgDuration') }}</p>
+        <p class="text-xl font-bold">{{ formatDuration(handlerDurationSampleCount > 0 ? averageHandlerDuration : (stats?.average_duration_ms || 0)) }}</p>
+        <p v-if="handlerDurationSampleCount > 0" class="text-xs text-gray-400">{{ t('usage.handlerDurationSamples', { count: handlerDurationSampleCount }) }}</p>
+      </div>
     </div>
   </div>
 </template>
@@ -112,6 +116,8 @@ const totalAccountCost = computed(() => {
 })
 const showAccountCost = computed(() => props.showAccountCost)
 const strikeStandardCost = computed(() => props.strikeStandardCost)
+const handlerDurationSampleCount = computed(() => (props.stats as AdminUsageStatsResponse | null)?.handler_duration_sample_count ?? 0)
+const averageHandlerDuration = computed(() => (props.stats as AdminUsageStatsResponse | null)?.average_handler_duration_ms ?? 0)
 
 const formatDuration = (ms: number) =>
   ms < 1000 ? `${ms.toFixed(0)}ms` : `${(ms / 1000).toFixed(2)}s`

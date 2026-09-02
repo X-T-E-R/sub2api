@@ -134,6 +134,7 @@
             @sort="handleSort"
             @userClick="handleUserClick"
             @ipGeoBatchFailed="handleIpGeoBatchFailed"
+            @observabilityClick="openUsageObservability"
           />
           <Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" />
         </div>
@@ -174,6 +175,11 @@
     :end-date="endDate"
     @close="cleanupDialogVisible = false"
   />
+  <UsageObservabilityDialog
+    :show="selectedObservabilityUsageId != null"
+    :usage-id="selectedObservabilityUsageId"
+    @close="selectedObservabilityUsageId = null"
+  />
   <!-- Balance history modal triggered from usage table user click -->
   <UserBalanceHistoryModal
     :show="showBalanceHistoryModal"
@@ -197,6 +203,7 @@ import UsageStatsCards from '@/components/admin/usage/UsageStatsCards.vue'; impo
 import UsageTable from '@/components/admin/usage/UsageTable.vue'; import UsageExportProgress from '@/components/admin/usage/UsageExportProgress.vue'
 import UserTokenRanking from '@/components/admin/usage/UserTokenRanking.vue'
 import UsageCleanupDialog from '@/components/admin/usage/UsageCleanupDialog.vue'
+import UsageObservabilityDialog from '@/components/admin/usage/UsageObservabilityDialog.vue'
 import UserBalanceHistoryModal from '@/components/admin/user/UserBalanceHistoryModal.vue'
 import OpsErrorLogTable from '@/views/admin/ops/components/OpsErrorLogTable.vue'
 import OpsErrorDetailModal from '@/views/admin/ops/components/OpsErrorDetailModal.vue'
@@ -208,6 +215,8 @@ import Icon from '@/components/icons/Icon.vue'
 import type { AdminUsageLog, TrendDataPoint, ModelStat, GroupStat, EndpointStat, AdminUser } from '@/types'; import type { AdminUsageStatsResponse, AdminUsageQueryParams } from '@/api/admin/usage'
 
 const { t } = useI18n()
+const selectedObservabilityUsageId = ref<number | null>(null)
+const openUsageObservability = (row: AdminUsageLog) => { selectedObservabilityUsageId.value = row.id }
 const appStore = useAppStore()
 type DistributionMetric = 'tokens' | 'actual_cost'
 type EndpointSource = 'inbound' | 'upstream' | 'path'
@@ -585,7 +594,8 @@ const exportToExcel = async () => {
       t('admin.usage.inputCost'), t('admin.usage.outputCost'),
       t('admin.usage.cacheReadCost'), t('admin.usage.cacheCreationCost'),
       t('usage.rate'), t('usage.accountMultiplier'), t('usage.original'), t('usage.userBilled'), t('usage.accountBilled'),
-      t('usage.firstToken'), t('usage.duration'),
+      t('usage.latencyHandler'), t('usage.latencyForward'), t('usage.latencyFirstVisible'), t('usage.latencyLegacyTtft'),
+      t('usage.attempts'), t('usage.switches'), t('usage.terminalKind'),
       t('admin.usage.requestId'), t('usage.userAgent'), t('admin.usage.ipAddress')
     ]
     const ws = XLSX.utils.aoa_to_sheet([headers])
@@ -604,7 +614,9 @@ const exportToExcel = async () => {
         log.cache_read_cost?.toFixed(6) || '0.000000', log.cache_creation_cost?.toFixed(6) || '0.000000',
         log.rate_multiplier?.toPrecision(4) || '1.00', (log.account_rate_multiplier ?? 1).toPrecision(4),
         log.total_cost?.toFixed(6) || '0.000000', log.actual_cost?.toFixed(6) || '0.000000',
-        ((log.account_stats_cost ?? log.total_cost) * (log.account_rate_multiplier ?? 1)).toFixed(6), log.first_token_ms ?? '', log.duration_ms,
+        ((log.account_stats_cost ?? log.total_cost) * (log.account_rate_multiplier ?? 1)).toFixed(6),
+        log.handler_duration_ms ?? '', log.forward_duration_ms ?? log.duration_ms ?? '', log.first_visible_output_ms ?? '', log.first_token_ms ?? '',
+        log.attempt_count ?? '', log.account_switch_count ?? '', log.terminal_kind ?? '',
         log.request_id || '', log.user_agent || '', log.ip_address || ''
       ])
       if (rows.length) {

@@ -82,6 +82,30 @@ const (
 	FieldDurationMs = "duration_ms"
 	// FieldFirstTokenMs holds the string denoting the first_token_ms field in the database.
 	FieldFirstTokenMs = "first_token_ms"
+	// FieldHandlerDurationMs holds the string denoting the handler_duration_ms field in the database.
+	FieldHandlerDurationMs = "handler_duration_ms"
+	// FieldFirstVisibleOutputMs holds the string denoting the first_visible_output_ms field in the database.
+	FieldFirstVisibleOutputMs = "first_visible_output_ms"
+	// FieldSemanticOutputSeen holds the string denoting the semantic_output_seen field in the database.
+	FieldSemanticOutputSeen = "semantic_output_seen"
+	// FieldTerminalKind holds the string denoting the terminal_kind field in the database.
+	FieldTerminalKind = "terminal_kind"
+	// FieldAttemptCount holds the string denoting the attempt_count field in the database.
+	FieldAttemptCount = "attempt_count"
+	// FieldAccountSwitchCount holds the string denoting the account_switch_count field in the database.
+	FieldAccountSwitchCount = "account_switch_count"
+	// FieldFailedAttemptDurationMs holds the string denoting the failed_attempt_duration_ms field in the database.
+	FieldFailedAttemptDurationMs = "failed_attempt_duration_ms"
+	// FieldRetryWaitMs holds the string denoting the retry_wait_ms field in the database.
+	FieldRetryWaitMs = "retry_wait_ms"
+	// FieldAccountSwitchMs holds the string denoting the account_switch_ms field in the database.
+	FieldAccountSwitchMs = "account_switch_ms"
+	// FieldGatewayRequestID holds the string denoting the gateway_request_id field in the database.
+	FieldGatewayRequestID = "gateway_request_id"
+	// FieldClientRequestID holds the string denoting the client_request_id field in the database.
+	FieldClientRequestID = "client_request_id"
+	// FieldAttemptLedger holds the string denoting the attempt_ledger field in the database.
+	FieldAttemptLedger = "attempt_ledger"
 	// FieldUserAgent holds the string denoting the user_agent field in the database.
 	FieldUserAgent = "user_agent"
 	// FieldIPAddress holds the string denoting the ip_address field in the database.
@@ -194,6 +218,18 @@ var Columns = []string{
 	FieldStream,
 	FieldDurationMs,
 	FieldFirstTokenMs,
+	FieldHandlerDurationMs,
+	FieldFirstVisibleOutputMs,
+	FieldSemanticOutputSeen,
+	FieldTerminalKind,
+	FieldAttemptCount,
+	FieldAccountSwitchCount,
+	FieldFailedAttemptDurationMs,
+	FieldRetryWaitMs,
+	FieldAccountSwitchMs,
+	FieldGatewayRequestID,
+	FieldClientRequestID,
+	FieldAttemptLedger,
 	FieldUserAgent,
 	FieldIPAddress,
 	FieldImageCount,
@@ -268,6 +304,12 @@ var (
 	DefaultBillingType int8
 	// DefaultStream holds the default value on creation for the "stream" field.
 	DefaultStream bool
+	// TerminalKindValidator is a validator for the "terminal_kind" field. It is called by the builders before save.
+	TerminalKindValidator func(string) error
+	// GatewayRequestIDValidator is a validator for the "gateway_request_id" field. It is called by the builders before save.
+	GatewayRequestIDValidator func(string) error
+	// ClientRequestIDValidator is a validator for the "client_request_id" field. It is called by the builders before save.
+	ClientRequestIDValidator func(string) error
 	// UserAgentValidator is a validator for the "user_agent" field. It is called by the builders before save.
 	UserAgentValidator func(string) error
 	// IPAddressValidator is a validator for the "ip_address" field. It is called by the builders before save.
@@ -468,6 +510,61 @@ func ByDurationMs(opts ...sql.OrderTermOption) OrderOption {
 // ByFirstTokenMs orders the results by the first_token_ms field.
 func ByFirstTokenMs(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFirstTokenMs, opts...).ToFunc()
+}
+
+// ByHandlerDurationMs orders the results by the handler_duration_ms field.
+func ByHandlerDurationMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHandlerDurationMs, opts...).ToFunc()
+}
+
+// ByFirstVisibleOutputMs orders the results by the first_visible_output_ms field.
+func ByFirstVisibleOutputMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFirstVisibleOutputMs, opts...).ToFunc()
+}
+
+// BySemanticOutputSeen orders the results by the semantic_output_seen field.
+func BySemanticOutputSeen(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSemanticOutputSeen, opts...).ToFunc()
+}
+
+// ByTerminalKind orders the results by the terminal_kind field.
+func ByTerminalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTerminalKind, opts...).ToFunc()
+}
+
+// ByAttemptCount orders the results by the attempt_count field.
+func ByAttemptCount(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttemptCount, opts...).ToFunc()
+}
+
+// ByAccountSwitchCount orders the results by the account_switch_count field.
+func ByAccountSwitchCount(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAccountSwitchCount, opts...).ToFunc()
+}
+
+// ByFailedAttemptDurationMs orders the results by the failed_attempt_duration_ms field.
+func ByFailedAttemptDurationMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFailedAttemptDurationMs, opts...).ToFunc()
+}
+
+// ByRetryWaitMs orders the results by the retry_wait_ms field.
+func ByRetryWaitMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRetryWaitMs, opts...).ToFunc()
+}
+
+// ByAccountSwitchMs orders the results by the account_switch_ms field.
+func ByAccountSwitchMs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAccountSwitchMs, opts...).ToFunc()
+}
+
+// ByGatewayRequestID orders the results by the gateway_request_id field.
+func ByGatewayRequestID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGatewayRequestID, opts...).ToFunc()
+}
+
+// ByClientRequestID orders the results by the client_request_id field.
+func ByClientRequestID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldClientRequestID, opts...).ToFunc()
 }
 
 // ByUserAgent orders the results by the user_agent field.

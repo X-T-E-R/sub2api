@@ -518,12 +518,25 @@ type UsageLog struct {
 	RateMultiplier            float64 `json:"rate_multiplier"`
 	LongContextBillingApplied bool    `json:"long_context_billing_applied"`
 
-	BillingType  int8   `json:"billing_type"`
-	RequestType  string `json:"request_type"`
-	Stream       bool   `json:"stream"`
-	OpenAIWSMode bool   `json:"openai_ws_mode"`
-	DurationMs   *int   `json:"duration_ms"`
-	FirstTokenMs *int   `json:"first_token_ms"`
+	BillingType             int8    `json:"billing_type"`
+	RequestType             string  `json:"request_type"`
+	Stream                  bool    `json:"stream"`
+	OpenAIWSMode            bool    `json:"openai_ws_mode"`
+	DurationMs              *int    `json:"duration_ms"`
+	ForwardDurationMs       *int    `json:"forward_duration_ms"`
+	FirstTokenMs            *int    `json:"first_token_ms"`
+	HandlerDurationMs       *int    `json:"handler_duration_ms"`
+	FirstVisibleOutputMs    *int    `json:"first_visible_output_ms"`
+	SemanticOutputSeen      *bool   `json:"semantic_output_seen"`
+	TerminalKind            *string `json:"terminal_kind"`
+	AttemptCount            *int    `json:"attempt_count"`
+	AccountSwitchCount      *int    `json:"account_switch_count"`
+	FailedAttemptDurationMs *int    `json:"failed_attempt_duration_ms"`
+	RetryWaitMs             *int    `json:"retry_wait_ms"`
+	AccountSwitchMs         *int    `json:"account_switch_ms"`
+	GatewayRequestID        *string `json:"gateway_request_id"`
+	ClientRequestID         *string `json:"client_request_id"`
+	AttemptLedgerAvailable  bool    `json:"attempt_ledger_available"`
 
 	// 图片生成字段
 	ImageCount         int            `json:"image_count"`

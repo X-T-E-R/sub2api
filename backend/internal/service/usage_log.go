@@ -179,8 +179,23 @@ type UsageLog struct {
 	OpenAIWSMode bool
 	DurationMs   *int
 	FirstTokenMs *int
-	UserAgent    *string
-	IPAddress    *string
+	// Request observability fields are nil for historical rows and protocols
+	// that have not installed a semantic observer.
+	HandlerDurationMs       *int
+	FirstVisibleOutputMs    *int
+	SemanticOutputSeen      *bool
+	TerminalKind            *string
+	AttemptCount            *int
+	AccountSwitchCount      *int
+	FailedAttemptDurationMs *int
+	RetryWaitMs             *int
+	AccountSwitchMs         *int
+	GatewayRequestID        *string
+	ClientRequestID         *string
+	AttemptLedger           *RequestAttemptLedger
+	AttemptLedgerAvailable  bool
+	UserAgent               *string
+	IPAddress               *string
 	// SessionID is the explicit client-provided request correlation identifier
 	// (e.g. the session_id / X-Session-Id headers). Nil when the client sent no
 	// valid session header. It is never derived from prompt_cache_key or content.

@@ -19,10 +19,12 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, session_id, created_at"
+const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, session_id, handler_duration_ms, first_visible_output_ms, semantic_output_seen, terminal_kind, attempt_count, account_switch_count, failed_attempt_duration_ms, retry_wait_ms, account_switch_ms, gateway_request_id, client_request_id, attempt_ledger IS NOT NULL, created_at"
+
+const usageLogDetailSelectColumns = usageLogSelectColumns + ", attempt_ledger"
 
 func (r *usageLogRepository) GetByID(ctx context.Context, id int64) (log *service.UsageLog, err error) {
-	query := "SELECT " + usageLogSelectColumns + " FROM usage_logs WHERE id = $1"
+	query := "SELECT " + usageLogDetailSelectColumns + " FROM usage_logs WHERE id = $1"
 	rows, err := r.sql.QueryContext(ctx, query, id)
 	if err != nil {
 		return nil, err
@@ -41,7 +43,7 @@ func (r *usageLogRepository) GetByID(ctx context.Context, id int64) (log *servic
 		}
 		return nil, service.ErrUsageLogNotFound
 	}
-	log, err = scanUsageLog(rows)
+	log, err = scanUsageLogWithLedger(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +122,14 @@ func (r *usageLogRepository) ListWithFilters(ctx context.Context, params paginat
 		conditions = append(conditions, fmt.Sprintf("request_id = $%d", len(args)+1))
 		args = append(args, requestID)
 	}
+	if correlationID := strings.TrimSpace(filters.CorrelationID); correlationID != "" {
+		placeholder := fmt.Sprintf("$%d", len(args)+1)
+		conditions = append(conditions, fmt.Sprintf(
+			"(request_id = %[1]s OR gateway_request_id = %[1]s OR client_request_id = %[1]s OR request_id = 'client:' || %[1]s OR request_id = 'local:' || %[1]s)",
+			placeholder,
+		))
+		args = append(args, correlationID)
+	}
 	conditions, args = appendUsageLogModelWhereCondition(conditions, args, filters.Model, filters.ModelFilterSource)
 	conditions, args = appendRequestTypeOrStreamWhereCondition(conditions, args, filters.RequestType, filters.Stream)
 	if filters.BillingType != nil {
@@ -172,7 +182,7 @@ func shouldUseFastUsageLogTotal(filters UsageLogFilters) bool {
 		return false
 	}
 	// 强选择过滤下记录集通常较小，保留精确总数。
-	return filters.UserID == 0 && filters.APIKeyID == 0 && filters.AccountID == 0
+	return filters.UserID == 0 && filters.APIKeyID == 0 && filters.AccountID == 0 && strings.TrimSpace(filters.CorrelationID) == ""
 }
 
 func (r *usageLogRepository) listUsageLogsWithPagination(ctx context.Context, whereClause string, args []any, params pagination.PaginationParams) ([]service.UsageLog, *pagination.PaginationResult, error) {
@@ -438,6 +448,14 @@ func (r *usageLogRepository) loadSubscriptions(ctx context.Context, ids []int64)
 }
 
 func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, error) {
+	return scanUsageLogOptionalLedger(scanner, false)
+}
+
+func scanUsageLogWithLedger(scanner interface{ Scan(...any) error }) (*service.UsageLog, error) {
+	return scanUsageLogOptionalLedger(scanner, true)
+}
+
+func scanUsageLogOptionalLedger(scanner interface{ Scan(...any) error }, includeLedger bool) (*service.UsageLog, error) {
 	var (
 		id                        int64
 		userID                    int64
@@ -499,10 +517,23 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 		billingMode               sql.NullString
 		accountStatsCost          sql.NullFloat64
 		sessionID                 sql.NullString
+		handlerDurationMs         sql.NullInt64
+		firstVisibleOutputMs      sql.NullInt64
+		semanticOutputSeen        sql.NullBool
+		terminalKind              sql.NullString
+		attemptCount              sql.NullInt64
+		accountSwitchCount        sql.NullInt64
+		failedAttemptDurationMs   sql.NullInt64
+		retryWaitMs               sql.NullInt64
+		accountSwitchMs           sql.NullInt64
+		gatewayRequestID          sql.NullString
+		clientRequestID           sql.NullString
+		attemptLedgerAvailable    bool
 		createdAt                 time.Time
+		attemptLedger             sql.NullString
 	)
 
-	if err := scanner.Scan(
+	scanArgs := []any{
 		&id,
 		&userID,
 		&apiKeyID,
@@ -563,8 +594,24 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 		&billingMode,
 		&accountStatsCost,
 		&sessionID,
+		&handlerDurationMs,
+		&firstVisibleOutputMs,
+		&semanticOutputSeen,
+		&terminalKind,
+		&attemptCount,
+		&accountSwitchCount,
+		&failedAttemptDurationMs,
+		&retryWaitMs,
+		&accountSwitchMs,
+		&gatewayRequestID,
+		&clientRequestID,
+		&attemptLedgerAvailable,
 		&createdAt,
-	); err != nil {
+	}
+	if includeLedger {
+		scanArgs = append(scanArgs, &attemptLedger)
+	}
+	if err := scanner.Scan(scanArgs...); err != nil {
 		return nil, err
 	}
 
@@ -599,6 +646,7 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 		VideoCount:                videoCount,
 		CacheTTLOverridden:        cacheTTLOverridden,
 		LongContextBillingApplied: longContextBillingApplied,
+		AttemptLedgerAvailable:    attemptLedgerAvailable,
 		CreatedAt:                 createdAt,
 	}
 	// 先回填 legacy 字段，再基于 legacy + request_type 计算最终请求类型，保证历史数据兼容。
@@ -625,6 +673,34 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 	if firstTokenMs.Valid {
 		value := int(firstTokenMs.Int64)
 		log.FirstTokenMs = &value
+	}
+	log.HandlerDurationMs = intPtrFromNull(handlerDurationMs)
+	log.FirstVisibleOutputMs = intPtrFromNull(firstVisibleOutputMs)
+	if semanticOutputSeen.Valid {
+		value := semanticOutputSeen.Bool
+		log.SemanticOutputSeen = &value
+	}
+	if terminalKind.Valid {
+		log.TerminalKind = &terminalKind.String
+	}
+	log.AttemptCount = intPtrFromNull(attemptCount)
+	log.AccountSwitchCount = intPtrFromNull(accountSwitchCount)
+	log.FailedAttemptDurationMs = intPtrFromNull(failedAttemptDurationMs)
+	log.RetryWaitMs = intPtrFromNull(retryWaitMs)
+	log.AccountSwitchMs = intPtrFromNull(accountSwitchMs)
+	if gatewayRequestID.Valid {
+		log.GatewayRequestID = &gatewayRequestID.String
+	}
+	if clientRequestID.Valid {
+		log.ClientRequestID = &clientRequestID.String
+	}
+	if attemptLedger.Valid && strings.TrimSpace(attemptLedger.String) != "" {
+		var ledger service.RequestAttemptLedger
+		if err := json.Unmarshal([]byte(attemptLedger.String), &ledger); err != nil {
+			return nil, fmt.Errorf("decode usage attempt ledger: %w", err)
+		}
+		log.AttemptLedger = &ledger
+		log.AttemptLedgerAvailable = true
 	}
 	if userAgent.Valid {
 		log.UserAgent = &userAgent.String
@@ -698,6 +774,14 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 	}
 
 	return log, nil
+}
+
+func intPtrFromNull(value sql.NullInt64) *int {
+	if !value.Valid {
+		return nil
+	}
+	out := int(value.Int64)
+	return &out
 }
 
 func nullInt64(v *int64) sql.NullInt64 {

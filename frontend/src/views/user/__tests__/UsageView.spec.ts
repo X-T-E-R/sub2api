@@ -117,6 +117,13 @@ const usageLog = {
   image_size: null,
   first_token_ms: 12,
   duration_ms: 345,
+  forward_duration_ms: 345,
+  handler_duration_ms: 870,
+  first_visible_output_ms: 430,
+  semantic_output_seen: true,
+  terminal_kind: 'response.completed',
+  attempt_count: 3,
+  account_switch_count: 1,
   created_at: '2026-03-08T00:00:00Z',
   model: 'gpt-5.4',
   reasoning_effort: null,
@@ -239,8 +246,8 @@ describe('user UsageView', () => {
     expect(showSuccess).toHaveBeenCalled()
     expect(csvContent.startsWith('\uFEFF')).toBe(true)
     expect(csvContent.slice(1)).toBe([
-      'Time,API Key Name,Model,Reasoning Effort,Inbound Endpoint,IP Address,Type,Billing Mode,Input Tokens,Output Tokens,Cache Read Tokens,Cache Creation Tokens,Rate Multiplier,Billed Cost,Original Cost,First Token (ms),Duration (ms)',
-      '2026-03-08T00:00:00Z,demo-key,gpt-5.4,"\'-",,203.0.113.10,Sync,Token,4057,101,278272,4,1,0.09288300,0.09288300,12,345',
+      'Time,API Key Name,Model,Reasoning Effort,Inbound Endpoint,IP Address,Type,Billing Mode,Input Tokens,Output Tokens,Cache Read Tokens,Cache Creation Tokens,Rate Multiplier,Billed Cost,Original Cost,Handler E2E (ms),Final Forward (ms),First Visible Output (ms),Legacy TTFT (ms),Attempts,Account Switches,Terminal Kind',
+      '2026-03-08T00:00:00Z,demo-key,gpt-5.4,"\'-",,203.0.113.10,Sync,Token,4057,101,278272,4,1,0.09288300,0.09288300,870,345,430,12,3,1,response.completed',
     ].join('\n'))
     expect(csvContent).toContain('IP Address')
     expect(csvContent).toContain('203.0.113.10')

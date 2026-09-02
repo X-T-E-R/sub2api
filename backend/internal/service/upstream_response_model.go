@@ -37,6 +37,9 @@ type upstreamResponseModelObserver struct {
 	firstTier         string
 	firstTierConflict bool
 	terminalTier      string
+
+	requestObservation *requestObservation
+	attemptSequence    int
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {
@@ -70,6 +73,9 @@ func normalizeObservedUpstreamResponseModel(model string) string {
 }
 
 func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType string) {
+	if o != nil && o.requestObservation != nil {
+		o.requestObservation.observeOpenAI(o.attemptSequence, payload, eventType)
+	}
 	model := firstValidTrimmedGJSONString(payload, "response.model", "model")
 	terminal := isUpstreamResponseModelTerminalEvent(eventType)
 	o.Observe(model, terminal)
@@ -89,6 +95,9 @@ func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType 
 }
 
 func (o *upstreamResponseModelObserver) ObserveAnthropic(payload []byte) {
+	if o != nil && o.requestObservation != nil {
+		o.requestObservation.observeAnthropic(o.attemptSequence, payload)
+	}
 	model := firstValidTrimmedGJSONString(payload, "message.model", "model")
 	o.Observe(model, false)
 	// usage.speed travels with the message object (message_start in streams,
@@ -189,6 +198,12 @@ func (o *upstreamResponseModelObserver) Conflict() bool {
 func beginUpstreamResponseModelObservation(c *gin.Context) *upstreamResponseModelObserver {
 	observer := &upstreamResponseModelObserver{}
 	if c != nil {
+		observer.requestObservation = requestObservationFromGin(c)
+		if observer.requestObservation != nil {
+			observer.requestObservation.mu.Lock()
+			observer.attemptSequence = observer.requestObservation.currentAttempt
+			observer.requestObservation.mu.Unlock()
+		}
 		c.Set(upstreamResponseModelObserverContextKey, observer)
 	}
 	return observer

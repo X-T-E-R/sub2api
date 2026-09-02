@@ -37,6 +37,13 @@ const messages: Record<string, string> = {
 	'usage.sentUpstreamModel': 'Sent upstream model',
 	'usage.upstreamResponseModel': 'Upstream response model',
 	'usage.upstreamModelMismatch': 'Upstream model mismatch',
+	'usage.latencyHandler': 'Handler E2E',
+	'usage.latencyForward': 'Final Forward',
+	'usage.latencyFirstVisible': 'First Visible',
+	'usage.latencyLegacyTtft': 'Legacy TTFT',
+	'usage.attempts': 'Attempts',
+	'usage.switches': 'Account Switches',
+	'usage.terminalKind': 'Terminal Kind',
 	'common.yes': 'Yes',
 	'common.no': 'No',
 }
@@ -647,6 +654,13 @@ describe('admin UsageView model audit export', () => {
 				cache_read_tokens: 0,
 				cache_creation_tokens: 0,
 				duration_ms: 10,
+				forward_duration_ms: 10,
+				handler_duration_ms: 45,
+				first_visible_output_ms: 22,
+				first_token_ms: 8,
+				attempt_count: 2,
+				account_switch_count: 1,
+				terminal_kind: 'response.completed',
 			}],
 			total: 1,
 			pages: 1,
@@ -684,6 +698,18 @@ describe('admin UsageView model audit export', () => {
 		])
 		const row = sheetAddAoa.mock.calls[0][1][0]
 		expect(row.slice(4, 8)).toEqual(['gpt-5.6-sol', 'gpt-5.5', 'gpt-5.4', 'Yes'])
+		for (const [header, value] of [
+			['Handler E2E', 45],
+			['Final Forward', 10],
+			['First Visible', 22],
+			['Attempts', 2],
+			['Account Switches', 1],
+			['Terminal Kind', 'response.completed'],
+		] as const) {
+			const index = headers.indexOf(header)
+			expect(index).toBeGreaterThan(-1)
+			expect(row[index]).toBe(value)
+		}
 		expect(saveAs).toHaveBeenCalledTimes(1)
 	})
 })

@@ -4,11 +4,13 @@ package ent
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
@@ -712,6 +714,293 @@ func (_u *UsageLogUpdate) ClearFirstTokenMs() *UsageLogUpdate {
 	return _u
 }
 
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (_u *UsageLogUpdate) SetHandlerDurationMs(v int) *UsageLogUpdate {
+	_u.mutation.ResetHandlerDurationMs()
+	_u.mutation.SetHandlerDurationMs(v)
+	return _u
+}
+
+// SetNillableHandlerDurationMs sets the "handler_duration_ms" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableHandlerDurationMs(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetHandlerDurationMs(*v)
+	}
+	return _u
+}
+
+// AddHandlerDurationMs adds value to the "handler_duration_ms" field.
+func (_u *UsageLogUpdate) AddHandlerDurationMs(v int) *UsageLogUpdate {
+	_u.mutation.AddHandlerDurationMs(v)
+	return _u
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (_u *UsageLogUpdate) ClearHandlerDurationMs() *UsageLogUpdate {
+	_u.mutation.ClearHandlerDurationMs()
+	return _u
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (_u *UsageLogUpdate) SetFirstVisibleOutputMs(v int) *UsageLogUpdate {
+	_u.mutation.ResetFirstVisibleOutputMs()
+	_u.mutation.SetFirstVisibleOutputMs(v)
+	return _u
+}
+
+// SetNillableFirstVisibleOutputMs sets the "first_visible_output_ms" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableFirstVisibleOutputMs(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetFirstVisibleOutputMs(*v)
+	}
+	return _u
+}
+
+// AddFirstVisibleOutputMs adds value to the "first_visible_output_ms" field.
+func (_u *UsageLogUpdate) AddFirstVisibleOutputMs(v int) *UsageLogUpdate {
+	_u.mutation.AddFirstVisibleOutputMs(v)
+	return _u
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (_u *UsageLogUpdate) ClearFirstVisibleOutputMs() *UsageLogUpdate {
+	_u.mutation.ClearFirstVisibleOutputMs()
+	return _u
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (_u *UsageLogUpdate) SetSemanticOutputSeen(v bool) *UsageLogUpdate {
+	_u.mutation.SetSemanticOutputSeen(v)
+	return _u
+}
+
+// SetNillableSemanticOutputSeen sets the "semantic_output_seen" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableSemanticOutputSeen(v *bool) *UsageLogUpdate {
+	if v != nil {
+		_u.SetSemanticOutputSeen(*v)
+	}
+	return _u
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (_u *UsageLogUpdate) ClearSemanticOutputSeen() *UsageLogUpdate {
+	_u.mutation.ClearSemanticOutputSeen()
+	return _u
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (_u *UsageLogUpdate) SetTerminalKind(v string) *UsageLogUpdate {
+	_u.mutation.SetTerminalKind(v)
+	return _u
+}
+
+// SetNillableTerminalKind sets the "terminal_kind" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableTerminalKind(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetTerminalKind(*v)
+	}
+	return _u
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (_u *UsageLogUpdate) ClearTerminalKind() *UsageLogUpdate {
+	_u.mutation.ClearTerminalKind()
+	return _u
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (_u *UsageLogUpdate) SetAttemptCount(v int) *UsageLogUpdate {
+	_u.mutation.ResetAttemptCount()
+	_u.mutation.SetAttemptCount(v)
+	return _u
+}
+
+// SetNillableAttemptCount sets the "attempt_count" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableAttemptCount(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetAttemptCount(*v)
+	}
+	return _u
+}
+
+// AddAttemptCount adds value to the "attempt_count" field.
+func (_u *UsageLogUpdate) AddAttemptCount(v int) *UsageLogUpdate {
+	_u.mutation.AddAttemptCount(v)
+	return _u
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (_u *UsageLogUpdate) ClearAttemptCount() *UsageLogUpdate {
+	_u.mutation.ClearAttemptCount()
+	return _u
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (_u *UsageLogUpdate) SetAccountSwitchCount(v int) *UsageLogUpdate {
+	_u.mutation.ResetAccountSwitchCount()
+	_u.mutation.SetAccountSwitchCount(v)
+	return _u
+}
+
+// SetNillableAccountSwitchCount sets the "account_switch_count" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableAccountSwitchCount(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetAccountSwitchCount(*v)
+	}
+	return _u
+}
+
+// AddAccountSwitchCount adds value to the "account_switch_count" field.
+func (_u *UsageLogUpdate) AddAccountSwitchCount(v int) *UsageLogUpdate {
+	_u.mutation.AddAccountSwitchCount(v)
+	return _u
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (_u *UsageLogUpdate) ClearAccountSwitchCount() *UsageLogUpdate {
+	_u.mutation.ClearAccountSwitchCount()
+	return _u
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdate) SetFailedAttemptDurationMs(v int) *UsageLogUpdate {
+	_u.mutation.ResetFailedAttemptDurationMs()
+	_u.mutation.SetFailedAttemptDurationMs(v)
+	return _u
+}
+
+// SetNillableFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableFailedAttemptDurationMs(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetFailedAttemptDurationMs(*v)
+	}
+	return _u
+}
+
+// AddFailedAttemptDurationMs adds value to the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdate) AddFailedAttemptDurationMs(v int) *UsageLogUpdate {
+	_u.mutation.AddFailedAttemptDurationMs(v)
+	return _u
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdate) ClearFailedAttemptDurationMs() *UsageLogUpdate {
+	_u.mutation.ClearFailedAttemptDurationMs()
+	return _u
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (_u *UsageLogUpdate) SetRetryWaitMs(v int) *UsageLogUpdate {
+	_u.mutation.ResetRetryWaitMs()
+	_u.mutation.SetRetryWaitMs(v)
+	return _u
+}
+
+// SetNillableRetryWaitMs sets the "retry_wait_ms" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableRetryWaitMs(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetRetryWaitMs(*v)
+	}
+	return _u
+}
+
+// AddRetryWaitMs adds value to the "retry_wait_ms" field.
+func (_u *UsageLogUpdate) AddRetryWaitMs(v int) *UsageLogUpdate {
+	_u.mutation.AddRetryWaitMs(v)
+	return _u
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (_u *UsageLogUpdate) ClearRetryWaitMs() *UsageLogUpdate {
+	_u.mutation.ClearRetryWaitMs()
+	return _u
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (_u *UsageLogUpdate) SetAccountSwitchMs(v int) *UsageLogUpdate {
+	_u.mutation.ResetAccountSwitchMs()
+	_u.mutation.SetAccountSwitchMs(v)
+	return _u
+}
+
+// SetNillableAccountSwitchMs sets the "account_switch_ms" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableAccountSwitchMs(v *int) *UsageLogUpdate {
+	if v != nil {
+		_u.SetAccountSwitchMs(*v)
+	}
+	return _u
+}
+
+// AddAccountSwitchMs adds value to the "account_switch_ms" field.
+func (_u *UsageLogUpdate) AddAccountSwitchMs(v int) *UsageLogUpdate {
+	_u.mutation.AddAccountSwitchMs(v)
+	return _u
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (_u *UsageLogUpdate) ClearAccountSwitchMs() *UsageLogUpdate {
+	_u.mutation.ClearAccountSwitchMs()
+	return _u
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (_u *UsageLogUpdate) SetGatewayRequestID(v string) *UsageLogUpdate {
+	_u.mutation.SetGatewayRequestID(v)
+	return _u
+}
+
+// SetNillableGatewayRequestID sets the "gateway_request_id" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableGatewayRequestID(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetGatewayRequestID(*v)
+	}
+	return _u
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (_u *UsageLogUpdate) ClearGatewayRequestID() *UsageLogUpdate {
+	_u.mutation.ClearGatewayRequestID()
+	return _u
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (_u *UsageLogUpdate) SetClientRequestID(v string) *UsageLogUpdate {
+	_u.mutation.SetClientRequestID(v)
+	return _u
+}
+
+// SetNillableClientRequestID sets the "client_request_id" field if the given value is not nil.
+func (_u *UsageLogUpdate) SetNillableClientRequestID(v *string) *UsageLogUpdate {
+	if v != nil {
+		_u.SetClientRequestID(*v)
+	}
+	return _u
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (_u *UsageLogUpdate) ClearClientRequestID() *UsageLogUpdate {
+	_u.mutation.ClearClientRequestID()
+	return _u
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (_u *UsageLogUpdate) SetAttemptLedger(v jsontext.Value) *UsageLogUpdate {
+	_u.mutation.SetAttemptLedger(v)
+	return _u
+}
+
+// AppendAttemptLedger appends value to the "attempt_ledger" field.
+func (_u *UsageLogUpdate) AppendAttemptLedger(v jsontext.Value) *UsageLogUpdate {
+	_u.mutation.AppendAttemptLedger(v)
+	return _u
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (_u *UsageLogUpdate) ClearAttemptLedger() *UsageLogUpdate {
+	_u.mutation.ClearAttemptLedger()
+	return _u
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_u *UsageLogUpdate) SetUserAgent(v string) *UsageLogUpdate {
 	_u.mutation.SetUserAgent(v)
@@ -1076,6 +1365,21 @@ func (_u *UsageLogUpdate) check() error {
 			return &ValidationError{Name: "billing_mode", err: fmt.Errorf(`ent: validator failed for field "UsageLog.billing_mode": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.TerminalKind(); ok {
+		if err := usagelog.TerminalKindValidator(v); err != nil {
+			return &ValidationError{Name: "terminal_kind", err: fmt.Errorf(`ent: validator failed for field "UsageLog.terminal_kind": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.GatewayRequestID(); ok {
+		if err := usagelog.GatewayRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "gateway_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.gateway_request_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ClientRequestID(); ok {
+		if err := usagelog.ClientRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.client_request_id": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.UserAgent(); ok {
 		if err := usagelog.UserAgentValidator(v); err != nil {
 			return &ValidationError{Name: "user_agent", err: fmt.Errorf(`ent: validator failed for field "UsageLog.user_agent": %w`, err)}
@@ -1308,6 +1612,104 @@ func (_u *UsageLogUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.FirstTokenMsCleared() {
 		_spec.ClearField(usagelog.FieldFirstTokenMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.HandlerDurationMs(); ok {
+		_spec.SetField(usagelog.FieldHandlerDurationMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedHandlerDurationMs(); ok {
+		_spec.AddField(usagelog.FieldHandlerDurationMs, field.TypeInt, value)
+	}
+	if _u.mutation.HandlerDurationMsCleared() {
+		_spec.ClearField(usagelog.FieldHandlerDurationMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.FirstVisibleOutputMs(); ok {
+		_spec.SetField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFirstVisibleOutputMs(); ok {
+		_spec.AddField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt, value)
+	}
+	if _u.mutation.FirstVisibleOutputMsCleared() {
+		_spec.ClearField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.SemanticOutputSeen(); ok {
+		_spec.SetField(usagelog.FieldSemanticOutputSeen, field.TypeBool, value)
+	}
+	if _u.mutation.SemanticOutputSeenCleared() {
+		_spec.ClearField(usagelog.FieldSemanticOutputSeen, field.TypeBool)
+	}
+	if value, ok := _u.mutation.TerminalKind(); ok {
+		_spec.SetField(usagelog.FieldTerminalKind, field.TypeString, value)
+	}
+	if _u.mutation.TerminalKindCleared() {
+		_spec.ClearField(usagelog.FieldTerminalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttemptCount(); ok {
+		_spec.SetField(usagelog.FieldAttemptCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttemptCount(); ok {
+		_spec.AddField(usagelog.FieldAttemptCount, field.TypeInt, value)
+	}
+	if _u.mutation.AttemptCountCleared() {
+		_spec.ClearField(usagelog.FieldAttemptCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AccountSwitchCount(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAccountSwitchCount(); ok {
+		_spec.AddField(usagelog.FieldAccountSwitchCount, field.TypeInt, value)
+	}
+	if _u.mutation.AccountSwitchCountCleared() {
+		_spec.ClearField(usagelog.FieldAccountSwitchCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.FailedAttemptDurationMs(); ok {
+		_spec.SetField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFailedAttemptDurationMs(); ok {
+		_spec.AddField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt, value)
+	}
+	if _u.mutation.FailedAttemptDurationMsCleared() {
+		_spec.ClearField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.RetryWaitMs(); ok {
+		_spec.SetField(usagelog.FieldRetryWaitMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRetryWaitMs(); ok {
+		_spec.AddField(usagelog.FieldRetryWaitMs, field.TypeInt, value)
+	}
+	if _u.mutation.RetryWaitMsCleared() {
+		_spec.ClearField(usagelog.FieldRetryWaitMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AccountSwitchMs(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAccountSwitchMs(); ok {
+		_spec.AddField(usagelog.FieldAccountSwitchMs, field.TypeInt, value)
+	}
+	if _u.mutation.AccountSwitchMsCleared() {
+		_spec.ClearField(usagelog.FieldAccountSwitchMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.GatewayRequestID(); ok {
+		_spec.SetField(usagelog.FieldGatewayRequestID, field.TypeString, value)
+	}
+	if _u.mutation.GatewayRequestIDCleared() {
+		_spec.ClearField(usagelog.FieldGatewayRequestID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ClientRequestID(); ok {
+		_spec.SetField(usagelog.FieldClientRequestID, field.TypeString, value)
+	}
+	if _u.mutation.ClientRequestIDCleared() {
+		_spec.ClearField(usagelog.FieldClientRequestID, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttemptLedger(); ok {
+		_spec.SetField(usagelog.FieldAttemptLedger, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAttemptLedger(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, usagelog.FieldAttemptLedger, value)
+		})
+	}
+	if _u.mutation.AttemptLedgerCleared() {
+		_spec.ClearField(usagelog.FieldAttemptLedger, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)
@@ -2226,6 +2628,293 @@ func (_u *UsageLogUpdateOne) ClearFirstTokenMs() *UsageLogUpdateOne {
 	return _u
 }
 
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (_u *UsageLogUpdateOne) SetHandlerDurationMs(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetHandlerDurationMs()
+	_u.mutation.SetHandlerDurationMs(v)
+	return _u
+}
+
+// SetNillableHandlerDurationMs sets the "handler_duration_ms" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableHandlerDurationMs(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetHandlerDurationMs(*v)
+	}
+	return _u
+}
+
+// AddHandlerDurationMs adds value to the "handler_duration_ms" field.
+func (_u *UsageLogUpdateOne) AddHandlerDurationMs(v int) *UsageLogUpdateOne {
+	_u.mutation.AddHandlerDurationMs(v)
+	return _u
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (_u *UsageLogUpdateOne) ClearHandlerDurationMs() *UsageLogUpdateOne {
+	_u.mutation.ClearHandlerDurationMs()
+	return _u
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (_u *UsageLogUpdateOne) SetFirstVisibleOutputMs(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetFirstVisibleOutputMs()
+	_u.mutation.SetFirstVisibleOutputMs(v)
+	return _u
+}
+
+// SetNillableFirstVisibleOutputMs sets the "first_visible_output_ms" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableFirstVisibleOutputMs(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetFirstVisibleOutputMs(*v)
+	}
+	return _u
+}
+
+// AddFirstVisibleOutputMs adds value to the "first_visible_output_ms" field.
+func (_u *UsageLogUpdateOne) AddFirstVisibleOutputMs(v int) *UsageLogUpdateOne {
+	_u.mutation.AddFirstVisibleOutputMs(v)
+	return _u
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (_u *UsageLogUpdateOne) ClearFirstVisibleOutputMs() *UsageLogUpdateOne {
+	_u.mutation.ClearFirstVisibleOutputMs()
+	return _u
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (_u *UsageLogUpdateOne) SetSemanticOutputSeen(v bool) *UsageLogUpdateOne {
+	_u.mutation.SetSemanticOutputSeen(v)
+	return _u
+}
+
+// SetNillableSemanticOutputSeen sets the "semantic_output_seen" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableSemanticOutputSeen(v *bool) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetSemanticOutputSeen(*v)
+	}
+	return _u
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (_u *UsageLogUpdateOne) ClearSemanticOutputSeen() *UsageLogUpdateOne {
+	_u.mutation.ClearSemanticOutputSeen()
+	return _u
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (_u *UsageLogUpdateOne) SetTerminalKind(v string) *UsageLogUpdateOne {
+	_u.mutation.SetTerminalKind(v)
+	return _u
+}
+
+// SetNillableTerminalKind sets the "terminal_kind" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableTerminalKind(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetTerminalKind(*v)
+	}
+	return _u
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (_u *UsageLogUpdateOne) ClearTerminalKind() *UsageLogUpdateOne {
+	_u.mutation.ClearTerminalKind()
+	return _u
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (_u *UsageLogUpdateOne) SetAttemptCount(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetAttemptCount()
+	_u.mutation.SetAttemptCount(v)
+	return _u
+}
+
+// SetNillableAttemptCount sets the "attempt_count" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableAttemptCount(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetAttemptCount(*v)
+	}
+	return _u
+}
+
+// AddAttemptCount adds value to the "attempt_count" field.
+func (_u *UsageLogUpdateOne) AddAttemptCount(v int) *UsageLogUpdateOne {
+	_u.mutation.AddAttemptCount(v)
+	return _u
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (_u *UsageLogUpdateOne) ClearAttemptCount() *UsageLogUpdateOne {
+	_u.mutation.ClearAttemptCount()
+	return _u
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (_u *UsageLogUpdateOne) SetAccountSwitchCount(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetAccountSwitchCount()
+	_u.mutation.SetAccountSwitchCount(v)
+	return _u
+}
+
+// SetNillableAccountSwitchCount sets the "account_switch_count" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableAccountSwitchCount(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetAccountSwitchCount(*v)
+	}
+	return _u
+}
+
+// AddAccountSwitchCount adds value to the "account_switch_count" field.
+func (_u *UsageLogUpdateOne) AddAccountSwitchCount(v int) *UsageLogUpdateOne {
+	_u.mutation.AddAccountSwitchCount(v)
+	return _u
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (_u *UsageLogUpdateOne) ClearAccountSwitchCount() *UsageLogUpdateOne {
+	_u.mutation.ClearAccountSwitchCount()
+	return _u
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdateOne) SetFailedAttemptDurationMs(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetFailedAttemptDurationMs()
+	_u.mutation.SetFailedAttemptDurationMs(v)
+	return _u
+}
+
+// SetNillableFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableFailedAttemptDurationMs(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetFailedAttemptDurationMs(*v)
+	}
+	return _u
+}
+
+// AddFailedAttemptDurationMs adds value to the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdateOne) AddFailedAttemptDurationMs(v int) *UsageLogUpdateOne {
+	_u.mutation.AddFailedAttemptDurationMs(v)
+	return _u
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (_u *UsageLogUpdateOne) ClearFailedAttemptDurationMs() *UsageLogUpdateOne {
+	_u.mutation.ClearFailedAttemptDurationMs()
+	return _u
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (_u *UsageLogUpdateOne) SetRetryWaitMs(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetRetryWaitMs()
+	_u.mutation.SetRetryWaitMs(v)
+	return _u
+}
+
+// SetNillableRetryWaitMs sets the "retry_wait_ms" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableRetryWaitMs(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetRetryWaitMs(*v)
+	}
+	return _u
+}
+
+// AddRetryWaitMs adds value to the "retry_wait_ms" field.
+func (_u *UsageLogUpdateOne) AddRetryWaitMs(v int) *UsageLogUpdateOne {
+	_u.mutation.AddRetryWaitMs(v)
+	return _u
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (_u *UsageLogUpdateOne) ClearRetryWaitMs() *UsageLogUpdateOne {
+	_u.mutation.ClearRetryWaitMs()
+	return _u
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (_u *UsageLogUpdateOne) SetAccountSwitchMs(v int) *UsageLogUpdateOne {
+	_u.mutation.ResetAccountSwitchMs()
+	_u.mutation.SetAccountSwitchMs(v)
+	return _u
+}
+
+// SetNillableAccountSwitchMs sets the "account_switch_ms" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableAccountSwitchMs(v *int) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetAccountSwitchMs(*v)
+	}
+	return _u
+}
+
+// AddAccountSwitchMs adds value to the "account_switch_ms" field.
+func (_u *UsageLogUpdateOne) AddAccountSwitchMs(v int) *UsageLogUpdateOne {
+	_u.mutation.AddAccountSwitchMs(v)
+	return _u
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (_u *UsageLogUpdateOne) ClearAccountSwitchMs() *UsageLogUpdateOne {
+	_u.mutation.ClearAccountSwitchMs()
+	return _u
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (_u *UsageLogUpdateOne) SetGatewayRequestID(v string) *UsageLogUpdateOne {
+	_u.mutation.SetGatewayRequestID(v)
+	return _u
+}
+
+// SetNillableGatewayRequestID sets the "gateway_request_id" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableGatewayRequestID(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetGatewayRequestID(*v)
+	}
+	return _u
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (_u *UsageLogUpdateOne) ClearGatewayRequestID() *UsageLogUpdateOne {
+	_u.mutation.ClearGatewayRequestID()
+	return _u
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (_u *UsageLogUpdateOne) SetClientRequestID(v string) *UsageLogUpdateOne {
+	_u.mutation.SetClientRequestID(v)
+	return _u
+}
+
+// SetNillableClientRequestID sets the "client_request_id" field if the given value is not nil.
+func (_u *UsageLogUpdateOne) SetNillableClientRequestID(v *string) *UsageLogUpdateOne {
+	if v != nil {
+		_u.SetClientRequestID(*v)
+	}
+	return _u
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (_u *UsageLogUpdateOne) ClearClientRequestID() *UsageLogUpdateOne {
+	_u.mutation.ClearClientRequestID()
+	return _u
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (_u *UsageLogUpdateOne) SetAttemptLedger(v jsontext.Value) *UsageLogUpdateOne {
+	_u.mutation.SetAttemptLedger(v)
+	return _u
+}
+
+// AppendAttemptLedger appends value to the "attempt_ledger" field.
+func (_u *UsageLogUpdateOne) AppendAttemptLedger(v jsontext.Value) *UsageLogUpdateOne {
+	_u.mutation.AppendAttemptLedger(v)
+	return _u
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (_u *UsageLogUpdateOne) ClearAttemptLedger() *UsageLogUpdateOne {
+	_u.mutation.ClearAttemptLedger()
+	return _u
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_u *UsageLogUpdateOne) SetUserAgent(v string) *UsageLogUpdateOne {
 	_u.mutation.SetUserAgent(v)
@@ -2603,6 +3292,21 @@ func (_u *UsageLogUpdateOne) check() error {
 			return &ValidationError{Name: "billing_mode", err: fmt.Errorf(`ent: validator failed for field "UsageLog.billing_mode": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.TerminalKind(); ok {
+		if err := usagelog.TerminalKindValidator(v); err != nil {
+			return &ValidationError{Name: "terminal_kind", err: fmt.Errorf(`ent: validator failed for field "UsageLog.terminal_kind": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.GatewayRequestID(); ok {
+		if err := usagelog.GatewayRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "gateway_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.gateway_request_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ClientRequestID(); ok {
+		if err := usagelog.ClientRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.client_request_id": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.UserAgent(); ok {
 		if err := usagelog.UserAgentValidator(v); err != nil {
 			return &ValidationError{Name: "user_agent", err: fmt.Errorf(`ent: validator failed for field "UsageLog.user_agent": %w`, err)}
@@ -2852,6 +3556,104 @@ func (_u *UsageLogUpdateOne) sqlSave(ctx context.Context) (_node *UsageLog, err 
 	}
 	if _u.mutation.FirstTokenMsCleared() {
 		_spec.ClearField(usagelog.FieldFirstTokenMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.HandlerDurationMs(); ok {
+		_spec.SetField(usagelog.FieldHandlerDurationMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedHandlerDurationMs(); ok {
+		_spec.AddField(usagelog.FieldHandlerDurationMs, field.TypeInt, value)
+	}
+	if _u.mutation.HandlerDurationMsCleared() {
+		_spec.ClearField(usagelog.FieldHandlerDurationMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.FirstVisibleOutputMs(); ok {
+		_spec.SetField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFirstVisibleOutputMs(); ok {
+		_spec.AddField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt, value)
+	}
+	if _u.mutation.FirstVisibleOutputMsCleared() {
+		_spec.ClearField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.SemanticOutputSeen(); ok {
+		_spec.SetField(usagelog.FieldSemanticOutputSeen, field.TypeBool, value)
+	}
+	if _u.mutation.SemanticOutputSeenCleared() {
+		_spec.ClearField(usagelog.FieldSemanticOutputSeen, field.TypeBool)
+	}
+	if value, ok := _u.mutation.TerminalKind(); ok {
+		_spec.SetField(usagelog.FieldTerminalKind, field.TypeString, value)
+	}
+	if _u.mutation.TerminalKindCleared() {
+		_spec.ClearField(usagelog.FieldTerminalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttemptCount(); ok {
+		_spec.SetField(usagelog.FieldAttemptCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttemptCount(); ok {
+		_spec.AddField(usagelog.FieldAttemptCount, field.TypeInt, value)
+	}
+	if _u.mutation.AttemptCountCleared() {
+		_spec.ClearField(usagelog.FieldAttemptCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AccountSwitchCount(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAccountSwitchCount(); ok {
+		_spec.AddField(usagelog.FieldAccountSwitchCount, field.TypeInt, value)
+	}
+	if _u.mutation.AccountSwitchCountCleared() {
+		_spec.ClearField(usagelog.FieldAccountSwitchCount, field.TypeInt)
+	}
+	if value, ok := _u.mutation.FailedAttemptDurationMs(); ok {
+		_spec.SetField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFailedAttemptDurationMs(); ok {
+		_spec.AddField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt, value)
+	}
+	if _u.mutation.FailedAttemptDurationMsCleared() {
+		_spec.ClearField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.RetryWaitMs(); ok {
+		_spec.SetField(usagelog.FieldRetryWaitMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRetryWaitMs(); ok {
+		_spec.AddField(usagelog.FieldRetryWaitMs, field.TypeInt, value)
+	}
+	if _u.mutation.RetryWaitMsCleared() {
+		_spec.ClearField(usagelog.FieldRetryWaitMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AccountSwitchMs(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchMs, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAccountSwitchMs(); ok {
+		_spec.AddField(usagelog.FieldAccountSwitchMs, field.TypeInt, value)
+	}
+	if _u.mutation.AccountSwitchMsCleared() {
+		_spec.ClearField(usagelog.FieldAccountSwitchMs, field.TypeInt)
+	}
+	if value, ok := _u.mutation.GatewayRequestID(); ok {
+		_spec.SetField(usagelog.FieldGatewayRequestID, field.TypeString, value)
+	}
+	if _u.mutation.GatewayRequestIDCleared() {
+		_spec.ClearField(usagelog.FieldGatewayRequestID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ClientRequestID(); ok {
+		_spec.SetField(usagelog.FieldClientRequestID, field.TypeString, value)
+	}
+	if _u.mutation.ClientRequestIDCleared() {
+		_spec.ClearField(usagelog.FieldClientRequestID, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttemptLedger(); ok {
+		_spec.SetField(usagelog.FieldAttemptLedger, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAttemptLedger(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, usagelog.FieldAttemptLedger, value)
+		})
+	}
+	if _u.mutation.AttemptLedgerCleared() {
+		_spec.ClearField(usagelog.FieldAttemptLedger, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)

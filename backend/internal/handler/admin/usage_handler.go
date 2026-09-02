@@ -57,6 +57,39 @@ type CreateUsageCleanupTaskRequest struct {
 	Timezone    string  `json:"timezone"`
 }
 
+// GetObservability returns the bounded attempt ledger only on explicit admin
+// drilldown; usage list responses carry scalar summaries only.
+func (h *UsageHandler) GetObservability(c *gin.Context) {
+	id, err := strconv.ParseInt(strings.TrimSpace(c.Param("id")), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid usage ID")
+		return
+	}
+	record, err := h.usageService.GetByID(c.Request.Context(), id)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"id":                         record.ID,
+		"duration_ms":                record.DurationMs,
+		"forward_duration_ms":        record.DurationMs,
+		"handler_duration_ms":        record.HandlerDurationMs,
+		"first_token_ms":             record.FirstTokenMs,
+		"first_visible_output_ms":    record.FirstVisibleOutputMs,
+		"semantic_output_seen":       record.SemanticOutputSeen,
+		"terminal_kind":              record.TerminalKind,
+		"attempt_count":              record.AttemptCount,
+		"account_switch_count":       record.AccountSwitchCount,
+		"failed_attempt_duration_ms": record.FailedAttemptDurationMs,
+		"retry_wait_ms":              record.RetryWaitMs,
+		"account_switch_ms":          record.AccountSwitchMs,
+		"gateway_request_id":         record.GatewayRequestID,
+		"client_request_id":          record.ClientRequestID,
+		"attempt_ledger":             record.AttemptLedger,
+	})
+}
+
 // List handles listing all usage records with filters
 // GET /api/v1/admin/usage
 func (h *UsageHandler) List(c *gin.Context) {
@@ -111,6 +144,11 @@ func (h *UsageHandler) List(c *gin.Context) {
 
 	model := c.Query("model")
 	requestID := strings.TrimSpace(c.Query("request_id"))
+	correlationID := strings.TrimSpace(c.Query("correlation_id"))
+	if len(correlationID) > 128 {
+		response.BadRequest(c, "Invalid correlation_id")
+		return
+	}
 	billingMode := strings.TrimSpace(c.Query("billing_mode"))
 
 	var requestType *int16
@@ -188,6 +226,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 		AccountID:             accountID,
 		GroupID:               groupID,
 		RequestID:             requestID,
+		CorrelationID:         correlationID,
 		Model:                 model,
 		ModelFilterSource:     usagestats.ModelSourceRequested,
 		RequestType:           requestType,

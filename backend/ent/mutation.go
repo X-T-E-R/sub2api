@@ -44228,86 +44228,106 @@ func (m *UsageCleanupTaskMutation) ResetEdge(name string) error {
 // UsageLogMutation represents an operation that mutates the UsageLog nodes in the graph.
 type UsageLogMutation struct {
 	config
-	op                           Op
-	typ                          string
-	id                           *int64
-	request_id                   *string
-	model                        *string
-	requested_model              *string
-	upstream_model               *string
-	upstream_response_model      *string
-	upstream_model_mismatch      *bool
-	channel_id                   *int64
-	addchannel_id                *int64
-	model_mapping_chain          *string
-	billing_tier                 *string
-	billing_mode                 *string
-	input_tokens                 *int
-	addinput_tokens              *int
-	output_tokens                *int
-	addoutput_tokens             *int
-	cache_creation_tokens        *int
-	addcache_creation_tokens     *int
-	cache_read_tokens            *int
-	addcache_read_tokens         *int
-	cache_creation_5m_tokens     *int
-	addcache_creation_5m_tokens  *int
-	cache_creation_1h_tokens     *int
-	addcache_creation_1h_tokens  *int
-	input_cost                   *float64
-	addinput_cost                *float64
-	output_cost                  *float64
-	addoutput_cost               *float64
-	cache_creation_cost          *float64
-	addcache_creation_cost       *float64
-	cache_read_cost              *float64
-	addcache_read_cost           *float64
-	total_cost                   *float64
-	addtotal_cost                *float64
-	actual_cost                  *float64
-	addactual_cost               *float64
-	rate_multiplier              *float64
-	addrate_multiplier           *float64
-	long_context_billing_applied *bool
-	account_rate_multiplier      *float64
-	addaccount_rate_multiplier   *float64
-	billing_type                 *int8
-	addbilling_type              *int8
-	stream                       *bool
-	duration_ms                  *int
-	addduration_ms               *int
-	first_token_ms               *int
-	addfirst_token_ms            *int
-	user_agent                   *string
-	ip_address                   *string
-	image_count                  *int
-	addimage_count               *int
-	image_size                   *string
-	image_input_size             *string
-	image_output_size            *string
-	image_size_source            *string
-	image_size_breakdown         *map[string]int
-	video_count                  *int
-	addvideo_count               *int
-	video_resolution             *string
-	video_duration_seconds       *int
-	addvideo_duration_seconds    *int
-	cache_ttl_overridden         *bool
-	created_at                   *time.Time
-	clearedFields                map[string]struct{}
-	user                         *int64
-	cleareduser                  bool
-	api_key                      *int64
-	clearedapi_key               bool
-	account                      *int64
-	clearedaccount               bool
-	group                        *int64
-	clearedgroup                 bool
-	subscription                 *int64
-	clearedsubscription          bool
-	done                         bool
-	oldValue                     func(context.Context) (*UsageLog, error)
-	predicates                   []predicate.UsageLog
+	op                            Op
+	typ                           string
+	id                            *int64
+	request_id                    *string
+	model                         *string
+	requested_model               *string
+	upstream_model                *string
+	upstream_response_model       *string
+	upstream_model_mismatch       *bool
+	channel_id                    *int64
+	addchannel_id                 *int64
+	model_mapping_chain           *string
+	billing_tier                  *string
+	billing_mode                  *string
+	input_tokens                  *int
+	addinput_tokens               *int
+	output_tokens                 *int
+	addoutput_tokens              *int
+	cache_creation_tokens         *int
+	addcache_creation_tokens      *int
+	cache_read_tokens             *int
+	addcache_read_tokens          *int
+	cache_creation_5m_tokens      *int
+	addcache_creation_5m_tokens   *int
+	cache_creation_1h_tokens      *int
+	addcache_creation_1h_tokens   *int
+	input_cost                    *float64
+	addinput_cost                 *float64
+	output_cost                   *float64
+	addoutput_cost                *float64
+	cache_creation_cost           *float64
+	addcache_creation_cost        *float64
+	cache_read_cost               *float64
+	addcache_read_cost            *float64
+	total_cost                    *float64
+	addtotal_cost                 *float64
+	actual_cost                   *float64
+	addactual_cost                *float64
+	rate_multiplier               *float64
+	addrate_multiplier            *float64
+	long_context_billing_applied  *bool
+	account_rate_multiplier       *float64
+	addaccount_rate_multiplier    *float64
+	billing_type                  *int8
+	addbilling_type               *int8
+	stream                        *bool
+	duration_ms                   *int
+	addduration_ms                *int
+	first_token_ms                *int
+	addfirst_token_ms             *int
+	handler_duration_ms           *int
+	addhandler_duration_ms        *int
+	first_visible_output_ms       *int
+	addfirst_visible_output_ms    *int
+	semantic_output_seen          *bool
+	terminal_kind                 *string
+	attempt_count                 *int
+	addattempt_count              *int
+	account_switch_count          *int
+	addaccount_switch_count       *int
+	failed_attempt_duration_ms    *int
+	addfailed_attempt_duration_ms *int
+	retry_wait_ms                 *int
+	addretry_wait_ms              *int
+	account_switch_ms             *int
+	addaccount_switch_ms          *int
+	gateway_request_id            *string
+	client_request_id             *string
+	attempt_ledger                *jsontext.Value
+	appendattempt_ledger          jsontext.Value
+	user_agent                    *string
+	ip_address                    *string
+	image_count                   *int
+	addimage_count                *int
+	image_size                    *string
+	image_input_size              *string
+	image_output_size             *string
+	image_size_source             *string
+	image_size_breakdown          *map[string]int
+	video_count                   *int
+	addvideo_count                *int
+	video_resolution              *string
+	video_duration_seconds        *int
+	addvideo_duration_seconds     *int
+	cache_ttl_overridden          *bool
+	created_at                    *time.Time
+	clearedFields                 map[string]struct{}
+	user                          *int64
+	cleareduser                   bool
+	api_key                       *int64
+	clearedapi_key                bool
+	account                       *int64
+	clearedaccount                bool
+	group                         *int64
+	clearedgroup                  bool
+	subscription                  *int64
+	clearedsubscription           bool
+	done                          bool
+	oldValue                      func(context.Context) (*UsageLog, error)
+	predicates                    []predicate.UsageLog
 }
 
 var _ ent.Mutation = (*UsageLogMutation)(nil)
@@ -46165,6 +46185,757 @@ func (m *UsageLogMutation) ResetFirstTokenMs() {
 	delete(m.clearedFields, usagelog.FieldFirstTokenMs)
 }
 
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (m *UsageLogMutation) SetHandlerDurationMs(i int) {
+	m.handler_duration_ms = &i
+	m.addhandler_duration_ms = nil
+}
+
+// HandlerDurationMs returns the value of the "handler_duration_ms" field in the mutation.
+func (m *UsageLogMutation) HandlerDurationMs() (r int, exists bool) {
+	v := m.handler_duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHandlerDurationMs returns the old "handler_duration_ms" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldHandlerDurationMs(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHandlerDurationMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHandlerDurationMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHandlerDurationMs: %w", err)
+	}
+	return oldValue.HandlerDurationMs, nil
+}
+
+// AddHandlerDurationMs adds i to the "handler_duration_ms" field.
+func (m *UsageLogMutation) AddHandlerDurationMs(i int) {
+	if m.addhandler_duration_ms != nil {
+		*m.addhandler_duration_ms += i
+	} else {
+		m.addhandler_duration_ms = &i
+	}
+}
+
+// AddedHandlerDurationMs returns the value that was added to the "handler_duration_ms" field in this mutation.
+func (m *UsageLogMutation) AddedHandlerDurationMs() (r int, exists bool) {
+	v := m.addhandler_duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (m *UsageLogMutation) ClearHandlerDurationMs() {
+	m.handler_duration_ms = nil
+	m.addhandler_duration_ms = nil
+	m.clearedFields[usagelog.FieldHandlerDurationMs] = struct{}{}
+}
+
+// HandlerDurationMsCleared returns if the "handler_duration_ms" field was cleared in this mutation.
+func (m *UsageLogMutation) HandlerDurationMsCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldHandlerDurationMs]
+	return ok
+}
+
+// ResetHandlerDurationMs resets all changes to the "handler_duration_ms" field.
+func (m *UsageLogMutation) ResetHandlerDurationMs() {
+	m.handler_duration_ms = nil
+	m.addhandler_duration_ms = nil
+	delete(m.clearedFields, usagelog.FieldHandlerDurationMs)
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (m *UsageLogMutation) SetFirstVisibleOutputMs(i int) {
+	m.first_visible_output_ms = &i
+	m.addfirst_visible_output_ms = nil
+}
+
+// FirstVisibleOutputMs returns the value of the "first_visible_output_ms" field in the mutation.
+func (m *UsageLogMutation) FirstVisibleOutputMs() (r int, exists bool) {
+	v := m.first_visible_output_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFirstVisibleOutputMs returns the old "first_visible_output_ms" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldFirstVisibleOutputMs(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFirstVisibleOutputMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFirstVisibleOutputMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFirstVisibleOutputMs: %w", err)
+	}
+	return oldValue.FirstVisibleOutputMs, nil
+}
+
+// AddFirstVisibleOutputMs adds i to the "first_visible_output_ms" field.
+func (m *UsageLogMutation) AddFirstVisibleOutputMs(i int) {
+	if m.addfirst_visible_output_ms != nil {
+		*m.addfirst_visible_output_ms += i
+	} else {
+		m.addfirst_visible_output_ms = &i
+	}
+}
+
+// AddedFirstVisibleOutputMs returns the value that was added to the "first_visible_output_ms" field in this mutation.
+func (m *UsageLogMutation) AddedFirstVisibleOutputMs() (r int, exists bool) {
+	v := m.addfirst_visible_output_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (m *UsageLogMutation) ClearFirstVisibleOutputMs() {
+	m.first_visible_output_ms = nil
+	m.addfirst_visible_output_ms = nil
+	m.clearedFields[usagelog.FieldFirstVisibleOutputMs] = struct{}{}
+}
+
+// FirstVisibleOutputMsCleared returns if the "first_visible_output_ms" field was cleared in this mutation.
+func (m *UsageLogMutation) FirstVisibleOutputMsCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldFirstVisibleOutputMs]
+	return ok
+}
+
+// ResetFirstVisibleOutputMs resets all changes to the "first_visible_output_ms" field.
+func (m *UsageLogMutation) ResetFirstVisibleOutputMs() {
+	m.first_visible_output_ms = nil
+	m.addfirst_visible_output_ms = nil
+	delete(m.clearedFields, usagelog.FieldFirstVisibleOutputMs)
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (m *UsageLogMutation) SetSemanticOutputSeen(b bool) {
+	m.semantic_output_seen = &b
+}
+
+// SemanticOutputSeen returns the value of the "semantic_output_seen" field in the mutation.
+func (m *UsageLogMutation) SemanticOutputSeen() (r bool, exists bool) {
+	v := m.semantic_output_seen
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSemanticOutputSeen returns the old "semantic_output_seen" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldSemanticOutputSeen(ctx context.Context) (v *bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSemanticOutputSeen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSemanticOutputSeen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSemanticOutputSeen: %w", err)
+	}
+	return oldValue.SemanticOutputSeen, nil
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (m *UsageLogMutation) ClearSemanticOutputSeen() {
+	m.semantic_output_seen = nil
+	m.clearedFields[usagelog.FieldSemanticOutputSeen] = struct{}{}
+}
+
+// SemanticOutputSeenCleared returns if the "semantic_output_seen" field was cleared in this mutation.
+func (m *UsageLogMutation) SemanticOutputSeenCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldSemanticOutputSeen]
+	return ok
+}
+
+// ResetSemanticOutputSeen resets all changes to the "semantic_output_seen" field.
+func (m *UsageLogMutation) ResetSemanticOutputSeen() {
+	m.semantic_output_seen = nil
+	delete(m.clearedFields, usagelog.FieldSemanticOutputSeen)
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (m *UsageLogMutation) SetTerminalKind(s string) {
+	m.terminal_kind = &s
+}
+
+// TerminalKind returns the value of the "terminal_kind" field in the mutation.
+func (m *UsageLogMutation) TerminalKind() (r string, exists bool) {
+	v := m.terminal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTerminalKind returns the old "terminal_kind" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldTerminalKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTerminalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTerminalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTerminalKind: %w", err)
+	}
+	return oldValue.TerminalKind, nil
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (m *UsageLogMutation) ClearTerminalKind() {
+	m.terminal_kind = nil
+	m.clearedFields[usagelog.FieldTerminalKind] = struct{}{}
+}
+
+// TerminalKindCleared returns if the "terminal_kind" field was cleared in this mutation.
+func (m *UsageLogMutation) TerminalKindCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldTerminalKind]
+	return ok
+}
+
+// ResetTerminalKind resets all changes to the "terminal_kind" field.
+func (m *UsageLogMutation) ResetTerminalKind() {
+	m.terminal_kind = nil
+	delete(m.clearedFields, usagelog.FieldTerminalKind)
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (m *UsageLogMutation) SetAttemptCount(i int) {
+	m.attempt_count = &i
+	m.addattempt_count = nil
+}
+
+// AttemptCount returns the value of the "attempt_count" field in the mutation.
+func (m *UsageLogMutation) AttemptCount() (r int, exists bool) {
+	v := m.attempt_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttemptCount returns the old "attempt_count" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldAttemptCount(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttemptCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttemptCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttemptCount: %w", err)
+	}
+	return oldValue.AttemptCount, nil
+}
+
+// AddAttemptCount adds i to the "attempt_count" field.
+func (m *UsageLogMutation) AddAttemptCount(i int) {
+	if m.addattempt_count != nil {
+		*m.addattempt_count += i
+	} else {
+		m.addattempt_count = &i
+	}
+}
+
+// AddedAttemptCount returns the value that was added to the "attempt_count" field in this mutation.
+func (m *UsageLogMutation) AddedAttemptCount() (r int, exists bool) {
+	v := m.addattempt_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (m *UsageLogMutation) ClearAttemptCount() {
+	m.attempt_count = nil
+	m.addattempt_count = nil
+	m.clearedFields[usagelog.FieldAttemptCount] = struct{}{}
+}
+
+// AttemptCountCleared returns if the "attempt_count" field was cleared in this mutation.
+func (m *UsageLogMutation) AttemptCountCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldAttemptCount]
+	return ok
+}
+
+// ResetAttemptCount resets all changes to the "attempt_count" field.
+func (m *UsageLogMutation) ResetAttemptCount() {
+	m.attempt_count = nil
+	m.addattempt_count = nil
+	delete(m.clearedFields, usagelog.FieldAttemptCount)
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (m *UsageLogMutation) SetAccountSwitchCount(i int) {
+	m.account_switch_count = &i
+	m.addaccount_switch_count = nil
+}
+
+// AccountSwitchCount returns the value of the "account_switch_count" field in the mutation.
+func (m *UsageLogMutation) AccountSwitchCount() (r int, exists bool) {
+	v := m.account_switch_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAccountSwitchCount returns the old "account_switch_count" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldAccountSwitchCount(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAccountSwitchCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAccountSwitchCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAccountSwitchCount: %w", err)
+	}
+	return oldValue.AccountSwitchCount, nil
+}
+
+// AddAccountSwitchCount adds i to the "account_switch_count" field.
+func (m *UsageLogMutation) AddAccountSwitchCount(i int) {
+	if m.addaccount_switch_count != nil {
+		*m.addaccount_switch_count += i
+	} else {
+		m.addaccount_switch_count = &i
+	}
+}
+
+// AddedAccountSwitchCount returns the value that was added to the "account_switch_count" field in this mutation.
+func (m *UsageLogMutation) AddedAccountSwitchCount() (r int, exists bool) {
+	v := m.addaccount_switch_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (m *UsageLogMutation) ClearAccountSwitchCount() {
+	m.account_switch_count = nil
+	m.addaccount_switch_count = nil
+	m.clearedFields[usagelog.FieldAccountSwitchCount] = struct{}{}
+}
+
+// AccountSwitchCountCleared returns if the "account_switch_count" field was cleared in this mutation.
+func (m *UsageLogMutation) AccountSwitchCountCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldAccountSwitchCount]
+	return ok
+}
+
+// ResetAccountSwitchCount resets all changes to the "account_switch_count" field.
+func (m *UsageLogMutation) ResetAccountSwitchCount() {
+	m.account_switch_count = nil
+	m.addaccount_switch_count = nil
+	delete(m.clearedFields, usagelog.FieldAccountSwitchCount)
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (m *UsageLogMutation) SetFailedAttemptDurationMs(i int) {
+	m.failed_attempt_duration_ms = &i
+	m.addfailed_attempt_duration_ms = nil
+}
+
+// FailedAttemptDurationMs returns the value of the "failed_attempt_duration_ms" field in the mutation.
+func (m *UsageLogMutation) FailedAttemptDurationMs() (r int, exists bool) {
+	v := m.failed_attempt_duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFailedAttemptDurationMs returns the old "failed_attempt_duration_ms" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldFailedAttemptDurationMs(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFailedAttemptDurationMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFailedAttemptDurationMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFailedAttemptDurationMs: %w", err)
+	}
+	return oldValue.FailedAttemptDurationMs, nil
+}
+
+// AddFailedAttemptDurationMs adds i to the "failed_attempt_duration_ms" field.
+func (m *UsageLogMutation) AddFailedAttemptDurationMs(i int) {
+	if m.addfailed_attempt_duration_ms != nil {
+		*m.addfailed_attempt_duration_ms += i
+	} else {
+		m.addfailed_attempt_duration_ms = &i
+	}
+}
+
+// AddedFailedAttemptDurationMs returns the value that was added to the "failed_attempt_duration_ms" field in this mutation.
+func (m *UsageLogMutation) AddedFailedAttemptDurationMs() (r int, exists bool) {
+	v := m.addfailed_attempt_duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (m *UsageLogMutation) ClearFailedAttemptDurationMs() {
+	m.failed_attempt_duration_ms = nil
+	m.addfailed_attempt_duration_ms = nil
+	m.clearedFields[usagelog.FieldFailedAttemptDurationMs] = struct{}{}
+}
+
+// FailedAttemptDurationMsCleared returns if the "failed_attempt_duration_ms" field was cleared in this mutation.
+func (m *UsageLogMutation) FailedAttemptDurationMsCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldFailedAttemptDurationMs]
+	return ok
+}
+
+// ResetFailedAttemptDurationMs resets all changes to the "failed_attempt_duration_ms" field.
+func (m *UsageLogMutation) ResetFailedAttemptDurationMs() {
+	m.failed_attempt_duration_ms = nil
+	m.addfailed_attempt_duration_ms = nil
+	delete(m.clearedFields, usagelog.FieldFailedAttemptDurationMs)
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (m *UsageLogMutation) SetRetryWaitMs(i int) {
+	m.retry_wait_ms = &i
+	m.addretry_wait_ms = nil
+}
+
+// RetryWaitMs returns the value of the "retry_wait_ms" field in the mutation.
+func (m *UsageLogMutation) RetryWaitMs() (r int, exists bool) {
+	v := m.retry_wait_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRetryWaitMs returns the old "retry_wait_ms" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldRetryWaitMs(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRetryWaitMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRetryWaitMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRetryWaitMs: %w", err)
+	}
+	return oldValue.RetryWaitMs, nil
+}
+
+// AddRetryWaitMs adds i to the "retry_wait_ms" field.
+func (m *UsageLogMutation) AddRetryWaitMs(i int) {
+	if m.addretry_wait_ms != nil {
+		*m.addretry_wait_ms += i
+	} else {
+		m.addretry_wait_ms = &i
+	}
+}
+
+// AddedRetryWaitMs returns the value that was added to the "retry_wait_ms" field in this mutation.
+func (m *UsageLogMutation) AddedRetryWaitMs() (r int, exists bool) {
+	v := m.addretry_wait_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (m *UsageLogMutation) ClearRetryWaitMs() {
+	m.retry_wait_ms = nil
+	m.addretry_wait_ms = nil
+	m.clearedFields[usagelog.FieldRetryWaitMs] = struct{}{}
+}
+
+// RetryWaitMsCleared returns if the "retry_wait_ms" field was cleared in this mutation.
+func (m *UsageLogMutation) RetryWaitMsCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldRetryWaitMs]
+	return ok
+}
+
+// ResetRetryWaitMs resets all changes to the "retry_wait_ms" field.
+func (m *UsageLogMutation) ResetRetryWaitMs() {
+	m.retry_wait_ms = nil
+	m.addretry_wait_ms = nil
+	delete(m.clearedFields, usagelog.FieldRetryWaitMs)
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (m *UsageLogMutation) SetAccountSwitchMs(i int) {
+	m.account_switch_ms = &i
+	m.addaccount_switch_ms = nil
+}
+
+// AccountSwitchMs returns the value of the "account_switch_ms" field in the mutation.
+func (m *UsageLogMutation) AccountSwitchMs() (r int, exists bool) {
+	v := m.account_switch_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAccountSwitchMs returns the old "account_switch_ms" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldAccountSwitchMs(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAccountSwitchMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAccountSwitchMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAccountSwitchMs: %w", err)
+	}
+	return oldValue.AccountSwitchMs, nil
+}
+
+// AddAccountSwitchMs adds i to the "account_switch_ms" field.
+func (m *UsageLogMutation) AddAccountSwitchMs(i int) {
+	if m.addaccount_switch_ms != nil {
+		*m.addaccount_switch_ms += i
+	} else {
+		m.addaccount_switch_ms = &i
+	}
+}
+
+// AddedAccountSwitchMs returns the value that was added to the "account_switch_ms" field in this mutation.
+func (m *UsageLogMutation) AddedAccountSwitchMs() (r int, exists bool) {
+	v := m.addaccount_switch_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (m *UsageLogMutation) ClearAccountSwitchMs() {
+	m.account_switch_ms = nil
+	m.addaccount_switch_ms = nil
+	m.clearedFields[usagelog.FieldAccountSwitchMs] = struct{}{}
+}
+
+// AccountSwitchMsCleared returns if the "account_switch_ms" field was cleared in this mutation.
+func (m *UsageLogMutation) AccountSwitchMsCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldAccountSwitchMs]
+	return ok
+}
+
+// ResetAccountSwitchMs resets all changes to the "account_switch_ms" field.
+func (m *UsageLogMutation) ResetAccountSwitchMs() {
+	m.account_switch_ms = nil
+	m.addaccount_switch_ms = nil
+	delete(m.clearedFields, usagelog.FieldAccountSwitchMs)
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (m *UsageLogMutation) SetGatewayRequestID(s string) {
+	m.gateway_request_id = &s
+}
+
+// GatewayRequestID returns the value of the "gateway_request_id" field in the mutation.
+func (m *UsageLogMutation) GatewayRequestID() (r string, exists bool) {
+	v := m.gateway_request_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGatewayRequestID returns the old "gateway_request_id" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldGatewayRequestID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGatewayRequestID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGatewayRequestID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGatewayRequestID: %w", err)
+	}
+	return oldValue.GatewayRequestID, nil
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (m *UsageLogMutation) ClearGatewayRequestID() {
+	m.gateway_request_id = nil
+	m.clearedFields[usagelog.FieldGatewayRequestID] = struct{}{}
+}
+
+// GatewayRequestIDCleared returns if the "gateway_request_id" field was cleared in this mutation.
+func (m *UsageLogMutation) GatewayRequestIDCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldGatewayRequestID]
+	return ok
+}
+
+// ResetGatewayRequestID resets all changes to the "gateway_request_id" field.
+func (m *UsageLogMutation) ResetGatewayRequestID() {
+	m.gateway_request_id = nil
+	delete(m.clearedFields, usagelog.FieldGatewayRequestID)
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (m *UsageLogMutation) SetClientRequestID(s string) {
+	m.client_request_id = &s
+}
+
+// ClientRequestID returns the value of the "client_request_id" field in the mutation.
+func (m *UsageLogMutation) ClientRequestID() (r string, exists bool) {
+	v := m.client_request_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClientRequestID returns the old "client_request_id" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldClientRequestID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClientRequestID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClientRequestID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClientRequestID: %w", err)
+	}
+	return oldValue.ClientRequestID, nil
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (m *UsageLogMutation) ClearClientRequestID() {
+	m.client_request_id = nil
+	m.clearedFields[usagelog.FieldClientRequestID] = struct{}{}
+}
+
+// ClientRequestIDCleared returns if the "client_request_id" field was cleared in this mutation.
+func (m *UsageLogMutation) ClientRequestIDCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldClientRequestID]
+	return ok
+}
+
+// ResetClientRequestID resets all changes to the "client_request_id" field.
+func (m *UsageLogMutation) ResetClientRequestID() {
+	m.client_request_id = nil
+	delete(m.clearedFields, usagelog.FieldClientRequestID)
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (m *UsageLogMutation) SetAttemptLedger(j jsontext.Value) {
+	m.attempt_ledger = &j
+	m.appendattempt_ledger = nil
+}
+
+// AttemptLedger returns the value of the "attempt_ledger" field in the mutation.
+func (m *UsageLogMutation) AttemptLedger() (r jsontext.Value, exists bool) {
+	v := m.attempt_ledger
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttemptLedger returns the old "attempt_ledger" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldAttemptLedger(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttemptLedger is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttemptLedger requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttemptLedger: %w", err)
+	}
+	return oldValue.AttemptLedger, nil
+}
+
+// AppendAttemptLedger adds j to the "attempt_ledger" field.
+func (m *UsageLogMutation) AppendAttemptLedger(j jsontext.Value) {
+	m.appendattempt_ledger = append(m.appendattempt_ledger, j...)
+}
+
+// AppendedAttemptLedger returns the list of values that were appended to the "attempt_ledger" field in this mutation.
+func (m *UsageLogMutation) AppendedAttemptLedger() (jsontext.Value, bool) {
+	if len(m.appendattempt_ledger) == 0 {
+		return nil, false
+	}
+	return m.appendattempt_ledger, true
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (m *UsageLogMutation) ClearAttemptLedger() {
+	m.attempt_ledger = nil
+	m.appendattempt_ledger = nil
+	m.clearedFields[usagelog.FieldAttemptLedger] = struct{}{}
+}
+
+// AttemptLedgerCleared returns if the "attempt_ledger" field was cleared in this mutation.
+func (m *UsageLogMutation) AttemptLedgerCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldAttemptLedger]
+	return ok
+}
+
+// ResetAttemptLedger resets all changes to the "attempt_ledger" field.
+func (m *UsageLogMutation) ResetAttemptLedger() {
+	m.attempt_ledger = nil
+	m.appendattempt_ledger = nil
+	delete(m.clearedFields, usagelog.FieldAttemptLedger)
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (m *UsageLogMutation) SetUserAgent(s string) {
 	m.user_agent = &s
@@ -46980,7 +47751,7 @@ func (m *UsageLogMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageLogMutation) Fields() []string {
-	fields := make([]string, 0, 47)
+	fields := make([]string, 0, 59)
 	if m.user != nil {
 		fields = append(fields, usagelog.FieldUserID)
 	}
@@ -47082,6 +47853,42 @@ func (m *UsageLogMutation) Fields() []string {
 	}
 	if m.first_token_ms != nil {
 		fields = append(fields, usagelog.FieldFirstTokenMs)
+	}
+	if m.handler_duration_ms != nil {
+		fields = append(fields, usagelog.FieldHandlerDurationMs)
+	}
+	if m.first_visible_output_ms != nil {
+		fields = append(fields, usagelog.FieldFirstVisibleOutputMs)
+	}
+	if m.semantic_output_seen != nil {
+		fields = append(fields, usagelog.FieldSemanticOutputSeen)
+	}
+	if m.terminal_kind != nil {
+		fields = append(fields, usagelog.FieldTerminalKind)
+	}
+	if m.attempt_count != nil {
+		fields = append(fields, usagelog.FieldAttemptCount)
+	}
+	if m.account_switch_count != nil {
+		fields = append(fields, usagelog.FieldAccountSwitchCount)
+	}
+	if m.failed_attempt_duration_ms != nil {
+		fields = append(fields, usagelog.FieldFailedAttemptDurationMs)
+	}
+	if m.retry_wait_ms != nil {
+		fields = append(fields, usagelog.FieldRetryWaitMs)
+	}
+	if m.account_switch_ms != nil {
+		fields = append(fields, usagelog.FieldAccountSwitchMs)
+	}
+	if m.gateway_request_id != nil {
+		fields = append(fields, usagelog.FieldGatewayRequestID)
+	}
+	if m.client_request_id != nil {
+		fields = append(fields, usagelog.FieldClientRequestID)
+	}
+	if m.attempt_ledger != nil {
+		fields = append(fields, usagelog.FieldAttemptLedger)
 	}
 	if m.user_agent != nil {
 		fields = append(fields, usagelog.FieldUserAgent)
@@ -47198,6 +48005,30 @@ func (m *UsageLogMutation) Field(name string) (ent.Value, bool) {
 		return m.DurationMs()
 	case usagelog.FieldFirstTokenMs:
 		return m.FirstTokenMs()
+	case usagelog.FieldHandlerDurationMs:
+		return m.HandlerDurationMs()
+	case usagelog.FieldFirstVisibleOutputMs:
+		return m.FirstVisibleOutputMs()
+	case usagelog.FieldSemanticOutputSeen:
+		return m.SemanticOutputSeen()
+	case usagelog.FieldTerminalKind:
+		return m.TerminalKind()
+	case usagelog.FieldAttemptCount:
+		return m.AttemptCount()
+	case usagelog.FieldAccountSwitchCount:
+		return m.AccountSwitchCount()
+	case usagelog.FieldFailedAttemptDurationMs:
+		return m.FailedAttemptDurationMs()
+	case usagelog.FieldRetryWaitMs:
+		return m.RetryWaitMs()
+	case usagelog.FieldAccountSwitchMs:
+		return m.AccountSwitchMs()
+	case usagelog.FieldGatewayRequestID:
+		return m.GatewayRequestID()
+	case usagelog.FieldClientRequestID:
+		return m.ClientRequestID()
+	case usagelog.FieldAttemptLedger:
+		return m.AttemptLedger()
 	case usagelog.FieldUserAgent:
 		return m.UserAgent()
 	case usagelog.FieldIPAddress:
@@ -47301,6 +48132,30 @@ func (m *UsageLogMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldDurationMs(ctx)
 	case usagelog.FieldFirstTokenMs:
 		return m.OldFirstTokenMs(ctx)
+	case usagelog.FieldHandlerDurationMs:
+		return m.OldHandlerDurationMs(ctx)
+	case usagelog.FieldFirstVisibleOutputMs:
+		return m.OldFirstVisibleOutputMs(ctx)
+	case usagelog.FieldSemanticOutputSeen:
+		return m.OldSemanticOutputSeen(ctx)
+	case usagelog.FieldTerminalKind:
+		return m.OldTerminalKind(ctx)
+	case usagelog.FieldAttemptCount:
+		return m.OldAttemptCount(ctx)
+	case usagelog.FieldAccountSwitchCount:
+		return m.OldAccountSwitchCount(ctx)
+	case usagelog.FieldFailedAttemptDurationMs:
+		return m.OldFailedAttemptDurationMs(ctx)
+	case usagelog.FieldRetryWaitMs:
+		return m.OldRetryWaitMs(ctx)
+	case usagelog.FieldAccountSwitchMs:
+		return m.OldAccountSwitchMs(ctx)
+	case usagelog.FieldGatewayRequestID:
+		return m.OldGatewayRequestID(ctx)
+	case usagelog.FieldClientRequestID:
+		return m.OldClientRequestID(ctx)
+	case usagelog.FieldAttemptLedger:
+		return m.OldAttemptLedger(ctx)
 	case usagelog.FieldUserAgent:
 		return m.OldUserAgent(ctx)
 	case usagelog.FieldIPAddress:
@@ -47574,6 +48429,90 @@ func (m *UsageLogMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetFirstTokenMs(v)
 		return nil
+	case usagelog.FieldHandlerDurationMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHandlerDurationMs(v)
+		return nil
+	case usagelog.FieldFirstVisibleOutputMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFirstVisibleOutputMs(v)
+		return nil
+	case usagelog.FieldSemanticOutputSeen:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSemanticOutputSeen(v)
+		return nil
+	case usagelog.FieldTerminalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTerminalKind(v)
+		return nil
+	case usagelog.FieldAttemptCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttemptCount(v)
+		return nil
+	case usagelog.FieldAccountSwitchCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAccountSwitchCount(v)
+		return nil
+	case usagelog.FieldFailedAttemptDurationMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFailedAttemptDurationMs(v)
+		return nil
+	case usagelog.FieldRetryWaitMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRetryWaitMs(v)
+		return nil
+	case usagelog.FieldAccountSwitchMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAccountSwitchMs(v)
+		return nil
+	case usagelog.FieldGatewayRequestID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGatewayRequestID(v)
+		return nil
+	case usagelog.FieldClientRequestID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClientRequestID(v)
+		return nil
+	case usagelog.FieldAttemptLedger:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttemptLedger(v)
+		return nil
 	case usagelog.FieldUserAgent:
 		v, ok := value.(string)
 		if !ok {
@@ -47727,6 +48666,27 @@ func (m *UsageLogMutation) AddedFields() []string {
 	if m.addfirst_token_ms != nil {
 		fields = append(fields, usagelog.FieldFirstTokenMs)
 	}
+	if m.addhandler_duration_ms != nil {
+		fields = append(fields, usagelog.FieldHandlerDurationMs)
+	}
+	if m.addfirst_visible_output_ms != nil {
+		fields = append(fields, usagelog.FieldFirstVisibleOutputMs)
+	}
+	if m.addattempt_count != nil {
+		fields = append(fields, usagelog.FieldAttemptCount)
+	}
+	if m.addaccount_switch_count != nil {
+		fields = append(fields, usagelog.FieldAccountSwitchCount)
+	}
+	if m.addfailed_attempt_duration_ms != nil {
+		fields = append(fields, usagelog.FieldFailedAttemptDurationMs)
+	}
+	if m.addretry_wait_ms != nil {
+		fields = append(fields, usagelog.FieldRetryWaitMs)
+	}
+	if m.addaccount_switch_ms != nil {
+		fields = append(fields, usagelog.FieldAccountSwitchMs)
+	}
 	if m.addimage_count != nil {
 		fields = append(fields, usagelog.FieldImageCount)
 	}
@@ -47780,6 +48740,20 @@ func (m *UsageLogMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedDurationMs()
 	case usagelog.FieldFirstTokenMs:
 		return m.AddedFirstTokenMs()
+	case usagelog.FieldHandlerDurationMs:
+		return m.AddedHandlerDurationMs()
+	case usagelog.FieldFirstVisibleOutputMs:
+		return m.AddedFirstVisibleOutputMs()
+	case usagelog.FieldAttemptCount:
+		return m.AddedAttemptCount()
+	case usagelog.FieldAccountSwitchCount:
+		return m.AddedAccountSwitchCount()
+	case usagelog.FieldFailedAttemptDurationMs:
+		return m.AddedFailedAttemptDurationMs()
+	case usagelog.FieldRetryWaitMs:
+		return m.AddedRetryWaitMs()
+	case usagelog.FieldAccountSwitchMs:
+		return m.AddedAccountSwitchMs()
 	case usagelog.FieldImageCount:
 		return m.AddedImageCount()
 	case usagelog.FieldVideoCount:
@@ -47921,6 +48895,55 @@ func (m *UsageLogMutation) AddField(name string, value ent.Value) error {
 		}
 		m.AddFirstTokenMs(v)
 		return nil
+	case usagelog.FieldHandlerDurationMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddHandlerDurationMs(v)
+		return nil
+	case usagelog.FieldFirstVisibleOutputMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFirstVisibleOutputMs(v)
+		return nil
+	case usagelog.FieldAttemptCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttemptCount(v)
+		return nil
+	case usagelog.FieldAccountSwitchCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAccountSwitchCount(v)
+		return nil
+	case usagelog.FieldFailedAttemptDurationMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFailedAttemptDurationMs(v)
+		return nil
+	case usagelog.FieldRetryWaitMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRetryWaitMs(v)
+		return nil
+	case usagelog.FieldAccountSwitchMs:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAccountSwitchMs(v)
+		return nil
 	case usagelog.FieldImageCount:
 		v, ok := value.(int)
 		if !ok {
@@ -47988,6 +49011,42 @@ func (m *UsageLogMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(usagelog.FieldFirstTokenMs) {
 		fields = append(fields, usagelog.FieldFirstTokenMs)
+	}
+	if m.FieldCleared(usagelog.FieldHandlerDurationMs) {
+		fields = append(fields, usagelog.FieldHandlerDurationMs)
+	}
+	if m.FieldCleared(usagelog.FieldFirstVisibleOutputMs) {
+		fields = append(fields, usagelog.FieldFirstVisibleOutputMs)
+	}
+	if m.FieldCleared(usagelog.FieldSemanticOutputSeen) {
+		fields = append(fields, usagelog.FieldSemanticOutputSeen)
+	}
+	if m.FieldCleared(usagelog.FieldTerminalKind) {
+		fields = append(fields, usagelog.FieldTerminalKind)
+	}
+	if m.FieldCleared(usagelog.FieldAttemptCount) {
+		fields = append(fields, usagelog.FieldAttemptCount)
+	}
+	if m.FieldCleared(usagelog.FieldAccountSwitchCount) {
+		fields = append(fields, usagelog.FieldAccountSwitchCount)
+	}
+	if m.FieldCleared(usagelog.FieldFailedAttemptDurationMs) {
+		fields = append(fields, usagelog.FieldFailedAttemptDurationMs)
+	}
+	if m.FieldCleared(usagelog.FieldRetryWaitMs) {
+		fields = append(fields, usagelog.FieldRetryWaitMs)
+	}
+	if m.FieldCleared(usagelog.FieldAccountSwitchMs) {
+		fields = append(fields, usagelog.FieldAccountSwitchMs)
+	}
+	if m.FieldCleared(usagelog.FieldGatewayRequestID) {
+		fields = append(fields, usagelog.FieldGatewayRequestID)
+	}
+	if m.FieldCleared(usagelog.FieldClientRequestID) {
+		fields = append(fields, usagelog.FieldClientRequestID)
+	}
+	if m.FieldCleared(usagelog.FieldAttemptLedger) {
+		fields = append(fields, usagelog.FieldAttemptLedger)
 	}
 	if m.FieldCleared(usagelog.FieldUserAgent) {
 		fields = append(fields, usagelog.FieldUserAgent)
@@ -48068,6 +49127,42 @@ func (m *UsageLogMutation) ClearField(name string) error {
 		return nil
 	case usagelog.FieldFirstTokenMs:
 		m.ClearFirstTokenMs()
+		return nil
+	case usagelog.FieldHandlerDurationMs:
+		m.ClearHandlerDurationMs()
+		return nil
+	case usagelog.FieldFirstVisibleOutputMs:
+		m.ClearFirstVisibleOutputMs()
+		return nil
+	case usagelog.FieldSemanticOutputSeen:
+		m.ClearSemanticOutputSeen()
+		return nil
+	case usagelog.FieldTerminalKind:
+		m.ClearTerminalKind()
+		return nil
+	case usagelog.FieldAttemptCount:
+		m.ClearAttemptCount()
+		return nil
+	case usagelog.FieldAccountSwitchCount:
+		m.ClearAccountSwitchCount()
+		return nil
+	case usagelog.FieldFailedAttemptDurationMs:
+		m.ClearFailedAttemptDurationMs()
+		return nil
+	case usagelog.FieldRetryWaitMs:
+		m.ClearRetryWaitMs()
+		return nil
+	case usagelog.FieldAccountSwitchMs:
+		m.ClearAccountSwitchMs()
+		return nil
+	case usagelog.FieldGatewayRequestID:
+		m.ClearGatewayRequestID()
+		return nil
+	case usagelog.FieldClientRequestID:
+		m.ClearClientRequestID()
+		return nil
+	case usagelog.FieldAttemptLedger:
+		m.ClearAttemptLedger()
 		return nil
 	case usagelog.FieldUserAgent:
 		m.ClearUserAgent()
@@ -48205,6 +49300,42 @@ func (m *UsageLogMutation) ResetField(name string) error {
 		return nil
 	case usagelog.FieldFirstTokenMs:
 		m.ResetFirstTokenMs()
+		return nil
+	case usagelog.FieldHandlerDurationMs:
+		m.ResetHandlerDurationMs()
+		return nil
+	case usagelog.FieldFirstVisibleOutputMs:
+		m.ResetFirstVisibleOutputMs()
+		return nil
+	case usagelog.FieldSemanticOutputSeen:
+		m.ResetSemanticOutputSeen()
+		return nil
+	case usagelog.FieldTerminalKind:
+		m.ResetTerminalKind()
+		return nil
+	case usagelog.FieldAttemptCount:
+		m.ResetAttemptCount()
+		return nil
+	case usagelog.FieldAccountSwitchCount:
+		m.ResetAccountSwitchCount()
+		return nil
+	case usagelog.FieldFailedAttemptDurationMs:
+		m.ResetFailedAttemptDurationMs()
+		return nil
+	case usagelog.FieldRetryWaitMs:
+		m.ResetRetryWaitMs()
+		return nil
+	case usagelog.FieldAccountSwitchMs:
+		m.ResetAccountSwitchMs()
+		return nil
+	case usagelog.FieldGatewayRequestID:
+		m.ResetGatewayRequestID()
+		return nil
+	case usagelog.FieldClientRequestID:
+		m.ResetClientRequestID()
+		return nil
+	case usagelog.FieldAttemptLedger:
+		m.ResetAttemptLedger()
 		return nil
 	case usagelog.FieldUserAgent:
 		m.ResetUserAgent()

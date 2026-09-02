@@ -308,6 +308,39 @@ func TestUsageLogFromService_PreservesHistoricalMissingImageSize(t *testing.T) {
 	require.NotContains(t, string(body), `"image_size":"2K"`)
 }
 
+func TestUsageLogFromService_ExposesScalarsWithoutAttemptLedger(t *testing.T) {
+	t.Parallel()
+	handlerMs, visibleMs, attempts, switches := 900, 600, 2, 1
+	semantic := true
+	terminal := "response.completed"
+	log := &service.UsageLog{
+		RequestID:              "req-observed",
+		Model:                  "gpt-5",
+		DurationMs:             intDTOTestPtr(300),
+		HandlerDurationMs:      &handlerMs,
+		FirstVisibleOutputMs:   &visibleMs,
+		SemanticOutputSeen:     &semantic,
+		TerminalKind:           &terminal,
+		AttemptCount:           &attempts,
+		AccountSwitchCount:     &switches,
+		AttemptLedgerAvailable: true,
+		AttemptLedger: &service.RequestAttemptLedger{
+			Version: 1, TotalAttempts: 2,
+			Attempts: []service.RequestAttemptEvidence{{Sequence: 1, AccountID: 99, Outcome: "failover", UpstreamRequestID: "upstream-secret-correlation"}},
+		},
+	}
+
+	userBody, err := json.Marshal(UsageLogFromService(log))
+	require.NoError(t, err)
+	require.Contains(t, string(userBody), `"forward_duration_ms":300`)
+	require.Contains(t, string(userBody), `"handler_duration_ms":900`)
+	require.Contains(t, string(userBody), `"attempt_count":2`)
+	require.NotContains(t, string(userBody), `"attempt_ledger":`)
+	require.NotContains(t, string(userBody), "upstream-secret-correlation")
+}
+
+func intDTOTestPtr(value int) *int { return &value }
+
 func f64Ptr(value float64) *float64 {
 	return &value
 }

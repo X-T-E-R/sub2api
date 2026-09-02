@@ -653,8 +653,13 @@ const exportToCSV = async () => {
       'Rate Multiplier',
       'Billed Cost',
       'Original Cost',
-      'First Token (ms)',
-      'Duration (ms)',
+      'Handler E2E (ms)',
+      'Final Forward (ms)',
+      'First Visible Output (ms)',
+      'Legacy TTFT (ms)',
+      'Attempts',
+      'Account Switches',
+      'Terminal Kind',
     ]
     const rows = allLogs.map((log) => [
       log.created_at,
@@ -672,8 +677,13 @@ const exportToCSV = async () => {
       log.rate_multiplier,
       log.actual_cost.toFixed(8),
       log.total_cost.toFixed(8),
+      log.handler_duration_ms ?? '',
+      log.forward_duration_ms ?? log.duration_ms ?? '',
+      log.first_visible_output_ms ?? '',
       log.first_token_ms ?? '',
-      log.duration_ms ?? '',
+      log.attempt_count ?? '',
+      log.account_switch_count ?? '',
+      log.terminal_kind ?? '',
     ].map(escapeCSVValue))
     const csvContent = [
       headers.map(escapeCSVValue).join(','),

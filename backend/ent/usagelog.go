@@ -4,6 +4,7 @@ package ent
 
 import (
 	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"time"
@@ -91,6 +92,30 @@ type UsageLog struct {
 	DurationMs *int `json:"duration_ms,omitempty"`
 	// FirstTokenMs holds the value of the "first_token_ms" field.
 	FirstTokenMs *int `json:"first_token_ms,omitempty"`
+	// HandlerDurationMs holds the value of the "handler_duration_ms" field.
+	HandlerDurationMs *int `json:"handler_duration_ms,omitempty"`
+	// FirstVisibleOutputMs holds the value of the "first_visible_output_ms" field.
+	FirstVisibleOutputMs *int `json:"first_visible_output_ms,omitempty"`
+	// SemanticOutputSeen holds the value of the "semantic_output_seen" field.
+	SemanticOutputSeen *bool `json:"semantic_output_seen,omitempty"`
+	// TerminalKind holds the value of the "terminal_kind" field.
+	TerminalKind *string `json:"terminal_kind,omitempty"`
+	// AttemptCount holds the value of the "attempt_count" field.
+	AttemptCount *int `json:"attempt_count,omitempty"`
+	// AccountSwitchCount holds the value of the "account_switch_count" field.
+	AccountSwitchCount *int `json:"account_switch_count,omitempty"`
+	// FailedAttemptDurationMs holds the value of the "failed_attempt_duration_ms" field.
+	FailedAttemptDurationMs *int `json:"failed_attempt_duration_ms,omitempty"`
+	// RetryWaitMs holds the value of the "retry_wait_ms" field.
+	RetryWaitMs *int `json:"retry_wait_ms,omitempty"`
+	// AccountSwitchMs holds the value of the "account_switch_ms" field.
+	AccountSwitchMs *int `json:"account_switch_ms,omitempty"`
+	// GatewayRequestID holds the value of the "gateway_request_id" field.
+	GatewayRequestID *string `json:"gateway_request_id,omitempty"`
+	// ClientRequestID holds the value of the "client_request_id" field.
+	ClientRequestID *string `json:"client_request_id,omitempty"`
+	// AttemptLedger holds the value of the "attempt_ledger" field.
+	AttemptLedger jsontext.Value `json:"attempt_ledger,omitempty"`
 	// UserAgent holds the value of the "user_agent" field.
 	UserAgent *string `json:"user_agent,omitempty"`
 	// IPAddress holds the value of the "ip_address" field.
@@ -200,15 +225,15 @@ func (*UsageLog) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case usagelog.FieldImageSizeBreakdown:
+		case usagelog.FieldAttemptLedger, usagelog.FieldImageSizeBreakdown:
 			values[i] = new([]byte)
-		case usagelog.FieldUpstreamModelMismatch, usagelog.FieldLongContextBillingApplied, usagelog.FieldStream, usagelog.FieldCacheTTLOverridden:
+		case usagelog.FieldUpstreamModelMismatch, usagelog.FieldLongContextBillingApplied, usagelog.FieldStream, usagelog.FieldSemanticOutputSeen, usagelog.FieldCacheTTLOverridden:
 			values[i] = new(sql.NullBool)
 		case usagelog.FieldInputCost, usagelog.FieldOutputCost, usagelog.FieldCacheCreationCost, usagelog.FieldCacheReadCost, usagelog.FieldTotalCost, usagelog.FieldActualCost, usagelog.FieldRateMultiplier, usagelog.FieldAccountRateMultiplier:
 			values[i] = new(sql.NullFloat64)
-		case usagelog.FieldID, usagelog.FieldUserID, usagelog.FieldAPIKeyID, usagelog.FieldAccountID, usagelog.FieldChannelID, usagelog.FieldGroupID, usagelog.FieldSubscriptionID, usagelog.FieldInputTokens, usagelog.FieldOutputTokens, usagelog.FieldCacheCreationTokens, usagelog.FieldCacheReadTokens, usagelog.FieldCacheCreation5mTokens, usagelog.FieldCacheCreation1hTokens, usagelog.FieldBillingType, usagelog.FieldDurationMs, usagelog.FieldFirstTokenMs, usagelog.FieldImageCount, usagelog.FieldVideoCount, usagelog.FieldVideoDurationSeconds:
+		case usagelog.FieldID, usagelog.FieldUserID, usagelog.FieldAPIKeyID, usagelog.FieldAccountID, usagelog.FieldChannelID, usagelog.FieldGroupID, usagelog.FieldSubscriptionID, usagelog.FieldInputTokens, usagelog.FieldOutputTokens, usagelog.FieldCacheCreationTokens, usagelog.FieldCacheReadTokens, usagelog.FieldCacheCreation5mTokens, usagelog.FieldCacheCreation1hTokens, usagelog.FieldBillingType, usagelog.FieldDurationMs, usagelog.FieldFirstTokenMs, usagelog.FieldHandlerDurationMs, usagelog.FieldFirstVisibleOutputMs, usagelog.FieldAttemptCount, usagelog.FieldAccountSwitchCount, usagelog.FieldFailedAttemptDurationMs, usagelog.FieldRetryWaitMs, usagelog.FieldAccountSwitchMs, usagelog.FieldImageCount, usagelog.FieldVideoCount, usagelog.FieldVideoDurationSeconds:
 			values[i] = new(sql.NullInt64)
-		case usagelog.FieldRequestID, usagelog.FieldModel, usagelog.FieldRequestedModel, usagelog.FieldUpstreamModel, usagelog.FieldUpstreamResponseModel, usagelog.FieldModelMappingChain, usagelog.FieldBillingTier, usagelog.FieldBillingMode, usagelog.FieldUserAgent, usagelog.FieldIPAddress, usagelog.FieldImageSize, usagelog.FieldImageInputSize, usagelog.FieldImageOutputSize, usagelog.FieldImageSizeSource, usagelog.FieldVideoResolution:
+		case usagelog.FieldRequestID, usagelog.FieldModel, usagelog.FieldRequestedModel, usagelog.FieldUpstreamModel, usagelog.FieldUpstreamResponseModel, usagelog.FieldModelMappingChain, usagelog.FieldBillingTier, usagelog.FieldBillingMode, usagelog.FieldTerminalKind, usagelog.FieldGatewayRequestID, usagelog.FieldClientRequestID, usagelog.FieldUserAgent, usagelog.FieldIPAddress, usagelog.FieldImageSize, usagelog.FieldImageInputSize, usagelog.FieldImageOutputSize, usagelog.FieldImageSizeSource, usagelog.FieldVideoResolution:
 			values[i] = new(sql.NullString)
 		case usagelog.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -449,6 +474,91 @@ func (_m *UsageLog) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.FirstTokenMs = new(int)
 				*_m.FirstTokenMs = int(value.Int64)
+			}
+		case usagelog.FieldHandlerDurationMs:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field handler_duration_ms", values[i])
+			} else if value.Valid {
+				_m.HandlerDurationMs = new(int)
+				*_m.HandlerDurationMs = int(value.Int64)
+			}
+		case usagelog.FieldFirstVisibleOutputMs:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field first_visible_output_ms", values[i])
+			} else if value.Valid {
+				_m.FirstVisibleOutputMs = new(int)
+				*_m.FirstVisibleOutputMs = int(value.Int64)
+			}
+		case usagelog.FieldSemanticOutputSeen:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field semantic_output_seen", values[i])
+			} else if value.Valid {
+				_m.SemanticOutputSeen = new(bool)
+				*_m.SemanticOutputSeen = value.Bool
+			}
+		case usagelog.FieldTerminalKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field terminal_kind", values[i])
+			} else if value.Valid {
+				_m.TerminalKind = new(string)
+				*_m.TerminalKind = value.String
+			}
+		case usagelog.FieldAttemptCount:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field attempt_count", values[i])
+			} else if value.Valid {
+				_m.AttemptCount = new(int)
+				*_m.AttemptCount = int(value.Int64)
+			}
+		case usagelog.FieldAccountSwitchCount:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field account_switch_count", values[i])
+			} else if value.Valid {
+				_m.AccountSwitchCount = new(int)
+				*_m.AccountSwitchCount = int(value.Int64)
+			}
+		case usagelog.FieldFailedAttemptDurationMs:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field failed_attempt_duration_ms", values[i])
+			} else if value.Valid {
+				_m.FailedAttemptDurationMs = new(int)
+				*_m.FailedAttemptDurationMs = int(value.Int64)
+			}
+		case usagelog.FieldRetryWaitMs:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field retry_wait_ms", values[i])
+			} else if value.Valid {
+				_m.RetryWaitMs = new(int)
+				*_m.RetryWaitMs = int(value.Int64)
+			}
+		case usagelog.FieldAccountSwitchMs:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field account_switch_ms", values[i])
+			} else if value.Valid {
+				_m.AccountSwitchMs = new(int)
+				*_m.AccountSwitchMs = int(value.Int64)
+			}
+		case usagelog.FieldGatewayRequestID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field gateway_request_id", values[i])
+			} else if value.Valid {
+				_m.GatewayRequestID = new(string)
+				*_m.GatewayRequestID = value.String
+			}
+		case usagelog.FieldClientRequestID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field client_request_id", values[i])
+			} else if value.Valid {
+				_m.ClientRequestID = new(string)
+				*_m.ClientRequestID = value.String
+			}
+		case usagelog.FieldAttemptLedger:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field attempt_ledger", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.AttemptLedger); err != nil {
+					return fmt.Errorf("unmarshal field attempt_ledger: %w", err)
+				}
 			}
 		case usagelog.FieldUserAgent:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -726,6 +836,64 @@ func (_m *UsageLog) String() string {
 		builder.WriteString("first_token_ms=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	if v := _m.HandlerDurationMs; v != nil {
+		builder.WriteString("handler_duration_ms=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FirstVisibleOutputMs; v != nil {
+		builder.WriteString("first_visible_output_ms=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.SemanticOutputSeen; v != nil {
+		builder.WriteString("semantic_output_seen=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.TerminalKind; v != nil {
+		builder.WriteString("terminal_kind=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.AttemptCount; v != nil {
+		builder.WriteString("attempt_count=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.AccountSwitchCount; v != nil {
+		builder.WriteString("account_switch_count=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FailedAttemptDurationMs; v != nil {
+		builder.WriteString("failed_attempt_duration_ms=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.RetryWaitMs; v != nil {
+		builder.WriteString("retry_wait_ms=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.AccountSwitchMs; v != nil {
+		builder.WriteString("account_switch_ms=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.GatewayRequestID; v != nil {
+		builder.WriteString("gateway_request_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.ClientRequestID; v != nil {
+		builder.WriteString("client_request_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("attempt_ledger=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AttemptLedger))
 	builder.WriteString(", ")
 	if v := _m.UserAgent; v != nil {
 		builder.WriteString("user_agent=")

@@ -6,6 +6,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -76,6 +77,23 @@ func Logger() gin.HandlerFunc {
 		}
 		if model != "" {
 			fields = append(fields, zap.String("model", model))
+		}
+		if observation := service.RequestObservationAccessLogFields(c); observation != nil {
+			fields = append(fields,
+				zap.Int("handler_duration_ms", observation.HandlerDurationMs),
+				zap.Bool("semantic_output_seen", observation.SemanticOutputSeen),
+				zap.Int("attempt_count", observation.AttemptCount),
+				zap.Int("account_switch_count", observation.AccountSwitchCount),
+				zap.Int("failed_attempt_duration_ms", observation.FailedAttemptDurationMs),
+				zap.Int("retry_wait_ms", observation.RetryWaitMs),
+				zap.Int("account_switch_ms", observation.AccountSwitchMs),
+			)
+			if observation.FirstVisibleOutputMs != nil {
+				fields = append(fields, zap.Int("first_visible_output_ms", *observation.FirstVisibleOutputMs))
+			}
+			if observation.TerminalKind != "" {
+				fields = append(fields, zap.String("terminal_kind", observation.TerminalKind))
+			}
 		}
 
 		l := logger.FromContext(c.Request.Context()).With(fields...)

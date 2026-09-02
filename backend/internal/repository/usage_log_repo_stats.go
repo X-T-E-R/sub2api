@@ -675,6 +675,14 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 		conditions = append(conditions, fmt.Sprintf("group_id = $%d", len(args)+1))
 		args = append(args, filters.GroupID)
 	}
+	if correlationID := strings.TrimSpace(filters.CorrelationID); correlationID != "" {
+		placeholder := fmt.Sprintf("$%d", len(args)+1)
+		conditions = append(conditions, fmt.Sprintf(
+			"(request_id = %[1]s OR gateway_request_id = %[1]s OR client_request_id = %[1]s OR request_id = 'client:' || %[1]s OR request_id = 'local:' || %[1]s)",
+			placeholder,
+		))
+		args = append(args, correlationID)
+	}
 	conditions, args = appendUsageLogModelWhereCondition(conditions, args, filters.Model, filters.ModelFilterSource)
 	conditions, args = appendRequestTypeOrStreamWhereCondition(conditions, args, filters.RequestType, filters.Stream)
 	if filters.BillingType != nil {
@@ -706,7 +714,8 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 				total_cost,
 				actual_cost,
 				COALESCE(account_stats_cost, total_cost) * COALESCE(account_rate_multiplier, 1) AS account_cost,
-				duration_ms
+				duration_ms,
+				handler_duration_ms
 			FROM usage_logs
 			%s
 		)
@@ -723,7 +732,9 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 			COALESCE(SUM(total_cost), 0) AS cost,
 			COALESCE(SUM(actual_cost), 0) AS actual_cost,
 			COALESCE(SUM(account_cost), 0) AS account_cost,
-			COALESCE(AVG(duration_ms), 0) AS avg_duration_ms
+			COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
+			COALESCE(AVG(handler_duration_ms), 0) AS avg_handler_duration_ms,
+			COUNT(handler_duration_ms) AS handler_duration_sample_count
 		FROM scoped
 		GROUP BY GROUPING SETS (
 			(),
@@ -744,10 +755,11 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 
 	for rows.Next() {
 		var (
-			inboundGrouped, upstreamGrouped                                      int
-			inboundEndpoint, upstreamEndpoint                                    sql.NullString
-			requests, inputTokens, outputTokens, cacheCreationTokens, cacheReads int64
-			cost, actualCost, accountCost, averageDurationMs                     float64
+			inboundGrouped, upstreamGrouped                                            int
+			inboundEndpoint, upstreamEndpoint                                          sql.NullString
+			requests, inputTokens, outputTokens, cacheCreationTokens, cacheReads       int64
+			cost, actualCost, accountCost, averageDurationMs, averageHandlerDurationMs float64
+			handlerDurationSampleCount                                                 int64
 		)
 		if err := rows.Scan(
 			&inboundGrouped,
@@ -763,6 +775,8 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 			&actualCost,
 			&accountCost,
 			&averageDurationMs,
+			&averageHandlerDurationMs,
+			&handlerDurationSampleCount,
 		); err != nil {
 			return nil, err
 		}
@@ -785,6 +799,8 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 			stats.TotalActualCost = actualCost
 			totalAccountCost = accountCost
 			stats.AverageDurationMs = averageDurationMs
+			stats.AverageHandlerDurationMs = averageHandlerDurationMs
+			stats.HandlerDurationSampleCount = handlerDurationSampleCount
 		case inboundGrouped == 0 && upstreamGrouped == 1:
 			stats.Endpoints = append(stats.Endpoints, EndpointStat{
 				Endpoint: inboundEndpoint.String, Requests: requests, TotalTokens: totalTokens,

@@ -722,3 +722,48 @@ describe('admin UsageTable deleted-user badge', () => {
     expect(wrapper.text()).toContain('active@test.com')
   })
 })
+
+const DataTableLatencyStub = {
+  props: ['data'],
+  template: `<div><div v-for="row in data" :key="row.id"><slot name="cell-latency" :row="row" /></div></div>`,
+}
+
+describe('admin UsageTable request observability', () => {
+  const latencyRow = {
+    ...baseImageRow,
+    id: 991,
+    duration_ms: 120,
+    forward_duration_ms: 120,
+    handler_duration_ms: 460,
+    first_token_ms: 80,
+    first_visible_output_ms: 210,
+    semantic_output_seen: true,
+    terminal_kind: 'response.completed',
+    attempt_count: 3,
+    account_switch_count: 1,
+    attempt_ledger_available: true,
+  }
+
+  it('renders Handler E2E, Final Forward, and First Visible as distinct values', async () => {
+    const wrapper = mount(UsageTable, {
+      props: { data: [latencyRow], columns: [{ key: 'latency', label: 'Latency' }] },
+      global: { stubs: { DataTable: DataTableLatencyStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    expect(wrapper.get('[data-testid="handler-duration"]').text()).toContain('460')
+    expect(wrapper.get('[data-testid="forward-duration"]').text()).toContain('120')
+    expect(wrapper.get('[data-testid="first-visible-output"]').text()).toContain('210')
+    const button = wrapper.get('[data-testid="usage-observability-button"]')
+    expect(button.text()).toContain('usage.attemptSummary')
+    await button.trigger('click')
+    expect(wrapper.emitted('observabilityClick')?.[0]?.[0]).toMatchObject({ id: 991, attempt_count: 3, account_switch_count: 1 })
+  })
+
+  it('renders historical unknown without inventing zero', () => {
+    const wrapper = mount(UsageTable, {
+      props: { data: [{ ...latencyRow, id: 992, handler_duration_ms: null, first_visible_output_ms: null, semantic_output_seen: null, attempt_count: null, attempt_ledger_available: false }], columns: [{ key: 'latency', label: 'Latency' }] },
+      global: { stubs: { DataTable: DataTableLatencyStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    expect(wrapper.find('[data-testid="handler-duration"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="semantic-output-unknown"]').text()).toContain('usage.semanticOutputUnknown')
+  })
+})

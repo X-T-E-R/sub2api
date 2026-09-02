@@ -1680,8 +1680,21 @@ export interface UsageLog {
   request_type?: UsageRequestType
   stream: boolean
   openai_ws_mode?: boolean
-  duration_ms: number | null
-  first_token_ms: number | null
+	duration_ms: number | null
+	forward_duration_ms?: number | null
+	first_token_ms: number | null
+	handler_duration_ms?: number | null
+	first_visible_output_ms?: number | null
+	semantic_output_seen?: boolean | null
+	terminal_kind?: string | null
+	attempt_count?: number | null
+	account_switch_count?: number | null
+	failed_attempt_duration_ms?: number | null
+	retry_wait_ms?: number | null
+	account_switch_ms?: number | null
+	gateway_request_id?: string | null
+	client_request_id?: string | null
+	attempt_ledger_available?: boolean
 
   // 图片生成字段
   image_count: number
@@ -1736,6 +1749,57 @@ export interface AdminUsageLog extends UsageLog {
 
   // 最小账号信息（仅管理员接口返回）
   account?: UsageLogAccountSummary
+}
+
+export interface UsageAttemptEvidence {
+	sequence: number
+	account_id: number
+	platform?: string
+	started_offset_ms: number
+	selection_ms: number
+	slot_wait_ms: number
+	forward_ms: number
+	status_code?: number | null
+	outcome: string
+	stage?: string
+	scope?: string
+	reason?: string
+	next_action?: string
+	wait_after_ms?: number
+	upstream_request_id?: string
+	terminal_kind?: string
+	semantic_output_seen: boolean
+}
+
+export interface UsageAttemptLedger {
+	version: number
+	total_attempts: number
+	truncated: boolean
+	folded?: {
+		count: number
+		forward_ms: number
+		reason_count?: Record<string, number>
+	} | null
+	attempts: UsageAttemptEvidence[]
+}
+
+export interface AdminUsageObservability {
+	id: number
+	duration_ms: number | null
+	forward_duration_ms: number | null
+	handler_duration_ms: number | null
+	first_token_ms: number | null
+	first_visible_output_ms: number | null
+	semantic_output_seen: boolean | null
+	terminal_kind: string | null
+	attempt_count: number | null
+	account_switch_count: number | null
+	failed_attempt_duration_ms: number | null
+	retry_wait_ms: number | null
+	account_switch_ms: number | null
+	gateway_request_id: string | null
+	client_request_id: string | null
+	attempt_ledger: UsageAttemptLedger | null
 }
 
 export interface UsageCleanupFilters {

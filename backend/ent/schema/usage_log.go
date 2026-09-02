@@ -2,6 +2,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"time"
 
 	"entgo.io/ent"
@@ -132,6 +133,45 @@ func (UsageLog) Fields() []ent.Field {
 		field.Int("first_token_ms").
 			Optional().
 			Nillable(),
+		field.Int("handler_duration_ms").
+			Optional().
+			Nillable(),
+		field.Int("first_visible_output_ms").
+			Optional().
+			Nillable(),
+		field.Bool("semantic_output_seen").
+			Optional().
+			Nillable(),
+		field.String("terminal_kind").
+			MaxLen(64).
+			Optional().
+			Nillable(),
+		field.Int("attempt_count").
+			Optional().
+			Nillable(),
+		field.Int("account_switch_count").
+			Optional().
+			Nillable(),
+		field.Int("failed_attempt_duration_ms").
+			Optional().
+			Nillable(),
+		field.Int("retry_wait_ms").
+			Optional().
+			Nillable(),
+		field.Int("account_switch_ms").
+			Optional().
+			Nillable(),
+		field.String("gateway_request_id").
+			MaxLen(64).
+			Optional().
+			Nillable(),
+		field.String("client_request_id").
+			MaxLen(64).
+			Optional().
+			Nillable(),
+		field.JSON("attempt_ledger", json.RawMessage{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 		field.String("user_agent").
 			MaxLen(512).
 			Optional().

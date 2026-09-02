@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"time"
@@ -463,6 +464,166 @@ func (_c *UsageLogCreate) SetNillableFirstTokenMs(v *int) *UsageLogCreate {
 	return _c
 }
 
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (_c *UsageLogCreate) SetHandlerDurationMs(v int) *UsageLogCreate {
+	_c.mutation.SetHandlerDurationMs(v)
+	return _c
+}
+
+// SetNillableHandlerDurationMs sets the "handler_duration_ms" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableHandlerDurationMs(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetHandlerDurationMs(*v)
+	}
+	return _c
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (_c *UsageLogCreate) SetFirstVisibleOutputMs(v int) *UsageLogCreate {
+	_c.mutation.SetFirstVisibleOutputMs(v)
+	return _c
+}
+
+// SetNillableFirstVisibleOutputMs sets the "first_visible_output_ms" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableFirstVisibleOutputMs(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetFirstVisibleOutputMs(*v)
+	}
+	return _c
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (_c *UsageLogCreate) SetSemanticOutputSeen(v bool) *UsageLogCreate {
+	_c.mutation.SetSemanticOutputSeen(v)
+	return _c
+}
+
+// SetNillableSemanticOutputSeen sets the "semantic_output_seen" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableSemanticOutputSeen(v *bool) *UsageLogCreate {
+	if v != nil {
+		_c.SetSemanticOutputSeen(*v)
+	}
+	return _c
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (_c *UsageLogCreate) SetTerminalKind(v string) *UsageLogCreate {
+	_c.mutation.SetTerminalKind(v)
+	return _c
+}
+
+// SetNillableTerminalKind sets the "terminal_kind" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableTerminalKind(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetTerminalKind(*v)
+	}
+	return _c
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (_c *UsageLogCreate) SetAttemptCount(v int) *UsageLogCreate {
+	_c.mutation.SetAttemptCount(v)
+	return _c
+}
+
+// SetNillableAttemptCount sets the "attempt_count" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableAttemptCount(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetAttemptCount(*v)
+	}
+	return _c
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (_c *UsageLogCreate) SetAccountSwitchCount(v int) *UsageLogCreate {
+	_c.mutation.SetAccountSwitchCount(v)
+	return _c
+}
+
+// SetNillableAccountSwitchCount sets the "account_switch_count" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableAccountSwitchCount(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetAccountSwitchCount(*v)
+	}
+	return _c
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (_c *UsageLogCreate) SetFailedAttemptDurationMs(v int) *UsageLogCreate {
+	_c.mutation.SetFailedAttemptDurationMs(v)
+	return _c
+}
+
+// SetNillableFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableFailedAttemptDurationMs(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetFailedAttemptDurationMs(*v)
+	}
+	return _c
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (_c *UsageLogCreate) SetRetryWaitMs(v int) *UsageLogCreate {
+	_c.mutation.SetRetryWaitMs(v)
+	return _c
+}
+
+// SetNillableRetryWaitMs sets the "retry_wait_ms" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableRetryWaitMs(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetRetryWaitMs(*v)
+	}
+	return _c
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (_c *UsageLogCreate) SetAccountSwitchMs(v int) *UsageLogCreate {
+	_c.mutation.SetAccountSwitchMs(v)
+	return _c
+}
+
+// SetNillableAccountSwitchMs sets the "account_switch_ms" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableAccountSwitchMs(v *int) *UsageLogCreate {
+	if v != nil {
+		_c.SetAccountSwitchMs(*v)
+	}
+	return _c
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (_c *UsageLogCreate) SetGatewayRequestID(v string) *UsageLogCreate {
+	_c.mutation.SetGatewayRequestID(v)
+	return _c
+}
+
+// SetNillableGatewayRequestID sets the "gateway_request_id" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableGatewayRequestID(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetGatewayRequestID(*v)
+	}
+	return _c
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (_c *UsageLogCreate) SetClientRequestID(v string) *UsageLogCreate {
+	_c.mutation.SetClientRequestID(v)
+	return _c
+}
+
+// SetNillableClientRequestID sets the "client_request_id" field if the given value is not nil.
+func (_c *UsageLogCreate) SetNillableClientRequestID(v *string) *UsageLogCreate {
+	if v != nil {
+		_c.SetClientRequestID(*v)
+	}
+	return _c
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (_c *UsageLogCreate) SetAttemptLedger(v jsontext.Value) *UsageLogCreate {
+	_c.mutation.SetAttemptLedger(v)
+	return _c
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_c *UsageLogCreate) SetUserAgent(v string) *UsageLogCreate {
 	_c.mutation.SetUserAgent(v)
@@ -884,6 +1045,21 @@ func (_c *UsageLogCreate) check() error {
 	if _, ok := _c.mutation.Stream(); !ok {
 		return &ValidationError{Name: "stream", err: errors.New(`ent: missing required field "UsageLog.stream"`)}
 	}
+	if v, ok := _c.mutation.TerminalKind(); ok {
+		if err := usagelog.TerminalKindValidator(v); err != nil {
+			return &ValidationError{Name: "terminal_kind", err: fmt.Errorf(`ent: validator failed for field "UsageLog.terminal_kind": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.GatewayRequestID(); ok {
+		if err := usagelog.GatewayRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "gateway_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.gateway_request_id": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.ClientRequestID(); ok {
+		if err := usagelog.ClientRequestIDValidator(v); err != nil {
+			return &ValidationError{Name: "client_request_id", err: fmt.Errorf(`ent: validator failed for field "UsageLog.client_request_id": %w`, err)}
+		}
+	}
 	if v, ok := _c.mutation.UserAgent(); ok {
 		if err := usagelog.UserAgentValidator(v); err != nil {
 			return &ValidationError{Name: "user_agent", err: fmt.Errorf(`ent: validator failed for field "UsageLog.user_agent": %w`, err)}
@@ -1082,6 +1258,54 @@ func (_c *UsageLogCreate) createSpec() (*UsageLog, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.FirstTokenMs(); ok {
 		_spec.SetField(usagelog.FieldFirstTokenMs, field.TypeInt, value)
 		_node.FirstTokenMs = &value
+	}
+	if value, ok := _c.mutation.HandlerDurationMs(); ok {
+		_spec.SetField(usagelog.FieldHandlerDurationMs, field.TypeInt, value)
+		_node.HandlerDurationMs = &value
+	}
+	if value, ok := _c.mutation.FirstVisibleOutputMs(); ok {
+		_spec.SetField(usagelog.FieldFirstVisibleOutputMs, field.TypeInt, value)
+		_node.FirstVisibleOutputMs = &value
+	}
+	if value, ok := _c.mutation.SemanticOutputSeen(); ok {
+		_spec.SetField(usagelog.FieldSemanticOutputSeen, field.TypeBool, value)
+		_node.SemanticOutputSeen = &value
+	}
+	if value, ok := _c.mutation.TerminalKind(); ok {
+		_spec.SetField(usagelog.FieldTerminalKind, field.TypeString, value)
+		_node.TerminalKind = &value
+	}
+	if value, ok := _c.mutation.AttemptCount(); ok {
+		_spec.SetField(usagelog.FieldAttemptCount, field.TypeInt, value)
+		_node.AttemptCount = &value
+	}
+	if value, ok := _c.mutation.AccountSwitchCount(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchCount, field.TypeInt, value)
+		_node.AccountSwitchCount = &value
+	}
+	if value, ok := _c.mutation.FailedAttemptDurationMs(); ok {
+		_spec.SetField(usagelog.FieldFailedAttemptDurationMs, field.TypeInt, value)
+		_node.FailedAttemptDurationMs = &value
+	}
+	if value, ok := _c.mutation.RetryWaitMs(); ok {
+		_spec.SetField(usagelog.FieldRetryWaitMs, field.TypeInt, value)
+		_node.RetryWaitMs = &value
+	}
+	if value, ok := _c.mutation.AccountSwitchMs(); ok {
+		_spec.SetField(usagelog.FieldAccountSwitchMs, field.TypeInt, value)
+		_node.AccountSwitchMs = &value
+	}
+	if value, ok := _c.mutation.GatewayRequestID(); ok {
+		_spec.SetField(usagelog.FieldGatewayRequestID, field.TypeString, value)
+		_node.GatewayRequestID = &value
+	}
+	if value, ok := _c.mutation.ClientRequestID(); ok {
+		_spec.SetField(usagelog.FieldClientRequestID, field.TypeString, value)
+		_node.ClientRequestID = &value
+	}
+	if value, ok := _c.mutation.AttemptLedger(); ok {
+		_spec.SetField(usagelog.FieldAttemptLedger, field.TypeJSON, value)
+		_node.AttemptLedger = value
 	}
 	if value, ok := _c.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)
@@ -1863,6 +2087,264 @@ func (u *UsageLogUpsert) AddFirstTokenMs(v int) *UsageLogUpsert {
 // ClearFirstTokenMs clears the value of the "first_token_ms" field.
 func (u *UsageLogUpsert) ClearFirstTokenMs() *UsageLogUpsert {
 	u.SetNull(usagelog.FieldFirstTokenMs)
+	return u
+}
+
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (u *UsageLogUpsert) SetHandlerDurationMs(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldHandlerDurationMs, v)
+	return u
+}
+
+// UpdateHandlerDurationMs sets the "handler_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateHandlerDurationMs() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldHandlerDurationMs)
+	return u
+}
+
+// AddHandlerDurationMs adds v to the "handler_duration_ms" field.
+func (u *UsageLogUpsert) AddHandlerDurationMs(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldHandlerDurationMs, v)
+	return u
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (u *UsageLogUpsert) ClearHandlerDurationMs() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldHandlerDurationMs)
+	return u
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (u *UsageLogUpsert) SetFirstVisibleOutputMs(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldFirstVisibleOutputMs, v)
+	return u
+}
+
+// UpdateFirstVisibleOutputMs sets the "first_visible_output_ms" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateFirstVisibleOutputMs() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldFirstVisibleOutputMs)
+	return u
+}
+
+// AddFirstVisibleOutputMs adds v to the "first_visible_output_ms" field.
+func (u *UsageLogUpsert) AddFirstVisibleOutputMs(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldFirstVisibleOutputMs, v)
+	return u
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (u *UsageLogUpsert) ClearFirstVisibleOutputMs() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldFirstVisibleOutputMs)
+	return u
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (u *UsageLogUpsert) SetSemanticOutputSeen(v bool) *UsageLogUpsert {
+	u.Set(usagelog.FieldSemanticOutputSeen, v)
+	return u
+}
+
+// UpdateSemanticOutputSeen sets the "semantic_output_seen" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateSemanticOutputSeen() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldSemanticOutputSeen)
+	return u
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (u *UsageLogUpsert) ClearSemanticOutputSeen() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldSemanticOutputSeen)
+	return u
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (u *UsageLogUpsert) SetTerminalKind(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldTerminalKind, v)
+	return u
+}
+
+// UpdateTerminalKind sets the "terminal_kind" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateTerminalKind() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldTerminalKind)
+	return u
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (u *UsageLogUpsert) ClearTerminalKind() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldTerminalKind)
+	return u
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (u *UsageLogUpsert) SetAttemptCount(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldAttemptCount, v)
+	return u
+}
+
+// UpdateAttemptCount sets the "attempt_count" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateAttemptCount() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldAttemptCount)
+	return u
+}
+
+// AddAttemptCount adds v to the "attempt_count" field.
+func (u *UsageLogUpsert) AddAttemptCount(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldAttemptCount, v)
+	return u
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (u *UsageLogUpsert) ClearAttemptCount() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldAttemptCount)
+	return u
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (u *UsageLogUpsert) SetAccountSwitchCount(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldAccountSwitchCount, v)
+	return u
+}
+
+// UpdateAccountSwitchCount sets the "account_switch_count" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateAccountSwitchCount() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldAccountSwitchCount)
+	return u
+}
+
+// AddAccountSwitchCount adds v to the "account_switch_count" field.
+func (u *UsageLogUpsert) AddAccountSwitchCount(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldAccountSwitchCount, v)
+	return u
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (u *UsageLogUpsert) ClearAccountSwitchCount() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldAccountSwitchCount)
+	return u
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsert) SetFailedAttemptDurationMs(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldFailedAttemptDurationMs, v)
+	return u
+}
+
+// UpdateFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateFailedAttemptDurationMs() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldFailedAttemptDurationMs)
+	return u
+}
+
+// AddFailedAttemptDurationMs adds v to the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsert) AddFailedAttemptDurationMs(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldFailedAttemptDurationMs, v)
+	return u
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsert) ClearFailedAttemptDurationMs() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldFailedAttemptDurationMs)
+	return u
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (u *UsageLogUpsert) SetRetryWaitMs(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldRetryWaitMs, v)
+	return u
+}
+
+// UpdateRetryWaitMs sets the "retry_wait_ms" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateRetryWaitMs() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldRetryWaitMs)
+	return u
+}
+
+// AddRetryWaitMs adds v to the "retry_wait_ms" field.
+func (u *UsageLogUpsert) AddRetryWaitMs(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldRetryWaitMs, v)
+	return u
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (u *UsageLogUpsert) ClearRetryWaitMs() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldRetryWaitMs)
+	return u
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (u *UsageLogUpsert) SetAccountSwitchMs(v int) *UsageLogUpsert {
+	u.Set(usagelog.FieldAccountSwitchMs, v)
+	return u
+}
+
+// UpdateAccountSwitchMs sets the "account_switch_ms" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateAccountSwitchMs() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldAccountSwitchMs)
+	return u
+}
+
+// AddAccountSwitchMs adds v to the "account_switch_ms" field.
+func (u *UsageLogUpsert) AddAccountSwitchMs(v int) *UsageLogUpsert {
+	u.Add(usagelog.FieldAccountSwitchMs, v)
+	return u
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (u *UsageLogUpsert) ClearAccountSwitchMs() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldAccountSwitchMs)
+	return u
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (u *UsageLogUpsert) SetGatewayRequestID(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldGatewayRequestID, v)
+	return u
+}
+
+// UpdateGatewayRequestID sets the "gateway_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateGatewayRequestID() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldGatewayRequestID)
+	return u
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (u *UsageLogUpsert) ClearGatewayRequestID() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldGatewayRequestID)
+	return u
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (u *UsageLogUpsert) SetClientRequestID(v string) *UsageLogUpsert {
+	u.Set(usagelog.FieldClientRequestID, v)
+	return u
+}
+
+// UpdateClientRequestID sets the "client_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateClientRequestID() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldClientRequestID)
+	return u
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (u *UsageLogUpsert) ClearClientRequestID() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldClientRequestID)
+	return u
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (u *UsageLogUpsert) SetAttemptLedger(v jsontext.Value) *UsageLogUpsert {
+	u.Set(usagelog.FieldAttemptLedger, v)
+	return u
+}
+
+// UpdateAttemptLedger sets the "attempt_ledger" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateAttemptLedger() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldAttemptLedger)
+	return u
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (u *UsageLogUpsert) ClearAttemptLedger() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldAttemptLedger)
 	return u
 }
 
@@ -2817,6 +3299,307 @@ func (u *UsageLogUpsertOne) UpdateFirstTokenMs() *UsageLogUpsertOne {
 func (u *UsageLogUpsertOne) ClearFirstTokenMs() *UsageLogUpsertOne {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearFirstTokenMs()
+	})
+}
+
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (u *UsageLogUpsertOne) SetHandlerDurationMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetHandlerDurationMs(v)
+	})
+}
+
+// AddHandlerDurationMs adds v to the "handler_duration_ms" field.
+func (u *UsageLogUpsertOne) AddHandlerDurationMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddHandlerDurationMs(v)
+	})
+}
+
+// UpdateHandlerDurationMs sets the "handler_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateHandlerDurationMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateHandlerDurationMs()
+	})
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (u *UsageLogUpsertOne) ClearHandlerDurationMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearHandlerDurationMs()
+	})
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (u *UsageLogUpsertOne) SetFirstVisibleOutputMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetFirstVisibleOutputMs(v)
+	})
+}
+
+// AddFirstVisibleOutputMs adds v to the "first_visible_output_ms" field.
+func (u *UsageLogUpsertOne) AddFirstVisibleOutputMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddFirstVisibleOutputMs(v)
+	})
+}
+
+// UpdateFirstVisibleOutputMs sets the "first_visible_output_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateFirstVisibleOutputMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateFirstVisibleOutputMs()
+	})
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (u *UsageLogUpsertOne) ClearFirstVisibleOutputMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearFirstVisibleOutputMs()
+	})
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (u *UsageLogUpsertOne) SetSemanticOutputSeen(v bool) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetSemanticOutputSeen(v)
+	})
+}
+
+// UpdateSemanticOutputSeen sets the "semantic_output_seen" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateSemanticOutputSeen() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateSemanticOutputSeen()
+	})
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (u *UsageLogUpsertOne) ClearSemanticOutputSeen() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearSemanticOutputSeen()
+	})
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (u *UsageLogUpsertOne) SetTerminalKind(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetTerminalKind(v)
+	})
+}
+
+// UpdateTerminalKind sets the "terminal_kind" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateTerminalKind() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateTerminalKind()
+	})
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (u *UsageLogUpsertOne) ClearTerminalKind() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearTerminalKind()
+	})
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (u *UsageLogUpsertOne) SetAttemptCount(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAttemptCount(v)
+	})
+}
+
+// AddAttemptCount adds v to the "attempt_count" field.
+func (u *UsageLogUpsertOne) AddAttemptCount(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAttemptCount(v)
+	})
+}
+
+// UpdateAttemptCount sets the "attempt_count" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateAttemptCount() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAttemptCount()
+	})
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (u *UsageLogUpsertOne) ClearAttemptCount() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAttemptCount()
+	})
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (u *UsageLogUpsertOne) SetAccountSwitchCount(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAccountSwitchCount(v)
+	})
+}
+
+// AddAccountSwitchCount adds v to the "account_switch_count" field.
+func (u *UsageLogUpsertOne) AddAccountSwitchCount(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAccountSwitchCount(v)
+	})
+}
+
+// UpdateAccountSwitchCount sets the "account_switch_count" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateAccountSwitchCount() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAccountSwitchCount()
+	})
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (u *UsageLogUpsertOne) ClearAccountSwitchCount() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAccountSwitchCount()
+	})
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertOne) SetFailedAttemptDurationMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetFailedAttemptDurationMs(v)
+	})
+}
+
+// AddFailedAttemptDurationMs adds v to the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertOne) AddFailedAttemptDurationMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddFailedAttemptDurationMs(v)
+	})
+}
+
+// UpdateFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateFailedAttemptDurationMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateFailedAttemptDurationMs()
+	})
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertOne) ClearFailedAttemptDurationMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearFailedAttemptDurationMs()
+	})
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (u *UsageLogUpsertOne) SetRetryWaitMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetRetryWaitMs(v)
+	})
+}
+
+// AddRetryWaitMs adds v to the "retry_wait_ms" field.
+func (u *UsageLogUpsertOne) AddRetryWaitMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddRetryWaitMs(v)
+	})
+}
+
+// UpdateRetryWaitMs sets the "retry_wait_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateRetryWaitMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateRetryWaitMs()
+	})
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (u *UsageLogUpsertOne) ClearRetryWaitMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearRetryWaitMs()
+	})
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (u *UsageLogUpsertOne) SetAccountSwitchMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAccountSwitchMs(v)
+	})
+}
+
+// AddAccountSwitchMs adds v to the "account_switch_ms" field.
+func (u *UsageLogUpsertOne) AddAccountSwitchMs(v int) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAccountSwitchMs(v)
+	})
+}
+
+// UpdateAccountSwitchMs sets the "account_switch_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateAccountSwitchMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAccountSwitchMs()
+	})
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (u *UsageLogUpsertOne) ClearAccountSwitchMs() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAccountSwitchMs()
+	})
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (u *UsageLogUpsertOne) SetGatewayRequestID(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetGatewayRequestID(v)
+	})
+}
+
+// UpdateGatewayRequestID sets the "gateway_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateGatewayRequestID() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateGatewayRequestID()
+	})
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (u *UsageLogUpsertOne) ClearGatewayRequestID() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearGatewayRequestID()
+	})
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (u *UsageLogUpsertOne) SetClientRequestID(v string) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetClientRequestID(v)
+	})
+}
+
+// UpdateClientRequestID sets the "client_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateClientRequestID() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateClientRequestID()
+	})
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (u *UsageLogUpsertOne) ClearClientRequestID() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearClientRequestID()
+	})
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (u *UsageLogUpsertOne) SetAttemptLedger(v jsontext.Value) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAttemptLedger(v)
+	})
+}
+
+// UpdateAttemptLedger sets the "attempt_ledger" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateAttemptLedger() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAttemptLedger()
+	})
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (u *UsageLogUpsertOne) ClearAttemptLedger() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAttemptLedger()
 	})
 }
 
@@ -3973,6 +4756,307 @@ func (u *UsageLogUpsertBulk) UpdateFirstTokenMs() *UsageLogUpsertBulk {
 func (u *UsageLogUpsertBulk) ClearFirstTokenMs() *UsageLogUpsertBulk {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearFirstTokenMs()
+	})
+}
+
+// SetHandlerDurationMs sets the "handler_duration_ms" field.
+func (u *UsageLogUpsertBulk) SetHandlerDurationMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetHandlerDurationMs(v)
+	})
+}
+
+// AddHandlerDurationMs adds v to the "handler_duration_ms" field.
+func (u *UsageLogUpsertBulk) AddHandlerDurationMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddHandlerDurationMs(v)
+	})
+}
+
+// UpdateHandlerDurationMs sets the "handler_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateHandlerDurationMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateHandlerDurationMs()
+	})
+}
+
+// ClearHandlerDurationMs clears the value of the "handler_duration_ms" field.
+func (u *UsageLogUpsertBulk) ClearHandlerDurationMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearHandlerDurationMs()
+	})
+}
+
+// SetFirstVisibleOutputMs sets the "first_visible_output_ms" field.
+func (u *UsageLogUpsertBulk) SetFirstVisibleOutputMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetFirstVisibleOutputMs(v)
+	})
+}
+
+// AddFirstVisibleOutputMs adds v to the "first_visible_output_ms" field.
+func (u *UsageLogUpsertBulk) AddFirstVisibleOutputMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddFirstVisibleOutputMs(v)
+	})
+}
+
+// UpdateFirstVisibleOutputMs sets the "first_visible_output_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateFirstVisibleOutputMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateFirstVisibleOutputMs()
+	})
+}
+
+// ClearFirstVisibleOutputMs clears the value of the "first_visible_output_ms" field.
+func (u *UsageLogUpsertBulk) ClearFirstVisibleOutputMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearFirstVisibleOutputMs()
+	})
+}
+
+// SetSemanticOutputSeen sets the "semantic_output_seen" field.
+func (u *UsageLogUpsertBulk) SetSemanticOutputSeen(v bool) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetSemanticOutputSeen(v)
+	})
+}
+
+// UpdateSemanticOutputSeen sets the "semantic_output_seen" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateSemanticOutputSeen() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateSemanticOutputSeen()
+	})
+}
+
+// ClearSemanticOutputSeen clears the value of the "semantic_output_seen" field.
+func (u *UsageLogUpsertBulk) ClearSemanticOutputSeen() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearSemanticOutputSeen()
+	})
+}
+
+// SetTerminalKind sets the "terminal_kind" field.
+func (u *UsageLogUpsertBulk) SetTerminalKind(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetTerminalKind(v)
+	})
+}
+
+// UpdateTerminalKind sets the "terminal_kind" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateTerminalKind() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateTerminalKind()
+	})
+}
+
+// ClearTerminalKind clears the value of the "terminal_kind" field.
+func (u *UsageLogUpsertBulk) ClearTerminalKind() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearTerminalKind()
+	})
+}
+
+// SetAttemptCount sets the "attempt_count" field.
+func (u *UsageLogUpsertBulk) SetAttemptCount(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAttemptCount(v)
+	})
+}
+
+// AddAttemptCount adds v to the "attempt_count" field.
+func (u *UsageLogUpsertBulk) AddAttemptCount(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAttemptCount(v)
+	})
+}
+
+// UpdateAttemptCount sets the "attempt_count" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateAttemptCount() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAttemptCount()
+	})
+}
+
+// ClearAttemptCount clears the value of the "attempt_count" field.
+func (u *UsageLogUpsertBulk) ClearAttemptCount() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAttemptCount()
+	})
+}
+
+// SetAccountSwitchCount sets the "account_switch_count" field.
+func (u *UsageLogUpsertBulk) SetAccountSwitchCount(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAccountSwitchCount(v)
+	})
+}
+
+// AddAccountSwitchCount adds v to the "account_switch_count" field.
+func (u *UsageLogUpsertBulk) AddAccountSwitchCount(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAccountSwitchCount(v)
+	})
+}
+
+// UpdateAccountSwitchCount sets the "account_switch_count" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateAccountSwitchCount() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAccountSwitchCount()
+	})
+}
+
+// ClearAccountSwitchCount clears the value of the "account_switch_count" field.
+func (u *UsageLogUpsertBulk) ClearAccountSwitchCount() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAccountSwitchCount()
+	})
+}
+
+// SetFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertBulk) SetFailedAttemptDurationMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetFailedAttemptDurationMs(v)
+	})
+}
+
+// AddFailedAttemptDurationMs adds v to the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertBulk) AddFailedAttemptDurationMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddFailedAttemptDurationMs(v)
+	})
+}
+
+// UpdateFailedAttemptDurationMs sets the "failed_attempt_duration_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateFailedAttemptDurationMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateFailedAttemptDurationMs()
+	})
+}
+
+// ClearFailedAttemptDurationMs clears the value of the "failed_attempt_duration_ms" field.
+func (u *UsageLogUpsertBulk) ClearFailedAttemptDurationMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearFailedAttemptDurationMs()
+	})
+}
+
+// SetRetryWaitMs sets the "retry_wait_ms" field.
+func (u *UsageLogUpsertBulk) SetRetryWaitMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetRetryWaitMs(v)
+	})
+}
+
+// AddRetryWaitMs adds v to the "retry_wait_ms" field.
+func (u *UsageLogUpsertBulk) AddRetryWaitMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddRetryWaitMs(v)
+	})
+}
+
+// UpdateRetryWaitMs sets the "retry_wait_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateRetryWaitMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateRetryWaitMs()
+	})
+}
+
+// ClearRetryWaitMs clears the value of the "retry_wait_ms" field.
+func (u *UsageLogUpsertBulk) ClearRetryWaitMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearRetryWaitMs()
+	})
+}
+
+// SetAccountSwitchMs sets the "account_switch_ms" field.
+func (u *UsageLogUpsertBulk) SetAccountSwitchMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAccountSwitchMs(v)
+	})
+}
+
+// AddAccountSwitchMs adds v to the "account_switch_ms" field.
+func (u *UsageLogUpsertBulk) AddAccountSwitchMs(v int) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.AddAccountSwitchMs(v)
+	})
+}
+
+// UpdateAccountSwitchMs sets the "account_switch_ms" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateAccountSwitchMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAccountSwitchMs()
+	})
+}
+
+// ClearAccountSwitchMs clears the value of the "account_switch_ms" field.
+func (u *UsageLogUpsertBulk) ClearAccountSwitchMs() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAccountSwitchMs()
+	})
+}
+
+// SetGatewayRequestID sets the "gateway_request_id" field.
+func (u *UsageLogUpsertBulk) SetGatewayRequestID(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetGatewayRequestID(v)
+	})
+}
+
+// UpdateGatewayRequestID sets the "gateway_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateGatewayRequestID() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateGatewayRequestID()
+	})
+}
+
+// ClearGatewayRequestID clears the value of the "gateway_request_id" field.
+func (u *UsageLogUpsertBulk) ClearGatewayRequestID() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearGatewayRequestID()
+	})
+}
+
+// SetClientRequestID sets the "client_request_id" field.
+func (u *UsageLogUpsertBulk) SetClientRequestID(v string) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetClientRequestID(v)
+	})
+}
+
+// UpdateClientRequestID sets the "client_request_id" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateClientRequestID() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateClientRequestID()
+	})
+}
+
+// ClearClientRequestID clears the value of the "client_request_id" field.
+func (u *UsageLogUpsertBulk) ClearClientRequestID() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearClientRequestID()
+	})
+}
+
+// SetAttemptLedger sets the "attempt_ledger" field.
+func (u *UsageLogUpsertBulk) SetAttemptLedger(v jsontext.Value) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetAttemptLedger(v)
+	})
+}
+
+// UpdateAttemptLedger sets the "attempt_ledger" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateAttemptLedger() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateAttemptLedger()
+	})
+}
+
+// ClearAttemptLedger clears the value of the "attempt_ledger" field.
+func (u *UsageLogUpsertBulk) ClearAttemptLedger() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearAttemptLedger()
 	})
 }
 

@@ -4,7 +4,7 @@
  */
 
 import { apiClient } from '../client'
-import type { AdminUsageLog, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
+import type { AdminUsageLog, AdminUsageObservability, UsageQueryParams, PaginatedResponse, UsageRequestType } from '@/types'
 import type { EndpointStat } from '@/types'
 
 // ==================== Types ====================
@@ -20,7 +20,9 @@ export interface AdminUsageStatsResponse {
   total_cost: number
   total_actual_cost: number
   total_account_cost: number
-  average_duration_ms: number
+	average_duration_ms: number
+	average_handler_duration_ms?: number
+	handler_duration_sample_count?: number
   endpoints?: EndpointStat[]
   upstream_endpoints?: EndpointStat[]
   endpoint_paths?: EndpointStat[]
@@ -86,7 +88,8 @@ export interface AdminUsageQueryParams extends UsageQueryParams {
   billing_mode?: string
   upstream_model_mismatch?: boolean
   sort_by?: string
-  sort_order?: 'asc' | 'desc'
+	sort_order?: 'asc' | 'desc'
+	correlation_id?: string
   // 错误请求 tab 专属筛选(仅传给错误列表接口;共用同一 filters 对象)
   error_phase?: string | null
   error_category?: string | null
@@ -135,6 +138,11 @@ export async function getStats(params: {
     params
   })
   return data
+}
+
+export async function getObservability(id: number, options?: { signal?: AbortSignal }): Promise<AdminUsageObservability> {
+	const { data } = await apiClient.get<AdminUsageObservability>(`/admin/usage/records/${id}/observability`, { signal: options?.signal })
+	return data
 }
 
 /**
@@ -208,7 +216,8 @@ export async function cancelCleanupTask(taskId: number): Promise<{ id: number; s
 
 export const adminUsageAPI = {
   list,
-  getStats,
+	getStats,
+	getObservability,
   searchUsers,
   searchApiKeys,
   listCleanupTasks,

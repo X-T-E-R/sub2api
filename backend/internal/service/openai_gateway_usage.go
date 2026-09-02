@@ -39,6 +39,9 @@ type OpenAIRecordUsageInput struct {
 	PricingAt time.Time
 	// CyberBlocked 为 true 时把该用量行标记为 cyber（request_type=cyber），计费逻辑不变。
 	CyberBlocked bool
+	// RequestObservation is frozen by the handler before the usage task is
+	// detached; workers must not read Gin state.
+	RequestObservation *RequestObservationSnapshot
 	ChannelUsageFields
 }
 
@@ -382,6 +385,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	usageLog.OpenAIWSMode = result.OpenAIWSMode
 	usageLog.DurationMs = &durationMs
 	usageLog.FirstTokenMs = result.FirstTokenMs
+	ApplyRequestObservationSnapshot(usageLog, input.RequestObservation)
 	usageLog.CreatedAt = time.Now()
 	// 设置渠道信息
 	usageLog.ChannelID = optionalInt64Ptr(input.ChannelID)

@@ -222,22 +222,40 @@
           </div>
         </template>
 
-        <!-- 合并首字/总耗时的健康度列：左侧色条上端随首字档、下端随总耗时档，中段(40%-60%)短渐变过渡，便于纵向扫视整体健康状况 -->
         <template #cell-latency="{ row }">
           <div class="flex items-stretch gap-2">
             <span
               class="w-1 shrink-0 rounded-full"
-              :class="row.first_token_ms != null
-                ? ['bg-gradient-to-b from-40% to-60%', LATENCY_BAR_FROM_CLASSES[firstTokenSeverity(row.first_token_ms)], LATENCY_BAR_TO_CLASSES[durationSeverity(row.duration_ms ?? 0)]]
-                : LATENCY_BAR_CLASSES[durationSeverity(row.duration_ms ?? 0)]"
+              :class="row.first_visible_output_ms != null
+                ? ['bg-gradient-to-b from-40% to-60%', LATENCY_BAR_FROM_CLASSES[firstTokenSeverity(row.first_visible_output_ms)], LATENCY_BAR_TO_CLASSES[durationSeverity(row.handler_duration_ms ?? row.duration_ms ?? 0)]]
+                : LATENCY_BAR_CLASSES[durationSeverity(row.handler_duration_ms ?? row.duration_ms ?? 0)]"
               aria-hidden="true"
             ></span>
-            <div class="grid grid-cols-[max-content_max-content] items-baseline gap-x-2 gap-y-0.5 text-xs">
-              <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyFirstToken') }}</span>
-              <span v-if="row.first_token_ms != null" class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[firstTokenSeverity(row.first_token_ms)]">{{ formatDuration(row.first_token_ms) }}</span>
+            <div class="space-y-1 text-xs">
+              <div class="grid grid-cols-[max-content_max-content] items-baseline gap-x-2 gap-y-0.5">
+              <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyHandler') }}</span>
+              <span v-if="row.handler_duration_ms != null" data-testid="handler-duration" class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[durationSeverity(row.handler_duration_ms)]">{{ formatDuration(row.handler_duration_ms) }}</span>
               <span v-else class="text-gray-400 dark:text-gray-500">-</span>
-              <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyDuration') }}</span>
-              <span class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[durationSeverity(row.duration_ms ?? 0)]">{{ formatDuration(row.duration_ms) }}</span>
+              <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyForward') }}</span>
+              <span v-if="(row.forward_duration_ms ?? row.duration_ms) != null" data-testid="forward-duration" class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[durationSeverity(row.forward_duration_ms ?? row.duration_ms ?? 0)]" :title="row.first_token_ms != null ? `${t('usage.latencyLegacyTtft')}: ${formatDuration(row.first_token_ms)}` : t('usage.latencyLegacyTtftUnknown')">{{ formatDuration(row.forward_duration_ms ?? row.duration_ms) }}</span>
+              <span v-else class="text-gray-400 dark:text-gray-500">-</span>
+              <span class="text-gray-400 dark:text-gray-500">{{ t('usage.latencyFirstVisible') }}</span>
+              <span v-if="row.first_visible_output_ms != null" data-testid="first-visible-output" class="font-medium tabular-nums" :class="LATENCY_TEXT_CLASSES[firstTokenSeverity(row.first_visible_output_ms)]">{{ formatDuration(row.first_visible_output_ms) }}</span>
+              <span v-else class="text-gray-400 dark:text-gray-500">-</span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1">
+                <span v-if="row.semantic_output_seen === false" data-testid="semantic-output-missing" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">{{ t('usage.semanticOutputMissing') }}</span>
+                <span v-else-if="row.semantic_output_seen === true && row.first_visible_output_ms == null" class="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300">{{ t('usage.semanticOutputNotCommitted') }}</span>
+                <span v-else-if="row.semantic_output_seen == null" data-testid="semantic-output-unknown" class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-400">{{ t('usage.semanticOutputUnknown') }}</span>
+                <button
+                  v-if="showAccountBilling && row.attempt_ledger_available"
+                  type="button"
+                  data-testid="usage-observability-button"
+                  class="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-200 dark:bg-violet-500/20 dark:text-violet-300"
+                  @click="emit('observabilityClick', row)"
+                >{{ t('usage.attemptSummary', { attempts: row.attempt_count ?? 0, switches: row.account_switch_count ?? 0 }) }}</button>
+                <span v-else-if="row.attempt_count != null" class="text-[10px] text-gray-500 dark:text-gray-400">{{ t('usage.attemptSummary', { attempts: row.attempt_count, switches: row.account_switch_count ?? 0 }) }}</span>
+              </div>
             </div>
           </div>
         </template>
@@ -585,6 +603,7 @@ const emit = defineEmits<{
   userClick: [userID: number, email?: string]
   sort: [key: string, order: 'asc' | 'desc']
   ipGeoBatchFailed: []
+  observabilityClick: [row: AdminUsageLog]
 }>()
 const { t } = useI18n()
 const appStore = useAppStore()
