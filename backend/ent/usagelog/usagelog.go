@@ -106,6 +106,8 @@ const (
 	FieldClientRequestID = "client_request_id"
 	// FieldAttemptLedger holds the string denoting the attempt_ledger field in the database.
 	FieldAttemptLedger = "attempt_ledger"
+	// FieldCodexTelemetry holds the string denoting the codex_telemetry field in the database.
+	FieldCodexTelemetry = "codex_telemetry"
 	// FieldUserAgent holds the string denoting the user_agent field in the database.
 	FieldUserAgent = "user_agent"
 	// FieldIPAddress holds the string denoting the ip_address field in the database.
@@ -230,6 +232,7 @@ var Columns = []string{
 	FieldGatewayRequestID,
 	FieldClientRequestID,
 	FieldAttemptLedger,
+	FieldCodexTelemetry,
 	FieldUserAgent,
 	FieldIPAddress,
 	FieldImageCount,

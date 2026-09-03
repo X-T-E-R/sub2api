@@ -699,6 +699,8 @@ export default {
         upstreamErrorRateMaxPercentHint: 'Upstream error rate above this value will be displayed in red (default: 5%)',
         advancedSettings: 'Advanced Settings',
         dataRetention: 'Data Retention Policy',
+        codexTelemetry: 'Capture passive Codex metadata',
+        codexTelemetryHint: 'Off by default. Saves metadata already returned for new requests and WS turns, up to 4 KiB of JSON per record. Data follows usage/Ops retention; failure details also require Ops monitoring.',
         enableCleanup: 'Enable Data Cleanup',
         cleanupSchedule: 'Cleanup Schedule (Cron)',
         cleanupScheduleHint: 'Example: 0 2 * * * means 2 AM daily',

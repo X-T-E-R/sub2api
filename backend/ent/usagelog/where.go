@@ -2445,6 +2445,16 @@ func AttemptLedgerNotNil() predicate.UsageLog {
 	return predicate.UsageLog(sql.FieldNotNull(FieldAttemptLedger))
 }
 
+// CodexTelemetryIsNil applies the IsNil predicate on the "codex_telemetry" field.
+func CodexTelemetryIsNil() predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldIsNull(FieldCodexTelemetry))
+}
+
+// CodexTelemetryNotNil applies the NotNil predicate on the "codex_telemetry" field.
+func CodexTelemetryNotNil() predicate.UsageLog {
+	return predicate.UsageLog(sql.FieldNotNull(FieldCodexTelemetry))
+}
+
 // UserAgentEQ applies the EQ predicate on the "user_agent" field.
 func UserAgentEQ(v string) predicate.UsageLog {
 	return predicate.UsageLog(sql.FieldEQ(FieldUserAgent, v))

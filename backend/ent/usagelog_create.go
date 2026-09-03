@@ -624,6 +624,12 @@ func (_c *UsageLogCreate) SetAttemptLedger(v jsontext.Value) *UsageLogCreate {
 	return _c
 }
 
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (_c *UsageLogCreate) SetCodexTelemetry(v jsontext.Value) *UsageLogCreate {
+	_c.mutation.SetCodexTelemetry(v)
+	return _c
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_c *UsageLogCreate) SetUserAgent(v string) *UsageLogCreate {
 	_c.mutation.SetUserAgent(v)
@@ -1306,6 +1312,10 @@ func (_c *UsageLogCreate) createSpec() (*UsageLog, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.AttemptLedger(); ok {
 		_spec.SetField(usagelog.FieldAttemptLedger, field.TypeJSON, value)
 		_node.AttemptLedger = value
+	}
+	if value, ok := _c.mutation.CodexTelemetry(); ok {
+		_spec.SetField(usagelog.FieldCodexTelemetry, field.TypeJSON, value)
+		_node.CodexTelemetry = value
 	}
 	if value, ok := _c.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)
@@ -2345,6 +2355,24 @@ func (u *UsageLogUpsert) UpdateAttemptLedger() *UsageLogUpsert {
 // ClearAttemptLedger clears the value of the "attempt_ledger" field.
 func (u *UsageLogUpsert) ClearAttemptLedger() *UsageLogUpsert {
 	u.SetNull(usagelog.FieldAttemptLedger)
+	return u
+}
+
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (u *UsageLogUpsert) SetCodexTelemetry(v jsontext.Value) *UsageLogUpsert {
+	u.Set(usagelog.FieldCodexTelemetry, v)
+	return u
+}
+
+// UpdateCodexTelemetry sets the "codex_telemetry" field to the value that was provided on create.
+func (u *UsageLogUpsert) UpdateCodexTelemetry() *UsageLogUpsert {
+	u.SetExcluded(usagelog.FieldCodexTelemetry)
+	return u
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (u *UsageLogUpsert) ClearCodexTelemetry() *UsageLogUpsert {
+	u.SetNull(usagelog.FieldCodexTelemetry)
 	return u
 }
 
@@ -3600,6 +3628,27 @@ func (u *UsageLogUpsertOne) UpdateAttemptLedger() *UsageLogUpsertOne {
 func (u *UsageLogUpsertOne) ClearAttemptLedger() *UsageLogUpsertOne {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearAttemptLedger()
+	})
+}
+
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (u *UsageLogUpsertOne) SetCodexTelemetry(v jsontext.Value) *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetCodexTelemetry(v)
+	})
+}
+
+// UpdateCodexTelemetry sets the "codex_telemetry" field to the value that was provided on create.
+func (u *UsageLogUpsertOne) UpdateCodexTelemetry() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateCodexTelemetry()
+	})
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (u *UsageLogUpsertOne) ClearCodexTelemetry() *UsageLogUpsertOne {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearCodexTelemetry()
 	})
 }
 
@@ -5057,6 +5106,27 @@ func (u *UsageLogUpsertBulk) UpdateAttemptLedger() *UsageLogUpsertBulk {
 func (u *UsageLogUpsertBulk) ClearAttemptLedger() *UsageLogUpsertBulk {
 	return u.Update(func(s *UsageLogUpsert) {
 		s.ClearAttemptLedger()
+	})
+}
+
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (u *UsageLogUpsertBulk) SetCodexTelemetry(v jsontext.Value) *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.SetCodexTelemetry(v)
+	})
+}
+
+// UpdateCodexTelemetry sets the "codex_telemetry" field to the value that was provided on create.
+func (u *UsageLogUpsertBulk) UpdateCodexTelemetry() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.UpdateCodexTelemetry()
+	})
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (u *UsageLogUpsertBulk) ClearCodexTelemetry() *UsageLogUpsertBulk {
+	return u.Update(func(s *UsageLogUpsert) {
+		s.ClearCodexTelemetry()
 	})
 }
 

@@ -14,6 +14,7 @@ export interface OpsRequestOptions {
 }
 
 export type OpsUpstreamErrorEvent = {
+  codex_telemetry?: import('@/types/codexTelemetry').CodexTelemetrySnapshot
   at_unix_ms?: number
   platform?: string
   account_id?: number
@@ -786,6 +787,7 @@ export interface OpsOpenAIAccountQuotaAutoPauseSettings {
 }
 
 export interface OpsAdvancedSettings {
+  codex_telemetry_enabled?: boolean
   data_retention: OpsDataRetentionSettings
   aggregation: OpsAggregationSettings
   openai_account_quota_auto_pause: OpsOpenAIAccountQuotaAutoPauseSettings

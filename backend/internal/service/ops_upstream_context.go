@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/gin-gonic/gin"
 )
@@ -94,6 +95,7 @@ func ClearOpsUpstreamModel(c *gin.Context) {
 		return
 	}
 	c.Set(OpsUpstreamModelKey, "")
+	c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
 }
 
 func MarkOpsClientBusinessLimited(c *gin.Context, reason string) {
@@ -153,13 +155,14 @@ type OpsStreamError struct {
 	// Turn identifies a WebSocket turn. HTTP/SSE requests leave it at zero.
 	Turn int
 	// SkipMonitoring snapshots the rule decision for this visible failure.
-	SkipMonitoring  bool
-	AccountID       int64
-	UpstreamModel   string
-	UpstreamStatus  int
-	UpstreamMessage string
-	UpstreamDetail  string
-	UpstreamErrors  []*OpsUpstreamErrorEvent
+	SkipMonitoring       bool
+	AccountID            int64
+	UpstreamModel        string
+	UpstreamStatus       int
+	UpstreamMessage      string
+	UpstreamDetail       string
+	UpstreamErrors       []*OpsUpstreamErrorEvent
+	codexTelemetryEvents []*OpsUpstreamErrorEvent
 }
 
 const maxOpsStreamErrorsPerRequest = 64
@@ -278,6 +281,12 @@ func snapshotOpsStreamErrorContext(c *gin.Context, streamErr *OpsStreamError) {
 			}
 		}
 	}
+	entry := &OpsInsertErrorLogInput{AccountID: &streamErr.AccountID, UpstreamErrors: streamErr.UpstreamErrors}
+	if streamErr.UpstreamStatus > 0 {
+		entry.UpstreamStatusCode = &streamErr.UpstreamStatus
+	}
+	AttachCodexTelemetryToOpsEntry(c, entry)
+	streamErr.codexTelemetryEvents = entry.UpstreamErrors
 }
 
 func currentOpsFailureSkipMonitoring(c *gin.Context) bool {
@@ -384,9 +393,12 @@ type OpsUpstreamErrorEvent struct {
 	Scope  string `json:"scope,omitempty"`
 	Reason string `json:"reason,omitempty"`
 
-	Message      string                    `json:"message,omitempty"`
-	Detail       string                    `json:"detail,omitempty"`
-	CyberSession *CyberSessionBlockReceipt `json:"cyber_session,omitempty"`
+	Message        string                    `json:"message,omitempty"`
+	Detail         string                    `json:"detail,omitempty"`
+	CyberSession   *CyberSessionBlockReceipt `json:"cyber_session,omitempty"`
+	CodexTelemetry *codextelemetry.Snapshot  `json:"codex_telemetry,omitempty"`
+	// Request-local ownership only; discarded by the queue sanitizer.
+	codexTelemetryOwner *codexTelemetryAttempt
 
 	// SkipMonitoring is request-local rule state. It is intentionally excluded
 	// from persisted attempt JSON. The logger consults it only when this event is
@@ -433,6 +445,7 @@ func SnapshotOpsUpstreamErrors(c *gin.Context) []*OpsUpstreamErrorEvent {
 			continue
 		}
 		copy := *event
+		copy.CodexTelemetry = codextelemetry.Clone(event.CodexTelemetry)
 		if event.CyberSession != nil {
 			receiptCopy := *event.CyberSession
 			copy.CyberSession = &receiptCopy
@@ -448,6 +461,12 @@ func appendOpsUpstreamError(c *gin.Context, ev OpsUpstreamErrorEvent) {
 	}
 	if ev.AtUnixMs <= 0 {
 		ev.AtUnixMs = time.Now().UnixMilli()
+	}
+	if ev.CodexTelemetry == nil {
+		if attempt := codexTelemetryAttemptFromContext(c); attempt != nil && ev.AccountID > 0 && ev.AccountID == attempt.accountID {
+			ev.CodexTelemetry = attempt.snapshot()
+			ev.codexTelemetryOwner = attempt
+		}
 	}
 	ev.Platform = strings.TrimSpace(ev.Platform)
 	ev.UpstreamRequestID = strings.TrimSpace(ev.UpstreamRequestID)

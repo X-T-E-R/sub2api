@@ -102,6 +102,7 @@ type OpsAdvancedSettings struct {
 	IgnoreInvalidApiKeyErrors       bool `json:"ignore_invalid_api_key_errors"`
 	IgnoreInsufficientBalanceErrors bool `json:"ignore_insufficient_balance_errors"`
 	DisplayOpenAITokenStats         bool `json:"display_openai_token_stats"`
+	CodexTelemetryEnabled           bool `json:"codex_telemetry_enabled"`
 	DisplayAlertEvents              bool `json:"display_alert_events"`
 	AutoRefreshEnabled              bool `json:"auto_refresh_enabled"`
 	AutoRefreshIntervalSec          int  `json:"auto_refresh_interval_seconds"`

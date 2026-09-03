@@ -44298,6 +44298,8 @@ type UsageLogMutation struct {
 	client_request_id             *string
 	attempt_ledger                *jsontext.Value
 	appendattempt_ledger          jsontext.Value
+	codex_telemetry               *jsontext.Value
+	appendcodex_telemetry         jsontext.Value
 	user_agent                    *string
 	ip_address                    *string
 	image_count                   *int
@@ -46936,6 +46938,71 @@ func (m *UsageLogMutation) ResetAttemptLedger() {
 	delete(m.clearedFields, usagelog.FieldAttemptLedger)
 }
 
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (m *UsageLogMutation) SetCodexTelemetry(j jsontext.Value) {
+	m.codex_telemetry = &j
+	m.appendcodex_telemetry = nil
+}
+
+// CodexTelemetry returns the value of the "codex_telemetry" field in the mutation.
+func (m *UsageLogMutation) CodexTelemetry() (r jsontext.Value, exists bool) {
+	v := m.codex_telemetry
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodexTelemetry returns the old "codex_telemetry" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldCodexTelemetry(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodexTelemetry is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodexTelemetry requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodexTelemetry: %w", err)
+	}
+	return oldValue.CodexTelemetry, nil
+}
+
+// AppendCodexTelemetry adds j to the "codex_telemetry" field.
+func (m *UsageLogMutation) AppendCodexTelemetry(j jsontext.Value) {
+	m.appendcodex_telemetry = append(m.appendcodex_telemetry, j...)
+}
+
+// AppendedCodexTelemetry returns the list of values that were appended to the "codex_telemetry" field in this mutation.
+func (m *UsageLogMutation) AppendedCodexTelemetry() (jsontext.Value, bool) {
+	if len(m.appendcodex_telemetry) == 0 {
+		return nil, false
+	}
+	return m.appendcodex_telemetry, true
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (m *UsageLogMutation) ClearCodexTelemetry() {
+	m.codex_telemetry = nil
+	m.appendcodex_telemetry = nil
+	m.clearedFields[usagelog.FieldCodexTelemetry] = struct{}{}
+}
+
+// CodexTelemetryCleared returns if the "codex_telemetry" field was cleared in this mutation.
+func (m *UsageLogMutation) CodexTelemetryCleared() bool {
+	_, ok := m.clearedFields[usagelog.FieldCodexTelemetry]
+	return ok
+}
+
+// ResetCodexTelemetry resets all changes to the "codex_telemetry" field.
+func (m *UsageLogMutation) ResetCodexTelemetry() {
+	m.codex_telemetry = nil
+	m.appendcodex_telemetry = nil
+	delete(m.clearedFields, usagelog.FieldCodexTelemetry)
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (m *UsageLogMutation) SetUserAgent(s string) {
 	m.user_agent = &s
@@ -47751,7 +47818,7 @@ func (m *UsageLogMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageLogMutation) Fields() []string {
-	fields := make([]string, 0, 59)
+	fields := make([]string, 0, 60)
 	if m.user != nil {
 		fields = append(fields, usagelog.FieldUserID)
 	}
@@ -47889,6 +47956,9 @@ func (m *UsageLogMutation) Fields() []string {
 	}
 	if m.attempt_ledger != nil {
 		fields = append(fields, usagelog.FieldAttemptLedger)
+	}
+	if m.codex_telemetry != nil {
+		fields = append(fields, usagelog.FieldCodexTelemetry)
 	}
 	if m.user_agent != nil {
 		fields = append(fields, usagelog.FieldUserAgent)
@@ -48029,6 +48099,8 @@ func (m *UsageLogMutation) Field(name string) (ent.Value, bool) {
 		return m.ClientRequestID()
 	case usagelog.FieldAttemptLedger:
 		return m.AttemptLedger()
+	case usagelog.FieldCodexTelemetry:
+		return m.CodexTelemetry()
 	case usagelog.FieldUserAgent:
 		return m.UserAgent()
 	case usagelog.FieldIPAddress:
@@ -48156,6 +48228,8 @@ func (m *UsageLogMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldClientRequestID(ctx)
 	case usagelog.FieldAttemptLedger:
 		return m.OldAttemptLedger(ctx)
+	case usagelog.FieldCodexTelemetry:
+		return m.OldCodexTelemetry(ctx)
 	case usagelog.FieldUserAgent:
 		return m.OldUserAgent(ctx)
 	case usagelog.FieldIPAddress:
@@ -48512,6 +48586,13 @@ func (m *UsageLogMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAttemptLedger(v)
+		return nil
+	case usagelog.FieldCodexTelemetry:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodexTelemetry(v)
 		return nil
 	case usagelog.FieldUserAgent:
 		v, ok := value.(string)
@@ -49048,6 +49129,9 @@ func (m *UsageLogMutation) ClearedFields() []string {
 	if m.FieldCleared(usagelog.FieldAttemptLedger) {
 		fields = append(fields, usagelog.FieldAttemptLedger)
 	}
+	if m.FieldCleared(usagelog.FieldCodexTelemetry) {
+		fields = append(fields, usagelog.FieldCodexTelemetry)
+	}
 	if m.FieldCleared(usagelog.FieldUserAgent) {
 		fields = append(fields, usagelog.FieldUserAgent)
 	}
@@ -49163,6 +49247,9 @@ func (m *UsageLogMutation) ClearField(name string) error {
 		return nil
 	case usagelog.FieldAttemptLedger:
 		m.ClearAttemptLedger()
+		return nil
+	case usagelog.FieldCodexTelemetry:
+		m.ClearCodexTelemetry()
 		return nil
 	case usagelog.FieldUserAgent:
 		m.ClearUserAgent()
@@ -49336,6 +49423,9 @@ func (m *UsageLogMutation) ResetField(name string) error {
 		return nil
 	case usagelog.FieldAttemptLedger:
 		m.ResetAttemptLedger()
+		return nil
+	case usagelog.FieldCodexTelemetry:
+		m.ResetCodexTelemetry()
 		return nil
 	case usagelog.FieldUserAgent:
 		m.ResetUserAgent()

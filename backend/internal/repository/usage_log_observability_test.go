@@ -37,7 +37,7 @@ func TestPrepareUsageLogInsertRequestObservation(t *testing.T) {
 		CreatedAt: time.Unix(1, 0).UTC(),
 	}
 	prepared := prepareUsageLogInsert(log)
-	require.Len(t, prepared.args, 72)
+	require.Len(t, prepared.args, 73)
 	handlerDuration, ok := prepared.args[59].(sql.NullInt64)
 	require.True(t, ok)
 	firstVisible, ok := prepared.args[60].(sql.NullInt64)
@@ -102,7 +102,9 @@ func TestScanUsageLogDetailRoundTripsAttemptLedgerAndHistoricalNulls(t *testing.
 		sql.NullString{Valid: true, String: "client-1"},
 		true,
 		base[len(base)-1],
+		false,
 		sql.NullString{Valid: true, String: ledger},
+		sql.NullString{},
 	)
 	log, err := scanUsageLogWithLedger(usageLogScannerStub{values: values})
 	require.NoError(t, err)

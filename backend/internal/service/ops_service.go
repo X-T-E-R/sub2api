@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
@@ -558,6 +559,8 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 			continue
 		}
 		out := *ev
+		out.codexTelemetryOwner = nil
+		out.CodexTelemetry = codextelemetry.Clone(ev.CodexTelemetry)
 		if ev.CyberSession != nil {
 			receipt := sanitizeOpsCyberSessionReceipt(*ev.CyberSession)
 			out.CyberSession = &receipt
@@ -601,7 +604,7 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		}
 
 		// Drop fully-empty events (can happen if only status code was known).
-		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" && out.CyberSession == nil {
+		if out.UpstreamStatusCode == 0 && out.Message == "" && out.Detail == "" && out.CyberSession == nil && out.CodexTelemetry == nil {
 			continue
 		}
 
@@ -609,7 +612,40 @@ func sanitizeOpsUpstreamErrors(entry *OpsInsertErrorLogInput) error {
 		sanitized = append(sanitized, &evCopy)
 	}
 
-	entry.UpstreamErrorsJSON = marshalOpsUpstreamErrors(sanitized)
+	// All telemetry in one existing Ops row shares a 4 KiB budget, including
+	// JSON field names. Prefer the latest failed attempts when space runs out.
+	remaining := codextelemetry.MaxSnapshotBytes - len(`,"truncated":true`)
+	var newestTelemetry *codextelemetry.Snapshot
+	for i := len(sanitized) - 1; i >= 0; i-- {
+		const fieldBytes = len(`,"codex_telemetry":`)
+		hadTelemetry := sanitized[i].CodexTelemetry != nil
+		raw := codextelemetry.MarshalLimit(sanitized[i].CodexTelemetry, remaining-fieldBytes)
+		sanitized[i].CodexTelemetry = nil
+		if len(raw) > 0 {
+			var snapshot codextelemetry.Snapshot
+			if json.Unmarshal(raw, &snapshot) == nil {
+				sanitized[i].CodexTelemetry = &snapshot
+				if newestTelemetry == nil {
+					newestTelemetry = &snapshot
+				}
+				remaining -= len(raw) + fieldBytes
+			}
+		}
+		if hadTelemetry && sanitized[i].CodexTelemetry == nil && newestTelemetry != nil {
+			newestTelemetry.Truncated = true
+		}
+	}
+	if len(entry.UpstreamErrors) > maxEvents && newestTelemetry != nil {
+		newestTelemetry.Truncated = true
+	}
+	bounded := sanitized[:0]
+	for _, event := range sanitized {
+		if event.UpstreamStatusCode == 0 && event.Message == "" && event.Detail == "" && event.CyberSession == nil && event.CodexTelemetry == nil {
+			continue
+		}
+		bounded = append(bounded, event)
+	}
+	entry.UpstreamErrorsJSON = marshalOpsUpstreamErrors(bounded)
 	entry.UpstreamErrors = nil
 	return nil
 }

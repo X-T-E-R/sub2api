@@ -596,7 +596,7 @@ const exportToExcel = async () => {
       t('usage.rate'), t('usage.accountMultiplier'), t('usage.original'), t('usage.userBilled'), t('usage.accountBilled'),
       t('usage.latencyHandler'), t('usage.latencyForward'), t('usage.latencyFirstVisible'), t('usage.latencyLegacyTtft'),
       t('usage.attempts'), t('usage.switches'), t('usage.terminalKind'),
-      t('admin.usage.requestId'), t('usage.userAgent'), t('admin.usage.ipAddress')
+      t('admin.usage.requestId'), t('usage.userAgent'), t('admin.usage.ipAddress'), t('usage.codexTelemetry.available')
     ]
     const ws = XLSX.utils.aoa_to_sheet([headers])
     while (true) {
@@ -617,7 +617,7 @@ const exportToExcel = async () => {
         ((log.account_stats_cost ?? log.total_cost) * (log.account_rate_multiplier ?? 1)).toFixed(6),
         log.handler_duration_ms ?? '', log.forward_duration_ms ?? log.duration_ms ?? '', log.first_visible_output_ms ?? '', log.first_token_ms ?? '',
         log.attempt_count ?? '', log.account_switch_count ?? '', log.terminal_kind ?? '',
-        log.request_id || '', log.user_agent || '', log.ip_address || ''
+        log.request_id || '', log.user_agent || '', log.ip_address || '', log.codex_telemetry_available == null ? '' : t(log.codex_telemetry_available ? 'common.yes' : 'common.no')
       ])
       if (rows.length) {
         XLSX.utils.sheet_add_aoa(ws, rows, { origin: -1 })

@@ -1001,6 +1001,24 @@ func (_u *UsageLogUpdate) ClearAttemptLedger() *UsageLogUpdate {
 	return _u
 }
 
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (_u *UsageLogUpdate) SetCodexTelemetry(v jsontext.Value) *UsageLogUpdate {
+	_u.mutation.SetCodexTelemetry(v)
+	return _u
+}
+
+// AppendCodexTelemetry appends value to the "codex_telemetry" field.
+func (_u *UsageLogUpdate) AppendCodexTelemetry(v jsontext.Value) *UsageLogUpdate {
+	_u.mutation.AppendCodexTelemetry(v)
+	return _u
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (_u *UsageLogUpdate) ClearCodexTelemetry() *UsageLogUpdate {
+	_u.mutation.ClearCodexTelemetry()
+	return _u
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_u *UsageLogUpdate) SetUserAgent(v string) *UsageLogUpdate {
 	_u.mutation.SetUserAgent(v)
@@ -1710,6 +1728,17 @@ func (_u *UsageLogUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.AttemptLedgerCleared() {
 		_spec.ClearField(usagelog.FieldAttemptLedger, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.CodexTelemetry(); ok {
+		_spec.SetField(usagelog.FieldCodexTelemetry, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedCodexTelemetry(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, usagelog.FieldCodexTelemetry, value)
+		})
+	}
+	if _u.mutation.CodexTelemetryCleared() {
+		_spec.ClearField(usagelog.FieldCodexTelemetry, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)
@@ -2915,6 +2944,24 @@ func (_u *UsageLogUpdateOne) ClearAttemptLedger() *UsageLogUpdateOne {
 	return _u
 }
 
+// SetCodexTelemetry sets the "codex_telemetry" field.
+func (_u *UsageLogUpdateOne) SetCodexTelemetry(v jsontext.Value) *UsageLogUpdateOne {
+	_u.mutation.SetCodexTelemetry(v)
+	return _u
+}
+
+// AppendCodexTelemetry appends value to the "codex_telemetry" field.
+func (_u *UsageLogUpdateOne) AppendCodexTelemetry(v jsontext.Value) *UsageLogUpdateOne {
+	_u.mutation.AppendCodexTelemetry(v)
+	return _u
+}
+
+// ClearCodexTelemetry clears the value of the "codex_telemetry" field.
+func (_u *UsageLogUpdateOne) ClearCodexTelemetry() *UsageLogUpdateOne {
+	_u.mutation.ClearCodexTelemetry()
+	return _u
+}
+
 // SetUserAgent sets the "user_agent" field.
 func (_u *UsageLogUpdateOne) SetUserAgent(v string) *UsageLogUpdateOne {
 	_u.mutation.SetUserAgent(v)
@@ -3654,6 +3701,17 @@ func (_u *UsageLogUpdateOne) sqlSave(ctx context.Context) (_node *UsageLog, err 
 	}
 	if _u.mutation.AttemptLedgerCleared() {
 		_spec.ClearField(usagelog.FieldAttemptLedger, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.CodexTelemetry(); ok {
+		_spec.SetField(usagelog.FieldCodexTelemetry, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedCodexTelemetry(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, usagelog.FieldCodexTelemetry, value)
+		})
+	}
+	if _u.mutation.CodexTelemetryCleared() {
+		_spec.ClearField(usagelog.FieldCodexTelemetry, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.UserAgent(); ok {
 		_spec.SetField(usagelog.FieldUserAgent, field.TypeString, value)

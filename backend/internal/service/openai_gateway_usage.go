@@ -335,6 +335,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		UpstreamModel:            optionalTrimmedStringPtr(result.UpstreamModel),
 		UpstreamResponseModel:    optionalTrimmedStringPtr(result.UpstreamResponseModel),
 		UpstreamModelMismatch:    upstreamModelMismatch(sentModel, result.UpstreamResponseModel),
+		CodexTelemetry:           cloneCodexTelemetry(result.CodexTelemetry),
 		ServiceTier:              result.ServiceTier,
 		ReasoningEffort:          result.ReasoningEffort,
 		RequestedReasoningEffort: coalesceRequestedReasoningEffort(result.RequestedReasoningEffort, result.ReasoningEffort),
@@ -353,6 +354,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageSizeSource:          optionalTrimmedStringPtr(result.ImageSizeSource),
 		ImageSizeBreakdown:       result.ImageSizeBreakdown,
 	}
+	usageLog.CodexTelemetryAvailable = usageLog.CodexTelemetry != nil
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
 		usageLog.VideoCount = result.VideoCount

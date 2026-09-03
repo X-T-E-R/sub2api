@@ -730,6 +730,7 @@ func UsageLogFromServiceAdmin(l *service.UsageLog) *AdminUsageLog {
 		UpstreamReasoningEffort: adminUpstreamReasoningEffort(l),
 		UpstreamResponseModel:   l.UpstreamResponseModel,
 		UpstreamModelMismatch:   l.UpstreamModelMismatch,
+		CodexTelemetryAvailable: l.CodexTelemetryAvailable,
 		ChannelID:               l.ChannelID,
 		ModelMappingChain:       l.ModelMappingChain,
 		BillingTier:             l.BillingTier,

@@ -387,6 +387,32 @@ export default {
       noLedger: '该正常请求未保留尝试账本。',
       loadFailed: '加载请求可观测详情失败。'
     },
+    codexTelemetry: {
+      title: 'Codex 上游元数据',
+      available: '已记录 Codex 元数据',
+      download: '下载 JSON',
+      meaning: '引擎 ID 是上游报告的原始标识。快速模型值用于缓冲或重试提示，不代表本次响应的执行模型。',
+      transport: '传输方式',
+      responseId: '关联响应 ID',
+      reused: '已复用连接',
+      inferred: '部分事件未携带响应 ID，按 HTTP 响应或活动回合关联。连接复用时，这种上下文关联也可能包含上一回合迟到的事件。',
+      truncated: '采集达到上限，部分字段或较早的观测未保留。',
+      unassociated: '{count} 个元数据事件未关联到当前响应。',
+      engines: '上游引擎 ID',
+      faster_model: '快速模型提示',
+      active_limit: '当前限额标识',
+      primary_used_percent: '主窗口用量（%）',
+      primary_window_minutes: '主窗口时长（分钟）',
+      secondary_used_percent: '次窗口用量（%）',
+      secondary_window_minutes: '次窗口时长（分钟）',
+      association: {
+        response_id: '显式响应 ID',
+        active_response: '活动响应（推断）',
+        http_response: 'HTTP 响应上下文',
+        upstream_attempt: '待完成的上游请求',
+        connection: '连接握手'
+      }
+    },
     time: '时间',
     ws: 'WS',
     stream: '流式',

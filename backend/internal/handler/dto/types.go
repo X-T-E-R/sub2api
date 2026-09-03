@@ -586,7 +586,8 @@ type AdminUsageLog struct {
 	// UpstreamResponseModel is the raw model declared by the upstream response.
 	UpstreamResponseModel *string `json:"upstream_response_model,omitempty"`
 	// UpstreamModelMismatch is nil when the upstream did not declare a model.
-	UpstreamModelMismatch *bool `json:"upstream_model_mismatch,omitempty"`
+	UpstreamModelMismatch   *bool `json:"upstream_model_mismatch,omitempty"`
+	CodexTelemetryAvailable bool  `json:"codex_telemetry_available"`
 
 	// ChannelID 渠道 ID
 	ChannelID *int64 `json:"channel_id,omitempty"`

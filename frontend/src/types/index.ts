@@ -1732,6 +1732,7 @@ export interface UsageLogAccountSummary {
 }
 
 export interface AdminUsageLog extends UsageLog {
+  codex_telemetry_available?: boolean
   upstream_model?: string | null
   upstream_reasoning_effort?: string | null
   upstream_response_model?: string | null
@@ -1784,6 +1785,7 @@ export interface UsageAttemptLedger {
 }
 
 export interface AdminUsageObservability {
+	codex_telemetry?: import('./codexTelemetry').CodexTelemetrySnapshot | null
 	id: number
 	duration_ms: number | null
 	forward_duration_ms: number | null

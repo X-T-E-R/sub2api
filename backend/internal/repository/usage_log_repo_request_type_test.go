@@ -113,6 +113,7 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			sqlmock.AnyArg(), // client_request_id
 			sqlmock.AnyArg(), // attempt_ledger
 			createdAt,
+			nil, // codex_telemetry
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(99), createdAt))
 
@@ -218,6 +219,7 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			sqlmock.AnyArg(), // client_request_id
 			sqlmock.AnyArg(), // attempt_ledger
 			createdAt,
+			nil, // codex_telemetry
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(100), createdAt))
 
@@ -807,13 +809,13 @@ type usageLogScannerStub struct {
 func (s usageLogScannerStub) Scan(dest ...any) error {
 	// Historical fixtures predate request observability. Expand them with SQL
 	// NULLs plus attempt_ledger_available=false before created_at.
-	if len(dest) == 73 && len(s.values) == 61 {
+	if len(dest) == 74 && len(s.values) == 61 {
 		createdAt := s.values[len(s.values)-1]
 		s.values = append(s.values[:len(s.values)-1],
 			sql.NullInt64{}, sql.NullInt64{}, sql.NullBool{}, sql.NullString{},
 			sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{},
 			sql.NullString{}, sql.NullString{}, false,
-			createdAt,
+			createdAt, false,
 		)
 	}
 	if len(dest) != len(s.values) {

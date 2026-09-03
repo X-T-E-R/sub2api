@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -292,7 +293,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	grokCacheIdentity string,
 	turn int,
 	writeClientMessage func([]byte) error,
-) (*OpenAIForwardResult, error) {
+) (forwardResult *OpenAIForwardResult, forwardErr error) {
 	if s == nil {
 		return nil, errors.New("service is nil")
 	}
@@ -306,6 +307,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, errors.New("client websocket writer is nil")
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	var telemetryAttempt *codexTelemetryAttempt
+	defer func() { telemetryAttempt.finish(forwardResult, forwardErr) }()
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
 	if err != nil {
@@ -433,7 +436,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if buildErr != nil {
 			return nil, buildErr
 		}
+		telemetryAttempt = beginCodexTelemetryAttempt(c, account, codextelemetry.HTTP, false)
+		if gjson.GetBytes(payload, "generate").Type == gjson.False {
+			telemetryAttempt = nil
+			c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
+		}
+		responseModelObserver.codexTelemetry = telemetryAttempt
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if resp != nil {
+			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
+		}
 		if err != nil {
 			if turn == 1 {
 				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)

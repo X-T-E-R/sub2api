@@ -14,14 +14,15 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	dbusersub "github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, session_id, handler_duration_ms, first_visible_output_ms, semantic_output_seen, terminal_kind, attempt_count, account_switch_count, failed_attempt_duration_ms, retry_wait_ms, account_switch_ms, gateway_request_id, client_request_id, attempt_ledger IS NOT NULL, created_at"
+const usageLogSelectColumns = "id, user_id, api_key_id, account_id, request_id, model, requested_model, upstream_model, upstream_response_model, upstream_model_mismatch, group_id, subscription_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, image_output_tokens, image_output_cost, image_input_tokens, image_input_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost, actual_cost, rate_multiplier, account_rate_multiplier, billing_type, request_type, stream, openai_ws_mode, duration_ms, first_token_ms, user_agent, ip_address, image_count, image_size, image_input_size, image_output_size, image_size_source, image_size_breakdown, video_count, video_resolution, video_duration_seconds, service_tier, reasoning_effort, requested_reasoning_effort, inbound_endpoint, upstream_endpoint, cache_ttl_overridden, long_context_billing_applied, channel_id, model_mapping_chain, billing_tier, billing_mode, account_stats_cost, session_id, handler_duration_ms, first_visible_output_ms, semantic_output_seen, terminal_kind, attempt_count, account_switch_count, failed_attempt_duration_ms, retry_wait_ms, account_switch_ms, gateway_request_id, client_request_id, attempt_ledger IS NOT NULL, created_at, codex_telemetry IS NOT NULL"
 
-const usageLogDetailSelectColumns = usageLogSelectColumns + ", attempt_ledger"
+const usageLogDetailSelectColumns = usageLogSelectColumns + ", attempt_ledger, codex_telemetry"
 
 func (r *usageLogRepository) GetByID(ctx context.Context, id int64) (log *service.UsageLog, err error) {
 	query := "SELECT " + usageLogDetailSelectColumns + " FROM usage_logs WHERE id = $1"
@@ -531,6 +532,8 @@ func scanUsageLogOptionalLedger(scanner interface{ Scan(...any) error }, include
 		attemptLedgerAvailable    bool
 		createdAt                 time.Time
 		attemptLedger             sql.NullString
+		codexTelemetryAvailable   bool
+		codexTelemetry            sql.NullString
 	)
 
 	scanArgs := []any{
@@ -607,9 +610,10 @@ func scanUsageLogOptionalLedger(scanner interface{ Scan(...any) error }, include
 		&clientRequestID,
 		&attemptLedgerAvailable,
 		&createdAt,
+		&codexTelemetryAvailable,
 	}
 	if includeLedger {
-		scanArgs = append(scanArgs, &attemptLedger)
+		scanArgs = append(scanArgs, &attemptLedger, &codexTelemetry)
 	}
 	if err := scanner.Scan(scanArgs...); err != nil {
 		return nil, err
@@ -647,6 +651,7 @@ func scanUsageLogOptionalLedger(scanner interface{ Scan(...any) error }, include
 		CacheTTLOverridden:        cacheTTLOverridden,
 		LongContextBillingApplied: longContextBillingApplied,
 		AttemptLedgerAvailable:    attemptLedgerAvailable,
+		CodexTelemetryAvailable:   codexTelemetryAvailable,
 		CreatedAt:                 createdAt,
 	}
 	// 先回填 legacy 字段，再基于 legacy + request_type 计算最终请求类型，保证历史数据兼容。
@@ -693,6 +698,14 @@ func scanUsageLogOptionalLedger(scanner interface{ Scan(...any) error }, include
 	}
 	if clientRequestID.Valid {
 		log.ClientRequestID = &clientRequestID.String
+	}
+	if codexTelemetry.Valid && strings.TrimSpace(codexTelemetry.String) != "" {
+		var snapshot codextelemetry.Snapshot
+		if err := json.Unmarshal([]byte(codexTelemetry.String), &snapshot); err != nil {
+			return nil, fmt.Errorf("decode usage Codex telemetry: %w", err)
+		}
+		log.CodexTelemetry = codextelemetry.Clone(&snapshot)
+		log.CodexTelemetryAvailable = log.CodexTelemetry != nil
 	}
 	if attemptLedger.Valid && strings.TrimSpace(attemptLedger.String) != "" {
 		var ledger service.RequestAttemptLedger

@@ -87,6 +87,7 @@ func (h *UsageHandler) GetObservability(c *gin.Context) {
 		"gateway_request_id":         record.GatewayRequestID,
 		"client_request_id":          record.ClientRequestID,
 		"attempt_ledger":             record.AttemptLedger,
+		"codex_telemetry":            record.CodexTelemetry,
 	})
 }
 

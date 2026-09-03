@@ -172,6 +172,9 @@ func (UsageLog) Fields() []ent.Field {
 		field.JSON("attempt_ledger", json.RawMessage{}).
 			Optional().
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
+		field.JSON("codex_telemetry", json.RawMessage{}).
+			Optional().
+			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 		field.String("user_agent").
 			MaxLen(512).
 			Optional().

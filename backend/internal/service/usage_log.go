@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 )
 
 const (
@@ -194,6 +196,8 @@ type UsageLog struct {
 	ClientRequestID         *string
 	AttemptLedger           *RequestAttemptLedger
 	AttemptLedgerAvailable  bool
+	CodexTelemetry          *codextelemetry.Snapshot
+	CodexTelemetryAvailable bool
 	UserAgent               *string
 	IPAddress               *string
 	// SessionID is the explicit client-provided request correlation identifier

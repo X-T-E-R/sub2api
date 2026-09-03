@@ -130,6 +130,8 @@
         <div class="mt-3 break-words text-sm font-medium text-amber-900 dark:text-amber-100">{{ rootCauseMessage }}</div>
       </div>
 
+      <CodexTelemetryPanel v-for="(telemetry, index) in codexTelemetry" :key="index" :telemetry="telemetry" />
+
       <div class="rounded-xl bg-gray-50 p-6 dark:bg-dark-900">
         <h3 class="text-sm font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ t('admin.ops.errorDetail.diagnosticPayloads') }}</h3>
         <div v-if="!diagnosticPayloadSections.length" class="mt-4 text-sm text-gray-500 dark:text-gray-400">{{ t('common.noData') }}</div>
@@ -228,6 +230,8 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import CodexTelemetryPanel from '@/components/admin/usage/CodexTelemetryPanel.vue'
+import { codexTelemetryFromOpsErrors } from '@/types/codexTelemetry'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores'
 import { opsAPI, type OpsErrorDetail } from '@/api/admin/ops'
@@ -254,6 +258,7 @@ const appStore = useAppStore()
 
 const loading = ref(false)
 const detail = ref<OpsErrorDetail | null>(null)
+const codexTelemetry = computed(() => codexTelemetryFromOpsErrors(detail.value?.upstream_errors))
 
 const showUpstreamList = computed(() => props.errorType === 'request')
 
@@ -336,6 +341,7 @@ function displayModel(d: OpsErrorDetail | null): string {
 
 const correlatedUpstream = ref<OpsErrorDetail[]>([])
 const correlatedUpstreamLoading = ref(false)
+let requestGeneration = 0
 
 const correlatedUpstreamErrors = computed<OpsErrorDetail[]>(() => correlatedUpstream.value)
 
@@ -354,7 +360,16 @@ function toggleUpstreamDetail(id: number) {
   expandedUpstreamDetailIds.value = next
 }
 
-async function fetchCorrelatedUpstreamErrors(requestErrorId: number) {
+function resetSelection() {
+  requestGeneration++
+  loading.value = false
+  detail.value = null
+  correlatedUpstream.value = []
+  correlatedUpstreamLoading.value = false
+  expandedUpstreamDetailIds.value = new Set()
+}
+
+async function fetchCorrelatedUpstreamErrors(requestErrorId: number, isCurrent: () => boolean) {
   correlatedUpstreamLoading.value = true
   try {
     const res = await opsAPI.listRequestErrorUpstreamErrors(
@@ -362,21 +377,23 @@ async function fetchCorrelatedUpstreamErrors(requestErrorId: number) {
       { page: 1, page_size: 100, view: 'all' },
       { include_detail: true }
     )
-    correlatedUpstream.value = res.items || []
+    if (isCurrent()) correlatedUpstream.value = res.items || []
   } catch (err) {
+    if (!isCurrent()) return
     console.error('[OpsErrorDetailModal] Failed to load correlated upstream errors', err)
     correlatedUpstream.value = []
   } finally {
-    correlatedUpstreamLoading.value = false
+    if (isCurrent()) correlatedUpstreamLoading.value = false
   }
 }
 
 function close() {
+  resetSelection()
   emit('update:show', false)
 }
 
 function goBack() {
-  emit('update:show', false)
+  close()
   emit('back')
 }
 
@@ -389,34 +406,32 @@ function prettyJSON(raw?: string): string {
   }
 }
 
-async function fetchDetail(id: number) {
+async function fetchDetail(id: number, kind: 'request' | 'upstream', isCurrent: () => boolean) {
   loading.value = true
   try {
-    const kind = props.errorType || (detail.value?.phase === 'upstream' ? 'upstream' : 'request')
     const d = kind === 'upstream' ? await opsAPI.getUpstreamErrorDetail(id) : await opsAPI.getRequestErrorDetail(id)
-    detail.value = d
+    if (isCurrent()) detail.value = d
   } catch (err: any) {
+    if (!isCurrent()) return
     detail.value = null
     appStore.showError(err?.message || t('admin.ops.failedToLoadErrorDetail'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
 watch(
-  () => [props.show, props.errorId] as const,
-  ([show, id]) => {
-    if (!show) {
-      detail.value = null
-      return
-    }
+  () => [props.show, props.errorId, props.errorType] as const,
+  ([show, id, kind], _previous, onCleanup) => {
+    resetSelection()
+    onCleanup(() => { requestGeneration++ })
+    if (!show) return
     if (typeof id === 'number' && id > 0) {
-      expandedUpstreamDetailIds.value = new Set()
-      fetchDetail(id)
-      if (props.errorType === 'request') {
-        fetchCorrelatedUpstreamErrors(id)
-      } else {
-        correlatedUpstream.value = []
+      const generation = requestGeneration
+      const isCurrent = () => generation === requestGeneration && props.show && props.errorId === id && props.errorType === kind
+      fetchDetail(id, kind || 'request', isCurrent)
+      if (kind === 'request') {
+        fetchCorrelatedUpstreamErrors(id, isCurrent)
       }
     }
   },

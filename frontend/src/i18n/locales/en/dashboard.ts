@@ -382,6 +382,32 @@ export default {
       noLedger: 'This normal request has no retained attempt ledger.',
       loadFailed: 'Failed to load request observability.'
     },
+    codexTelemetry: {
+      title: 'Codex upstream metadata',
+      available: 'Codex metadata available',
+      download: 'Download JSON',
+      meaning: 'Upstream-reported engine IDs are opaque identifiers. The faster-model value is a buffering/retry hint, not evidence of the model that executed this response.',
+      transport: 'Transport',
+      responseId: 'Bound response ID',
+      reused: 'Reused connection',
+      inferred: 'Some events had no response ID and were associated by the HTTP response or active turn. Contextual association on a reused connection may include delayed events from an earlier turn.',
+      truncated: 'Capture limits were reached. Some fields or earlier observations were not retained.',
+      unassociated: '{count} metadata events could not be associated with this response.',
+      engines: 'Upstream engine IDs',
+      faster_model: 'Faster-model hint',
+      active_limit: 'Active limit',
+      primary_used_percent: 'Primary usage (%)',
+      primary_window_minutes: 'Primary window (minutes)',
+      secondary_used_percent: 'Secondary usage (%)',
+      secondary_window_minutes: 'Secondary window (minutes)',
+      association: {
+        response_id: 'Explicit response ID',
+        active_response: 'Active response (inferred)',
+        http_response: 'HTTP response context',
+        upstream_attempt: 'Pending upstream attempt',
+        connection: 'Connection handshake'
+      }
+    },
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',

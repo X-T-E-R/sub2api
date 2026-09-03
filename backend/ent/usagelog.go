@@ -116,6 +116,8 @@ type UsageLog struct {
 	ClientRequestID *string `json:"client_request_id,omitempty"`
 	// AttemptLedger holds the value of the "attempt_ledger" field.
 	AttemptLedger jsontext.Value `json:"attempt_ledger,omitempty"`
+	// CodexTelemetry holds the value of the "codex_telemetry" field.
+	CodexTelemetry jsontext.Value `json:"codex_telemetry,omitempty"`
 	// UserAgent holds the value of the "user_agent" field.
 	UserAgent *string `json:"user_agent,omitempty"`
 	// IPAddress holds the value of the "ip_address" field.
@@ -225,7 +227,7 @@ func (*UsageLog) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case usagelog.FieldAttemptLedger, usagelog.FieldImageSizeBreakdown:
+		case usagelog.FieldAttemptLedger, usagelog.FieldCodexTelemetry, usagelog.FieldImageSizeBreakdown:
 			values[i] = new([]byte)
 		case usagelog.FieldUpstreamModelMismatch, usagelog.FieldLongContextBillingApplied, usagelog.FieldStream, usagelog.FieldSemanticOutputSeen, usagelog.FieldCacheTTLOverridden:
 			values[i] = new(sql.NullBool)
@@ -558,6 +560,14 @@ func (_m *UsageLog) assignValues(columns []string, values []any) error {
 			} else if value != nil && len(*value) > 0 {
 				if err := json.Unmarshal(*value, &_m.AttemptLedger); err != nil {
 					return fmt.Errorf("unmarshal field attempt_ledger: %w", err)
+				}
+			}
+		case usagelog.FieldCodexTelemetry:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field codex_telemetry", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.CodexTelemetry); err != nil {
+					return fmt.Errorf("unmarshal field codex_telemetry: %w", err)
 				}
 			}
 		case usagelog.FieldUserAgent:
@@ -894,6 +904,9 @@ func (_m *UsageLog) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("attempt_ledger=")
 	builder.WriteString(fmt.Sprintf("%v", _m.AttemptLedger))
+	builder.WriteString(", ")
+	builder.WriteString("codex_telemetry=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CodexTelemetry))
 	builder.WriteString(", ")
 	if v := _m.UserAgent; v != nil {
 		builder.WriteString("user_agent=")

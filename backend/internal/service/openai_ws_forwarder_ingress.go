@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -825,6 +826,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	agentTaskRecoveryTried := false
 	var acquireTurnLease func(int, string, bool) (*openAIWSConnLease, error)
 	acquireTurnLease = func(turn int, preferred string, forcePreferredConn bool) (*openAIWSConnLease, error) {
+		telemetryAttempt := beginCodexTelemetryAttempt(c, account, codextelemetry.WebSocket, false)
 		req := cloneOpenAIWSAcquireRequest(baseAcquireReq)
 		req.PreferredConnID = strings.TrimSpace(preferred)
 		req.ForcePreferredConn = forcePreferredConn
@@ -833,6 +835,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		acquireCtx, acquireCancel := context.WithTimeout(ctx, acquireTimeout)
 		lease, acquireErr := pool.Acquire(acquireCtx, req)
 		acquireCancel()
+		var telemetryDialErr *openAIWSDialError
+		if errors.As(acquireErr, &telemetryDialErr) {
+			telemetryAttempt.headers(telemetryDialErr.ResponseHeaders, codextelemetry.HTTPHeaders, telemetryDialErr.StatusCode)
+		}
 		var dialErr *openAIWSDialError
 		if acquireErr != nil && s.isAgentIdentityAccount(ctx, account) && errors.As(acquireErr, &dialErr) && isAgentIdentityTaskInvalidWSDialError(dialErr) && !agentTaskRecoveryTried {
 			agentTaskRecoveryTried = true
@@ -916,11 +922,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	var rejectedFieldRetryState *openAIResponsesRejectedFieldRetryState
-	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (*OpenAIForwardResult, error) {
+	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (forwardResult *OpenAIForwardResult, forwardErr error) {
 		responseModelObserver := &upstreamResponseModelObserver{}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
+		telemetryAttempt := beginCodexTelemetryAttempt(c, account, codextelemetry.WebSocket, lease.codexTelemetryConnectionReused())
+		if gjson.GetBytes(payload, "generate").Type == gjson.False {
+			telemetryAttempt = nil
+			c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
+		}
+		telemetryAttempt.headers(lease.takeCodexTelemetryHandshake(telemetryAttempt != nil), codextelemetry.WSUpgradeHeaders, http.StatusSwitchingProtocols)
+		responseModelObserver.codexTelemetry = telemetryAttempt
+		defer func() { telemetryAttempt.finish(forwardResult, forwardErr) }()
 		turnStart := time.Now()
 		wroteDownstream := false
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {

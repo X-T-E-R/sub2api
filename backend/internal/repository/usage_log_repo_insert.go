@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -96,6 +97,7 @@ var usageLogInsertArgTypes = [...]string{
 	"text",        // client_request_id
 	"jsonb",       // attempt_ledger
 	"timestamptz", // created_at
+	"jsonb",       // codex_telemetry
 }
 
 const (
@@ -306,14 +308,15 @@ func (r *usageLogRepository) createSingle(ctx context.Context, sqlq sqlExecutor,
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
 			$10, $11,
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 		RETURNING id, created_at
@@ -776,12 +779,13 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		) AS (VALUES `)
 
-	// Each batch row prepends the synthetic input_index before the 72
+	// Each batch row prepends the synthetic input_index before the 73
 	// usage-log column values.
-	args := make([]any, 0, len(keys)*73)
+	args := make([]any, 0, len(keys)*(len(usageLogInsertArgTypes)+1))
 	argPos := 1
 	for idx, key := range keys {
 		if idx > 0 {
@@ -881,7 +885,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				gateway_request_id,
 				client_request_id,
 				attempt_ledger,
-				created_at
+				created_at,
+				codex_telemetry
 			)
 			SELECT
 				user_id,
@@ -955,7 +960,8 @@ func buildUsageLogBatchInsertQuery(keys []string, preparedByKey map[string]usage
 				gateway_request_id,
 				client_request_id,
 				attempt_ledger,
-				created_at
+				created_at,
+				codex_telemetry
 			FROM input
 			ON CONFLICT (request_id, api_key_id) DO NOTHING
 			RETURNING request_id, api_key_id, id, created_at
@@ -1069,10 +1075,11 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		) AS (VALUES `)
 
-	args := make([]any, 0, len(preparedList)*72)
+	args := make([]any, 0, len(preparedList)*len(usageLogInsertArgTypes))
 	argPos := 1
 	for idx, prepared := range preparedList {
 		if idx > 0 {
@@ -1169,7 +1176,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		)
 		SELECT
 			user_id,
@@ -1243,7 +1251,8 @@ func buildUsageLogBestEffortInsertQuery(preparedList []usageLogInsertPrepared) (
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		FROM input
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 	`)
@@ -1325,14 +1334,15 @@ func execUsageLogInsertNoResult(ctx context.Context, sqlq sqlExecutor, prepared 
 			gateway_request_id,
 			client_request_id,
 			attempt_ledger,
-			created_at
+			created_at,
+			codex_telemetry
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
 			$10, $11,
 			$12, $13, $14, $15,
 			$16, $17, $18, $19,
 			$20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73
 		)
 		ON CONFLICT (request_id, api_key_id) DO NOTHING
 	`, prepared.args...)
@@ -1387,6 +1397,7 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 	gatewayRequestID := nullString(log.GatewayRequestID)
 	clientRequestID := nullString(log.ClientRequestID)
 	attemptLedger := nullRequestAttemptLedgerJSON(log.AttemptLedger)
+	codexTelemetry := nullCodexTelemetryJSON(log.CodexTelemetry)
 	requestedModel := strings.TrimSpace(log.RequestedModel)
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(log.Model)
@@ -1478,6 +1489,7 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 			clientRequestID,
 			attemptLedger,
 			createdAt,
+			codexTelemetry,
 		},
 	}
 }
@@ -1491,6 +1503,14 @@ func nullRequestAttemptLedgerJSON(ledger *service.RequestAttemptLedger) any {
 		return nil
 	}
 	return string(payload)
+}
+
+func nullCodexTelemetryJSON(snapshot *codextelemetry.Snapshot) any {
+	raw := codextelemetry.Marshal(snapshot)
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }
 
 func usageLogBatchKey(requestID string, apiKeyID int64) string {

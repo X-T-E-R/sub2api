@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -18,8 +19,12 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (forwardResult *OpenAIForwardResult, forwardErr error) {
 	beginUpstreamResponseModelObservation(c)
+	if c != nil {
+		c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
+	}
+	defer func() { codexTelemetryAttemptFromContext(c).finish(forwardResult, forwardErr) }()
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
@@ -999,8 +1004,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		// Send request
+		telemetryAttempt := beginCodexHTTPAttempt(c, account)
 		upstreamStart := time.Now()
 		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if resp != nil {
+			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
+		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if headerGuard != nil && headerGuard.stopHeaderWait() {
 			if resp != nil && resp.Body != nil {

@@ -436,6 +436,13 @@ async function saveAllSettings() {
           {{ t('admin.ops.settings.advancedSettings') }}
         </summary>
         <div class="space-y-4 px-4 pb-4">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <label class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.ops.settings.codexTelemetry') }}</label>
+              <p class="mt-1 text-xs text-gray-500">{{ t('admin.ops.settings.codexTelemetryHint') }}</p>
+            </div>
+            <Toggle data-testid="codex-telemetry-toggle" :aria-label="t('admin.ops.settings.codexTelemetry')" :model-value="advancedSettings.codex_telemetry_enabled ?? false" @update:model-value="advancedSettings.codex_telemetry_enabled = $event" />
+          </div>
           <!-- 数据保留策略 -->
           <div class="space-y-3">
             <h5 class="text-xs font-semibold text-gray-700 dark:text-gray-300">{{ t('admin.ops.settings.dataRetention') }}</h5>

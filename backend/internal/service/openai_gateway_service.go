@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -247,6 +248,8 @@ type OpenAIForwardResult struct {
 	// response before any client-facing rewrite or protocol conversion.
 	UpstreamResponseModel         string
 	UpstreamResponseModelConflict bool
+	// CodexTelemetry is bounded upstream evidence, independent of model/billing decisions.
+	CodexTelemetry *codextelemetry.Snapshot
 	// UpstreamResponseServiceTier is the tier the upstream reports having used
 	// (response service_tier: "priority" / "default" / "flex" / ...); "" when not declared.
 	UpstreamResponseServiceTier string

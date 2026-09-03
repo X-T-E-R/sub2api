@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -373,8 +374,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			return nil, buildErr
 		}
 
+		telemetryAttempt := beginCodexHTTPAttempt(c, account)
 		upstreamStart := time.Now()
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if resp != nil {
+			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
+		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
@@ -524,6 +529,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		Model:                         reqModel,
 		UpstreamModel:                 upstreamPassthroughModel,
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
+		CodexTelemetry:                observedCodexTelemetry(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
 		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),

@@ -261,10 +261,11 @@ type openAIWSConn struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 
-	waiters       atomic.Int32
-	createdAtNano atomic.Int64
-	lastUsedNano  atomic.Int64
-	prewarmed     atomic.Bool
+	waiters                      atomic.Int32
+	createdAtNano                atomic.Int64
+	lastUsedNano                 atomic.Int64
+	prewarmed                    atomic.Bool
+	codexTelemetryHandshakeTaken atomic.Bool
 }
 
 func newOpenAIWSConn(id string, _ int64, ws openAIWSClientConn, handshakeHeaders http.Header) *openAIWSConn {

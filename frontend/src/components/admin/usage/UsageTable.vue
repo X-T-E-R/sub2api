@@ -248,12 +248,12 @@
                 <span v-else-if="row.semantic_output_seen === true && row.first_visible_output_ms == null" class="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300">{{ t('usage.semanticOutputNotCommitted') }}</span>
                 <span v-else-if="row.semantic_output_seen == null" data-testid="semantic-output-unknown" class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-400">{{ t('usage.semanticOutputUnknown') }}</span>
                 <button
-                  v-if="showAccountBilling && row.attempt_ledger_available"
+                  v-if="showAccountBilling && (row.attempt_ledger_available || row.codex_telemetry_available)"
                   type="button"
                   data-testid="usage-observability-button"
                   class="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-200 dark:bg-violet-500/20 dark:text-violet-300"
                   @click="emit('observabilityClick', row)"
-                >{{ t('usage.attemptSummary', { attempts: row.attempt_count ?? 0, switches: row.account_switch_count ?? 0 }) }}</button>
+                >{{ row.codex_telemetry_available ? t('usage.codexTelemetry.title') : t('usage.attemptSummary', { attempts: row.attempt_count ?? 0, switches: row.account_switch_count ?? 0 }) }}</button>
                 <span v-else-if="row.attempt_count != null" class="text-[10px] text-gray-500 dark:text-gray-400">{{ t('usage.attemptSummary', { attempts: row.attempt_count, switches: row.account_switch_count ?? 0 }) }}</span>
               </div>
             </div>

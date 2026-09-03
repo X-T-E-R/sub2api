@@ -699,6 +699,8 @@ export default {
         upstreamErrorRateMaxPercentHint: '上游错误率高于此值时显示为红色（默认：5%）',
         advancedSettings: '高级设置',
         dataRetention: '数据保留策略',
+        codexTelemetry: '采集 Codex 被动元数据',
+        codexTelemetryHint: '默认关闭。保存新请求和新 WS 回合已收到的元数据，每条 JSON 最多 4 KiB。数据随用量/Ops 记录清理；失败详情还需开启 Ops 监控。',
         enableCleanup: '启用数据清理',
         cleanupSchedule: '清理计划（Cron）',
         cleanupScheduleHint: '例如：0 2 * * * 表示每天凌晨2点',

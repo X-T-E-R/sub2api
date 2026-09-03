@@ -14,6 +14,8 @@
         </div>
       </dl>
 
+      <CodexTelemetryPanel v-if="detail.codex_telemetry" :telemetry="detail.codex_telemetry" />
+
       <div v-if="detail.attempt_ledger" class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h4 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('usage.observability.attempts') }}</h4>
@@ -61,6 +63,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import CodexTelemetryPanel from './CodexTelemetryPanel.vue'
 import { adminUsageAPI } from '@/api/admin/usage'
 import type { AdminUsageObservability } from '@/types'
 

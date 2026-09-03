@@ -40,6 +40,7 @@ type upstreamResponseModelObserver struct {
 
 	requestObservation *requestObservation
 	attemptSequence    int
+	codexTelemetry     *codexTelemetryAttempt
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {
@@ -73,6 +74,9 @@ func normalizeObservedUpstreamResponseModel(model string) string {
 }
 
 func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType string) {
+	if o != nil {
+		o.codexTelemetry.observe(payload, eventType)
+	}
 	if o != nil && o.requestObservation != nil {
 		o.requestObservation.observeOpenAI(o.attemptSequence, payload, eventType)
 	}

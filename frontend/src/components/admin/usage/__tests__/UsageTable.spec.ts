@@ -766,4 +766,19 @@ describe('admin UsageTable request observability', () => {
     expect(wrapper.find('[data-testid="handler-duration"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="semantic-output-unknown"]').text()).toContain('usage.semanticOutputUnknown')
   })
+
+  it('opens metadata-only WS details for admins without exposing the control to users', async () => {
+    const row = { ...latencyRow, attempt_ledger_available: false, codex_telemetry_available: true }
+    const wrapper = mount(UsageTable, {
+      props: { data: [row], columns: [{ key: 'latency', label: 'Latency' }] },
+      global: { stubs: { DataTable: DataTableLatencyStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    await wrapper.get('[data-testid="usage-observability-button"]').trigger('click')
+    expect(wrapper.emitted('observabilityClick')?.[0]?.[0]).toMatchObject({ codex_telemetry_available: true })
+    const userWrapper = mount(UsageTable, {
+      props: { data: [row], columns: [{ key: 'latency', label: 'Latency' }], showAccountBilling: false },
+      global: { stubs: { DataTable: DataTableLatencyStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    expect(userWrapper.find('[data-testid="usage-observability-button"]').exists()).toBe(false)
+  })
 })

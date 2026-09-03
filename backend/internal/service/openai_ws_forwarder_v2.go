@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -33,11 +34,13 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	attempt int,
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
-) (*OpenAIForwardResult, error) {
+) (forwardResult *OpenAIForwardResult, forwardErr error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	telemetryAttempt := beginCodexTelemetryAttempt(c, account, codextelemetry.WebSocket, false)
+	defer func() { telemetryAttempt.finish(forwardResult, forwardErr) }()
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
 	if err != nil {
@@ -212,6 +215,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}(),
 	})
 	if err != nil {
+		var telemetryDialErr *openAIWSDialError
+		if errors.As(err, &telemetryDialErr) {
+			telemetryAttempt.headers(telemetryDialErr.ResponseHeaders, codextelemetry.HTTPHeaders, telemetryDialErr.StatusCode)
+		}
 		var agentDialErr *openAIWSDialError
 		if s.isAgentIdentityAccount(ctx, account) && errors.As(err, &agentDialErr) && isAgentIdentityTaskInvalidWSDialError(agentDialErr) && agentTaskRecoveryTried != nil && !*agentTaskRecoveryTried {
 			*agentTaskRecoveryTried = true
@@ -331,6 +338,14 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	); err != nil {
 		return nil, err
 	}
+	// Prewarm frames are intentionally outside the generation collector.
+	telemetryAttempt = beginCodexTelemetryAttempt(c, account, codextelemetry.WebSocket, lease.codexTelemetryConnectionReused())
+	if generate, ok := payload["generate"].(bool); ok && !generate {
+		telemetryAttempt = nil
+		c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
+	}
+	telemetryAttempt.headers(lease.takeCodexTelemetryHandshake(telemetryAttempt != nil), codextelemetry.WSUpgradeHeaders, http.StatusSwitchingProtocols)
+	responseModelObserver.codexTelemetry = telemetryAttempt
 
 	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()

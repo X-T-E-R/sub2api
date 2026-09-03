@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
@@ -875,9 +876,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		if err != nil {
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
+		telemetryAttempt := beginCodexTelemetryAttempt(c, account, codextelemetry.WebSocket, false)
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
 		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
 		cancelDial()
+		if err != nil {
+			telemetryAttempt.headers(handshakeHeaders, codextelemetry.HTTPHeaders, statusCode)
+			telemetryAttempt.finish(nil, err)
+		}
 		if err == nil {
 			break
 		}
@@ -921,8 +927,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	telemetryFrameConn := &codexTelemetryFrameConn{inner: upstreamFrameConn, c: c, account: account, headers: handshakeHeaders}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
-		inner:             upstreamFrameConn,
+		inner:             telemetryFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
 		deadlineChanged:   make(chan struct{}, 1),
 		resolveDeadline: func(payload []byte) openAIWSPassthroughFirstOutputDeadline {
@@ -1210,6 +1217,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					Model:                         turnRequestModel,
 					UpstreamModel:                 openAIWSDifferentModel(turnRequestModel, turnUpstreamModel),
 					UpstreamResponseModel:         turn.ResponseModel,
+					CodexTelemetry:                telemetryFrameConn.take(turn.RequestID),
 					UpstreamResponseModelConflict: turn.ResponseModelConflict,
 					UpstreamResponseServiceTier:   normalizeObservedOpenAIServiceTier(turn.ResponseServiceTier),
 					ServiceTier:                   usageMeta.serviceTier.Load(),
