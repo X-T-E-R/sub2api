@@ -193,7 +193,7 @@ func TestCodexTelemetryRealWebSocketModesAndTurnToggle(t *testing.T) {
 					return
 				}
 				upgrades.Add(1)
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				for {
 					if _, _, err := conn.ReadMessage(); err != nil {
 						return
@@ -262,7 +262,7 @@ func TestCodexTelemetryRealWebSocketModesAndTurnToggle(t *testing.T) {
 				})
 				defer server.Close()
 				client := dialPassthroughLifecycleClient(t, server)
-				defer client.CloseNow()
+				defer func() { _ = client.CloseNow() }()
 				for turn := 1; turn <= 3; turn++ {
 					if turn > 1 {
 						enabled.Store(turn == 3)
@@ -314,7 +314,7 @@ func TestCodexTelemetryRealWS429BeforeResponseCreated(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
 				}
@@ -358,7 +358,7 @@ func TestCodexTelemetryRealWS429BeforeResponseCreated(t *testing.T) {
 				})
 				defer server.Close()
 				client := dialPassthroughLifecycleClient(t, server)
-				defer client.CloseNow()
+				defer func() { _ = client.CloseNow() }()
 				select {
 				case c = <-contexts:
 				case <-time.After(3 * time.Second):

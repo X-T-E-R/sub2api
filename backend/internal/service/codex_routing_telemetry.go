@@ -101,9 +101,10 @@ func (a *codexTelemetryAttempt) observe(payload []byte, eventType string, comple
 	if eventID != "" && a.collector.ResponseID() != "" && eventID != a.collector.ResponseID() {
 		return
 	}
-	if eventType == "error" || eventType == "response.failed" || eventType == "response.incomplete" || eventType == "response.cancelled" || eventType == "response.canceled" {
+	switch eventType {
+	case "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		a.failed = true
-	} else if eventType == "response.completed" || eventType == "response.done" {
+	case "response.completed", "response.done":
 		a.failed = false
 	}
 }

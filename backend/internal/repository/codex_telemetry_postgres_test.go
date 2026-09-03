@@ -53,7 +53,7 @@ func TestCodexTelemetryPostgresPersistenceAndCleanup(t *testing.T) {
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_, err = conn.ExecContext(ctx, `CREATE TEMP TABLE usage_logs (LIKE public.usage_logs INCLUDING DEFAULTS INCLUDING INDEXES)`)
 	require.NoError(t, err)
 	// The prior schema has no telemetry column; the additive migration preserves
@@ -173,7 +173,7 @@ func TestCodexTelemetryPostgresPersistenceAndCleanup(t *testing.T) {
 	// The same additive column propagates to an existing monthly partition.
 	partitionConn, err := db.Conn(ctx)
 	require.NoError(t, err)
-	defer partitionConn.Close()
+	defer func() { _ = partitionConn.Close() }()
 	_, err = partitionConn.ExecContext(ctx, `CREATE TEMP TABLE usage_logs (id BIGINT, created_at TIMESTAMPTZ) PARTITION BY RANGE (created_at);
 CREATE TEMP TABLE codex_usage_partition PARTITION OF usage_logs FOR VALUES FROM ('2020-01-01') TO ('2030-01-01')`)
 	require.NoError(t, err)

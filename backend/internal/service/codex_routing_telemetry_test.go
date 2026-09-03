@@ -75,7 +75,9 @@ func TestCodexTelemetryOpsOnlyEnrichesAdmittedFailureAndOwnsData(t *testing.T) {
 	frozen := SnapshotOpsUpstreamErrors(c)
 	require.Len(t, frozen, 1)
 	stored, _ := c.Get(OpsUpstreamErrorsKey)
-	stored.([]*OpsUpstreamErrorEvent)[0].CodexTelemetry.Observations[0].ActiveLimit = "later-mutation"
+	storedEvents, ok := stored.([]*OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	storedEvents[0].CodexTelemetry.Observations[0].ActiveLimit = "later-mutation"
 	require.Equal(t, "new-account", frozen[0].CodexTelemetry.Observations[0].ActiveLimit)
 }
 
@@ -107,7 +109,7 @@ func TestCodexTelemetryOpsRecordBudget(t *testing.T) {
 func TestCodexTelemetryFrameConnIdleLatePrewarmAndSnapshots(t *testing.T) {
 	c, _ := telemetryContext(true)
 	upstream := newStagedPassthroughConn()
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	conn := &codexTelemetryFrameConn{inner: upstream, c: c, account: telemetryAccount("http://127.0.0.1:1"), headers: http.Header{"X-Codex-Active-Limit": {"handshake"}}}
 	ctx := context.Background()
 	observe := func(frame string) {
@@ -144,7 +146,7 @@ func TestCodexTelemetryFrameConnIdleLatePrewarmAndSnapshots(t *testing.T) {
 func TestCodexTelemetryFrameConnAmbiguousHandshakeSettlement(t *testing.T) {
 	c, _ := telemetryContext(true)
 	upstream := newStagedPassthroughConn()
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	conn := &codexTelemetryFrameConn{inner: upstream, c: c, account: telemetryAccount("http://127.0.0.1:1"), headers: http.Header{"X-Codex-Active-Limit": {"real-handshake"}}}
 	ctx := context.Background()
 	observe := func(frame string) {
@@ -185,7 +187,7 @@ func TestCodexTelemetryFrameConnAmbiguousHandshakeSettlement(t *testing.T) {
 func TestCodexTelemetryFrameConnDoesNotSettleUnboundEventAsConnectionHeader(t *testing.T) {
 	c, _ := telemetryContext(true)
 	upstream := newStagedPassthroughConn()
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	conn := &codexTelemetryFrameConn{inner: upstream, c: c, account: telemetryAccount("http://127.0.0.1:1"), headers: http.Header{"X-Codex-Active-Limit": {"real-handshake"}}}
 	ctx := context.Background()
 	require.NoError(t, conn.WriteFrame(ctx, coderws.MessageText, []byte(`{"type":"response.create"}`)))

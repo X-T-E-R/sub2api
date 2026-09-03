@@ -23,7 +23,7 @@ func TestCodexTelemetryPostgresOpsRetention(t *testing.T) {
 	require.Equal(t, "/codex_telemetry_test", target.Path)
 	db, err := sql.Open("postgres", raw)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// One physical connection keeps all mutations in its private temporary table.
 	db.SetMaxOpenConns(1)
 	ctx := context.Background()
