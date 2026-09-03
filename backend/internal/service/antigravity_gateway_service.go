@@ -492,6 +492,17 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	return opts
 }
 
+func (s *AntigravityGatewayService) getClaudeMessagesTransformOptions(ctx context.Context) antigravity.TransformOptions {
+	opts := s.getClaudeTransformOptions(ctx)
+	opts.GeminiMessages.Enabled = true
+	if s.settingService != nil && s.settingService.cfg != nil {
+		policy := s.settingService.cfg.Gateway.AntigravityGeminiMessages
+		opts.GeminiMessages.Enabled = !policy.Disabled
+		opts.GeminiMessages.Models = policy.Models
+	}
+	return opts
+}
+
 // extractTextFromSSEResponse 从 SSE 流式响应中提取文本
 func extractTextFromSSEResponse(respBody []byte) string {
 	var texts []string

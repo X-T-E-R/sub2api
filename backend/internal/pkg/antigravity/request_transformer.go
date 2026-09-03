@@ -45,6 +45,8 @@ type TransformOptions struct {
 	// 为空时使用默认模板（包含 [IDENTITY_PATCH] 及 SYSTEM_PROMPT_BEGIN 标记）。
 	IdentityPatch string
 	EnableMCPXML  bool
+	// GeminiMessages scopes the Messages turn adapter to final Gemini model IDs.
+	GeminiMessages GeminiMessagesCompatibilityOptions
 }
 
 func DefaultTransformOptions() TransformOptions {
@@ -105,11 +107,28 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// 只有 Gemini 模型支持 dummy thought workaround
 	// Claude 模型通过 Vertex/Google API 需要有效的 thought signatures
 	allowDummyThought := strings.HasPrefix(targetModel, "gemini-")
+	geminiOptions := geminiMessagesConversionOptions{enabled: opts.GeminiMessages.enabledForModel(targetModel)}
+	if geminiOptions.enabled {
+		geminiOptions.toolResultImages = supportsGeminiToolResultImages(targetModel)
+		geminiOptions.terminalMessage = effectiveGeminiTerminalMessage(claudeReq.Messages)
+	}
+	if geminiOptions.enabled && geminiOptions.terminalMessage >= 0 {
+		last := geminiOptions.terminalMessage
+		if err := validateGeminiMessageContent(claudeReq.Messages[last].Content, last, geminiOptions.toolResultImages); err != nil {
+			return nil, err
+		}
+	}
 
 	// 1. 构建 contents
-	contents, messageSystemParts, strippedThinking, err := buildContents(claudeReq.Messages, toolIDToName, isThinkingEnabled, allowDummyThought)
+	contents, messageSystemParts, strippedThinking, err := buildContents(claudeReq.Messages, toolIDToName, isThinkingEnabled, allowDummyThought, geminiOptions)
 	if err != nil {
 		return nil, fmt.Errorf("build contents: %w", err)
+	}
+	if geminiOptions.enabled {
+		contents, err = finalizeGeminiMessages(claudeReq.Messages, contents, geminiOptions.toolResultImages)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. 构建 systemInstruction（使用 targetModel 而非原始请求模型，确保身份注入基于最终模型）
@@ -375,10 +394,11 @@ func buildSystemInstruction(system json.RawMessage, modelName string, opts Trans
 }
 
 // buildContents 构建 contents
-func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought bool) ([]GeminiContent, []GeminiPart, bool, error) {
+func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiContent, []GeminiPart, bool, error) {
 	var contents []GeminiContent
 	var systemParts []GeminiPart
 	strippedThinking := false
+	lastSourceMessage := -1
 
 	for i, msg := range messages {
 		role := msg.Role
@@ -386,7 +406,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			role = "model"
 		}
 
-		parts, strippedThisMsg, err := buildParts(msg.Content, toolIDToName, allowDummyThought)
+		parts, strippedThisMsg, err := buildPartsWithCompatibility(msg.Content, toolIDToName, allowDummyThought, geminiOptions)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("build parts for message %d: %w", i, err)
 		}
@@ -398,11 +418,21 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			systemParts = append(systemParts, parts...)
 			continue
 		}
+		if geminiOptions.enabled && role == "user" && i == geminiOptions.terminalMessage && emptyGeminiTextParts(parts) {
+			if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultImages); err != nil {
+				return nil, nil, false, err
+			}
+			text := geminiEmptyUserMessage
+			for _, part := range parts {
+				text += part.Text
+			}
+			parts = []GeminiPart{{Text: text}}
+		}
 
 		// 只有 Gemini 模型支持 dummy thinking block workaround
 		// 只对最后一条 assistant 消息添加（Pre-fill 场景）
 		// 历史 assistant 消息不能添加没有 signature 的 dummy thinking block
-		if allowDummyThought && role == "model" && isThinkingEnabled && i == len(messages)-1 {
+		if allowDummyThought && !geminiOptions.enabled && role == "model" && isThinkingEnabled && i == len(messages)-1 {
 			hasThoughtPart := false
 			for _, p := range parts {
 				if p.Thought {
@@ -428,6 +458,13 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			Role:  role,
 			Parts: parts,
 		})
+		lastSourceMessage = i
+	}
+	// Hoisted or dropped envelopes can expose a different terminal user source.
+	if geminiOptions.enabled && lastSourceMessage >= 0 && lastSourceMessage != geminiOptions.terminalMessage && contents[len(contents)-1].Role == "user" {
+		if err := validateGeminiMessageContent(messages[lastSourceMessage].Content, lastSourceMessage, geminiOptions.toolResultImages); err != nil {
+			return nil, nil, false, err
+		}
 	}
 
 	return contents, systemParts, strippedThinking, nil
@@ -441,13 +478,19 @@ const DummyThoughtSignature = "skip_thought_signature_validator"
 // buildParts 构建消息的 parts
 // allowDummyThought: 只有 Gemini 模型支持 dummy thought signature
 func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDummyThought bool) ([]GeminiPart, bool, error) {
+	return buildPartsWithCompatibility(content, toolIDToName, allowDummyThought, geminiMessagesConversionOptions{})
+}
+
+func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[string]string, allowDummyThought bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiPart, bool, error) {
 	var parts []GeminiPart
 	strippedThinking := false
 
 	// 尝试解析为字符串
 	var textContent string
 	if err := json.Unmarshal(content, &textContent); err == nil {
-		if textContent != "(no content)" && strings.TrimSpace(textContent) != "" {
+		if geminiOptions.enabled && strings.TrimSpace(textContent) != "" {
+			parts = append(parts, GeminiPart{Text: textContent})
+		} else if !geminiOptions.enabled && textContent != "(no content)" && strings.TrimSpace(textContent) != "" {
 			parts = append(parts, GeminiPart{Text: strings.TrimSpace(textContent)})
 		}
 		return parts, false, nil
@@ -462,7 +505,8 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
-			if block.Text != "(no content)" && strings.TrimSpace(block.Text) != "" {
+			if (geminiOptions.enabled && strings.TrimSpace(block.Text) != "") ||
+				(!geminiOptions.enabled && block.Text != "(no content)" && strings.TrimSpace(block.Text) != "") {
 				parts = append(parts, GeminiPart{Text: block.Text})
 			}
 
@@ -534,15 +578,20 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 			}
 
 			// 解析 content
-			resultContent := parseToolResultContent(block.Content, block.IsError)
+			resultContent, imageParts := parseToolResultContent(block.Content, block.IsError, geminiOptions)
+			resultKey := "result"
+			if geminiOptions.enabled && block.IsError {
+				resultKey = "error"
+			}
 
 			parts = append(parts, GeminiPart{
 				FunctionResponse: &GeminiFunctionResponse{
 					Name: funcName,
 					Response: map[string]any{
-						"result": resultContent,
+						resultKey: resultContent,
 					},
-					ID: block.ToolUseID,
+					ID:    block.ToolUseID,
+					Parts: imageParts,
 				},
 			})
 		}
@@ -552,47 +601,60 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 }
 
 // parseToolResultContent 解析 tool_result 的 content
-func parseToolResultContent(content json.RawMessage, isError bool) string {
+func parseToolResultContent(content json.RawMessage, isError bool, geminiOptions geminiMessagesConversionOptions) (string, []GeminiFunctionResponsePart) {
 	if len(content) == 0 {
-		if isError {
-			return "Tool execution failed with no output."
+		if geminiOptions.enabled {
+			return "", nil
 		}
-		return "Command executed successfully."
+		if isError {
+			return "Tool execution failed with no output.", nil
+		}
+		return "Command executed successfully.", nil
 	}
 
 	// 尝试解析为字符串
 	var str string
 	if err := json.Unmarshal(content, &str); err == nil {
-		if strings.TrimSpace(str) == "" {
+		if !geminiOptions.enabled && strings.TrimSpace(str) == "" {
 			if isError {
-				return "Tool execution failed with no output."
+				return "Tool execution failed with no output.", nil
 			}
-			return "Command executed successfully."
+			return "Command executed successfully.", nil
 		}
-		return str
+		return str, nil
 	}
 
 	// 尝试解析为数组
 	var arr []map[string]any
 	if err := json.Unmarshal(content, &arr); err == nil {
 		var texts []string
+		var imageParts []GeminiFunctionResponsePart
 		for _, item := range arr {
 			if text, ok := item["text"].(string); ok {
 				texts = append(texts, text)
 			}
+			if geminiOptions.toolResultImages && item["type"] == "image" {
+				if source, ok := item["source"].(map[string]any); ok && source["type"] == "base64" {
+					mimeType, _ := source["media_type"].(string)
+					data, _ := source["data"].(string)
+					imageParts = append(imageParts, GeminiFunctionResponsePart{
+						InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
+					})
+				}
+			}
 		}
 		result := strings.Join(texts, "\n")
-		if strings.TrimSpace(result) == "" {
+		if !geminiOptions.enabled && strings.TrimSpace(result) == "" {
 			if isError {
-				return "Tool execution failed with no output."
+				return "Tool execution failed with no output.", nil
 			}
-			return "Command executed successfully."
+			return "Command executed successfully.", nil
 		}
-		return result
+		return result, imageParts
 	}
 
 	// 返回原始 JSON
-	return string(content)
+	return string(content), nil
 }
 
 // buildGenerationConfig 构建 generationConfig

@@ -970,6 +970,8 @@ type GatewayConfig struct {
 	ProxyProbeResponseReadMaxBytes int64 `mapstructure:"proxy_probe_response_read_max_bytes"`
 	// Gemini 上游响应头调试日志开关（默认关闭，避免高频日志开销）
 	GeminiDebugResponseHeaders bool `mapstructure:"gemini_debug_response_headers"`
+	// AntigravityGeminiMessages controls Messages turn compatibility for Gemini targets.
+	AntigravityGeminiMessages GatewayAntigravityGeminiMessagesConfig `mapstructure:"antigravity_gemini_messages"`
 	// ConnectionPoolIsolation: 上游连接池隔离策略（proxy/account/account_proxy）
 	ConnectionPoolIsolation string `mapstructure:"connection_pool_isolation"`
 	// ForceCodexCLI: 强制将 OpenAI `/v1/responses` 请求按 Codex CLI 处理。
@@ -1097,6 +1099,14 @@ type GatewayConfig struct {
 	// CNProviders: 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）的余额检测配置。
 	// 仅作用于 payg（按量付费）账号：周期探测余额，低于阈值则临时停调。
 	CNProviders GatewayCNProvidersConfig `mapstructure:"cn_providers"`
+}
+
+type GatewayAntigravityGeminiMessagesConfig struct {
+	// Disabled restores the legacy Messages conversion; compatibility is enabled by default.
+	Disabled bool `mapstructure:"disabled"`
+	// Models optionally restricts compatibility to exact final Gemini model IDs.
+	// An empty list applies to all Gemini targets. Other model families are unchanged.
+	Models []string `mapstructure:"models"`
 }
 
 // GatewayGrokConfig holds Grok-specific gateway scheduling knobs.
@@ -2475,6 +2485,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_concurrency.wait_timeout_seconds", 30)
 	viper.SetDefault("gateway.image_concurrency.max_waiting_requests", 100)
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
+	viper.SetDefault("gateway.antigravity_gemini_messages.disabled", false)
+	viper.SetDefault("gateway.antigravity_gemini_messages.models", []string{})
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
