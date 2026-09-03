@@ -1,0 +1,118 @@
+name: Publish passive Codex metadata image
+
+on:
+  push:
+    tags:
+      - "xter-image-codex-metadata-e4d480acd"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SOURCE_COMMIT: e4d480acdb06c9c26a3e3fe2245d9bcdd3898980
+  VERSION: codex-metadata-e4d480acd
+  WORKFLOW_FILE: .github/workflows/publish-codex-metadata-image.yml
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tagged workflow commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify immutable source boundary
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_ref="refs/tags/xter-image-codex-metadata-e4d480acd"
+          if [[ "${GITHUB_REF}" != "${expected_ref}" ]]; then
+            echo "Unexpected ref: ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "${head_commit}" != "${GITHUB_SHA}" ]]; then
+            echo "Checked-out commit does not match the triggering commit." >&2
+            exit 1
+          fi
+
+          read -r -a lineage <<< "$(git rev-list --parents -n 1 HEAD)"
+          if (( ${#lineage[@]} != 2 )); then
+            echo "Workflow commit must have exactly one parent." >&2
+            exit 1
+          fi
+
+          parent_commit="${lineage[1]}"
+          if [[ "${parent_commit}" != "${SOURCE_COMMIT}" ]]; then
+            echo "Workflow parent is not the approved source commit." >&2
+            exit 1
+          fi
+
+          mapfile -t changed_files < <(
+            git diff --no-renames --name-only "${parent_commit}" HEAD --
+          )
+          if (( ${#changed_files[@]} != 1 )) || [[ "${changed_files[0]}" != "${WORKFLOW_FILE}" ]]; then
+            echo "Workflow commit must change only ${WORKFLOW_FILE}." >&2
+            printf 'Changed path: %s\n' "${changed_files[@]}" >&2
+            exit 1
+          fi
+
+          echo "source_commit=${parent_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/x-t-e-r/sub2api:codex-metadata-e4d480acd
+            ghcr.io/x-t-e-r/sub2api:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/x-t-e-r/sub2api
+            org.opencontainers.image.revision=${{ steps.verify.outputs.source_commit }}
+            org.opencontainers.image.title=Sub2API passive Codex metadata
+            org.opencontainers.image.description=Sub2API image with bounded passive Codex metadata capture
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ steps.verify.outputs.source_commit }}
+          cache-from: |
+            type=gha,scope=codex-metadata-e4d480acd
+            type=gha,scope=gemini-messages-cc70cf805
+          cache-to: type=gha,mode=max,scope=codex-metadata-e4d480acd
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo '### Published images'
+            echo '```text'
+            echo 'ghcr.io/x-t-e-r/sub2api:codex-metadata-e4d480acd'
+            echo 'ghcr.io/x-t-e-r/sub2api:latest'
+            echo '```'
+            echo 'Source commit: `${{ steps.verify.outputs.source_commit }}`'
+            echo 'Digest: `${{ steps.build.outputs.digest }}`'
+          } >> "${GITHUB_STEP_SUMMARY}"
