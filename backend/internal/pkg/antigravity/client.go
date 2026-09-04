@@ -619,8 +619,10 @@ func extractProjectIDFromOnboardResponse(resp map[string]any) string {
 
 // ModelQuotaInfo 模型配额信息
 type ModelQuotaInfo struct {
-	RemainingFraction float64 `json:"remainingFraction"`
-	ResetTime         string  `json:"resetTime,omitempty"`
+	// RemainingFraction is optional because a quotaInfo object without the
+	// fraction is not equivalent to an explicitly exhausted quota.
+	RemainingFraction *float64 `json:"remainingFraction,omitempty"`
+	ResetTime         string   `json:"resetTime,omitempty"`
 }
 
 // ModelInfo 模型信息

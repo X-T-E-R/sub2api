@@ -288,51 +288,63 @@
       </div>
 
       <!-- Usage data from API -->
-      <div v-else-if="hasAntigravityQuotaFromAPI" class="space-y-1">
-        <!-- Gemini 3 Pro -->
+      <div v-else-if="antigravityQuotaRows.length > 0" class="space-y-1">
         <UsageProgressBar
-          v-if="antigravity3ProUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Pro')"
-          :utilization="antigravity3ProUsageFromAPI.utilization"
-          :resets-at="antigravity3ProUsageFromAPI.resetTime"
-          color="indigo"
+          v-for="row in antigravityQuotaRows"
+          :key="row.key"
+          :label="antigravityQuotaLabel(row)"
+          :label-title="row.title"
+          :utilization="row.utilization"
+          :resets-at="row.resetTime"
+          :color="antigravityQuotaColor(row)"
         />
 
-        <!-- Gemini 3 Flash -->
-        <UsageProgressBar
-          v-if="antigravity3FlashUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Flash')"
-          :utilization="antigravity3FlashUsageFromAPI.utilization"
-          :resets-at="antigravity3FlashUsageFromAPI.resetTime"
-          color="emerald"
-        />
-
-        <!-- Gemini 3 Image -->
-        <UsageProgressBar
-          v-if="antigravity3ImageUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Image')"
-          :utilization="antigravity3ImageUsageFromAPI.utilization"
-          :resets-at="antigravity3ImageUsageFromAPI.resetTime"
-          color="purple"
-        />
-
-        <!-- Claude -->
-        <UsageProgressBar
-          v-if="antigravityClaudeUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.claude')"
-          :utilization="antigravityClaudeUsageFromAPI.utilization"
-          :resets-at="antigravityClaudeUsageFromAPI.resetTime"
-          color="amber"
-        />
+        <div v-if="antigravityQuotaIsPartial" class="text-[10px] text-amber-600 dark:text-amber-400">
+          {{ t('admin.accounts.usageWindow.antigravityPartial') }}
+        </div>
+        <div v-if="usageInfo?.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
+          {{ t('admin.accounts.usageWindow.antigravityStale') }}
+        </div>
 
         <div v-if="aiCreditsDisplay" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
           💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
         </div>
       </div>
-      <div v-else-if="aiCreditsDisplay" class="text-[10px] text-gray-500 dark:text-gray-400">
-        💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
+      <div v-else-if="usageInfo" class="space-y-1">
+        <div class="text-[10px] text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.usageWindow.antigravityUnavailable') }}
+        </div>
+        <div v-if="usageInfo.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
+          {{ t('admin.accounts.usageWindow.antigravityStale') }}
+        </div>
+        <div v-if="aiCreditsDisplay" class="text-[10px] text-gray-500 dark:text-gray-400">
+          💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
+        </div>
       </div>
       <div v-else class="text-xs text-gray-400">-</div>
+
+      <button
+        type="button"
+        class="mt-1 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+        :disabled="activeQueryLoading"
+        @click="loadActiveUsage"
+      >
+        <svg
+          class="h-2.5 w-2.5"
+          :class="{ 'animate-spin': activeQueryLoading }"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+          />
+        </svg>
+        {{ t('admin.accounts.usageWindow.activeQuery') }}
+      </button>
     </template>
 
     <!-- Grok OAuth accounts: passive xAI quota headers + local Sub2API usage -->
@@ -642,6 +654,12 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import {
+  buildAntigravityQuotaRows,
+  getAntigravityTier,
+  hasAntigravityIneligibleTier,
+  type AntigravityQuotaRow
+} from '@/utils/antigravityUsage'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
@@ -785,106 +803,51 @@ const shouldLazyLoadOnMobile = computed(() => {
   return shouldFetchUsage.value && !isDesktopViewport.value
 })
 
-// Antigravity quota types (用于 API 返回的数据)
-interface AntigravityUsageResult {
-  utilization: number
-  resetTime: string | null
-}
-
 // ===== Antigravity quota from API (usageInfo.antigravity_quota) =====
 
-// 检查是否有从 API 获取的配额数据
-const hasAntigravityQuotaFromAPI = computed(() => {
-  return usageInfo.value?.antigravity_quota && Object.keys(usageInfo.value.antigravity_quota).length > 0
-})
+const antigravityQuotaRows = computed(() => buildAntigravityQuotaRows(usageInfo.value))
 
-// 从 API 配额数据中获取使用率（多模型取最高使用率）
-const getAntigravityUsageFromAPI = (
-  modelNames: string[]
-): AntigravityUsageResult | null => {
-  const quota = usageInfo.value?.antigravity_quota
-  if (!quota) return null
+const antigravityQuotaIsPartial = computed(() =>
+  usageInfo.value?.antigravity_quota_state === 'partial'
+)
 
-  let maxUtilization = 0
-  let earliestReset: string | null = null
-
-  for (const model of modelNames) {
-    const modelQuota = quota[model]
-    if (!modelQuota) continue
-
-    if (modelQuota.utilization > maxUtilization) {
-      maxUtilization = modelQuota.utilization
-    }
-    if (modelQuota.reset_time) {
-      if (!earliestReset || modelQuota.reset_time < earliestReset) {
-        earliestReset = modelQuota.reset_time
-      }
-    }
-  }
-
-  // 如果没有找到任何匹配的模型
-  if (maxUtilization === 0 && earliestReset === null) {
-    const hasAnyData = modelNames.some((m) => quota[m])
-    if (!hasAnyData) return null
-  }
-
-  return {
-    utilization: maxUtilization,
-    resetTime: earliestReset
+const antigravityQuotaLabel = (row: AntigravityQuotaRow): string => {
+  if (row.compactLabel) return row.compactLabel
+  switch (row.family) {
+    case 'gemini-pro': return t('admin.accounts.usageWindow.geminiQuotaPro')
+    case 'gemini-flash': return t('admin.accounts.usageWindow.geminiQuotaFlash')
+    case 'gemini-image': return t('admin.accounts.usageWindow.geminiQuotaImage')
+    case 'claude': return t('admin.accounts.usageWindow.claude')
+    default: return row.key
   }
 }
 
-// Gemini 3 Pro from API
-const antigravity3ProUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI(['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview'])
-)
-
-// Gemini 3 Flash from API
-const antigravity3FlashUsageFromAPI = computed(() => getAntigravityUsageFromAPI(['gemini-3-flash']))
-
-// Gemini Image from API
-const antigravity3ImageUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI(['gemini-2.5-flash-image', 'gemini-3.1-flash-image', 'gemini-3-pro-image'])
-)
-
-// Claude from API (all Claude model variants)
-const antigravityClaudeUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI([
-    'claude-fable-5',
-    'claude-sonnet-4-5', 'claude-opus-4-5-thinking',
-    'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking',
-    'claude-opus-4-7', 'claude-opus-4-8',
-  ])
-)
+const antigravityQuotaColor = (row: AntigravityQuotaRow): 'indigo' | 'emerald' | 'purple' | 'amber' => {
+  switch (row.family) {
+    case 'gemini-pro': return 'indigo'
+    case 'gemini-flash': return 'emerald'
+    case 'gemini-image': return 'purple'
+    default: return 'amber'
+  }
+}
 
 const aiCreditsDisplay = computed(() => {
   const credits = usageInfo.value?.ai_credits
   if (!credits || credits.length === 0) return null
-  const total = credits.reduce((sum, credit) => sum + (credit.amount ?? 0), 0)
-  if (total <= 0) return null
+
+  const amounts = credits
+    .map((credit) => credit.amount)
+    .filter((amount): amount is number => typeof amount === 'number' && Number.isFinite(amount))
+  if (amounts.length === 0) return t('common.unknown')
+
+  const total = amounts.reduce((sum, amount) => sum + amount, 0)
   return total.toFixed(0)
 })
 
-// Antigravity 账户类型（从 load_code_assist 响应中提取）
+// Antigravity 账户类型：实时 usage 结果优先，账号 extra 仅作加载前兼容回退。
 const antigravityTier = computed(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
-  if (!extra) return null
-
-  const loadCodeAssist = extra.load_code_assist as Record<string, unknown> | undefined
-  if (!loadCodeAssist) return null
-
-  // 优先取 paidTier，否则取 currentTier
-  const paidTier = loadCodeAssist.paidTier as Record<string, unknown> | undefined
-  if (paidTier && typeof paidTier.id === 'string') {
-    return paidTier.id
-  }
-
-  const currentTier = loadCodeAssist.currentTier as Record<string, unknown> | undefined
-  if (currentTier && typeof currentTier.id === 'string') {
-    return currentTier.id
-  }
-
-  return null
+  return getAntigravityTier(usageInfo.value, extra)
 })
 
 // Gemini 账户类型（从 credentials 中提取）
@@ -1259,7 +1222,10 @@ const antigravityTierLabel = computed(() => {
     case 'g1-ultra-tier':
       return t('admin.accounts.tier.ultra')
     default:
-      return null
+      if (antigravityTier.value) return antigravityTier.value
+      return usageInfo.value?.antigravity_subscription_state === 'unavailable'
+        ? t('common.unknown')
+        : null
   }
 })
 
@@ -1273,20 +1239,14 @@ const antigravityTierClass = computed(() => {
     case 'g1-ultra-tier':
       return 'bg-purple-100 text-purple-600 dark:bg-purple-900/40 dark:text-purple-300'
     default:
-      return ''
+      return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
   }
 })
 
 // 检测账户是否有不合格状态（ineligibleTiers）
 const hasIneligibleTiers = computed(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
-  if (!extra) return false
-
-  const loadCodeAssist = extra.load_code_assist as Record<string, unknown> | undefined
-  if (!loadCodeAssist) return false
-
-  const ineligibleTiers = loadCodeAssist.ineligibleTiers as unknown[] | undefined
-  return Array.isArray(ineligibleTiers) && ineligibleTiers.length > 0
+  return hasAntigravityIneligibleTier(usageInfo.value, extra)
 })
 
 // Antigravity 403 forbidden 状态
@@ -1334,8 +1294,13 @@ const copyValidationURL = async () => {
   }
 }
 
-const isAnthropicOAuthOrSetupToken = computed(() => {
-  return props.account.platform === 'anthropic' && (props.account.type === 'oauth' || props.account.type === 'setup-token')
+const usesPassiveUsageOnLoad = computed(() => {
+  return (
+    props.account.platform === 'anthropic' &&
+    (props.account.type === 'oauth' || props.account.type === 'setup-token')
+  ) || (
+    props.account.platform === 'antigravity' && props.account.type === 'oauth'
+  )
 })
 
 const requestParentBatchUsage = (options?: { force?: boolean }) => {
@@ -1358,7 +1323,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   }
 
   // Check cache
-  if (!options?.bypassCache) {
+  if (!options?.bypassCache && props.account.platform !== 'antigravity') {
     const cached = _usageCache.get(props.account.id)
     if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
       usageInfo.value = cached.data
@@ -1371,9 +1336,9 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   error.value = null
 
   try {
-		const fetchFn = () => options?.source
-			? adminAPI.accounts.getUsage(props.account.id, options.source, options.bypassCache === true)
-			: adminAPI.accounts.getUsage(props.account.id)
+    const fetchFn = () => options?.source
+      ? adminAPI.accounts.getUsage(props.account.id, options.source, options.bypassCache === true)
+      : adminAPI.accounts.getUsage(props.account.id)
     const result = await enqueueUsageRequest(props.account, fetchFn)
     if (!unmounted.value) {
       usageInfo.value = result
@@ -1442,7 +1407,10 @@ const attachVisibilityObserver = () => {
 const loadActiveUsage = async () => {
   activeQueryLoading.value = true
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    const result = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    usageInfo.value = result
+    error.value = null
+    _usageCache.set(props.account.id, { data: result, ts: Date.now() })
   } catch (e: any) {
     console.error('Failed to load active usage:', e)
   } finally {
@@ -1572,7 +1540,7 @@ onMounted(() => {
   }
 
   if (!shouldAutoLoadUsageOnMount.value) return
-  const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
+  const source = usesPassiveUsageOnLoad.value ? 'passive' : undefined
   requestAutoLoad(source)
 })
 
@@ -1632,7 +1600,7 @@ watch(
       return
     }
 
-    const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
+    const source = usesPassiveUsageOnLoad.value ? 'passive' : undefined
     _usageCache.delete(props.account.id)
     loadUsage({ source, bypassCache: true }).catch((e) => {
       console.error('Failed to refresh usage after manual refresh:', e)

@@ -1295,8 +1295,21 @@ export interface UsageProgress {
 // Antigravity 单个模型的配额信息
 export interface AntigravityModelQuota {
   utilization: number // 使用率 0-100
-  reset_time: string  // 重置时间 ISO8601
+  reset_time?: string | null // 重置时间 ISO8601；缺失表示未知
 }
+
+export interface AntigravityModelDetail {
+  display_name?: string
+  supports_images?: boolean
+  supports_thinking?: boolean
+  thinking_budget?: number
+  recommended?: boolean
+  max_tokens?: number
+  max_output_tokens?: number
+  supported_mime_types?: Record<string, boolean>
+}
+
+export type AntigravityObservationState = 'available' | 'partial' | 'unavailable'
 
 export interface GrokQuotaWindow {
   limit?: number | null
@@ -1343,7 +1356,7 @@ export interface GrokBillingSummary {
 
 export interface AccountUsageInfo {
   source?: 'passive' | 'active'
-  updated_at: string | null
+  updated_at?: string | null
   five_hour: UsageProgress | null
   seven_day: UsageProgress | null
   seven_day_sonnet: UsageProgress | null
@@ -1356,6 +1369,10 @@ export interface AccountUsageInfo {
   gemini_pro_minute?: UsageProgress | null
   gemini_flash_minute?: UsageProgress | null
   antigravity_quota?: Record<string, AntigravityModelQuota> | null
+  antigravity_quota_state?: AntigravityObservationState
+  antigravity_quota_stale?: boolean
+  antigravity_quota_details?: Record<string, AntigravityModelDetail> | null
+  model_forwarding_rules?: Record<string, string> | null
   grok_request_quota?: GrokQuotaWindow | null
   grok_token_quota?: GrokQuotaWindow | null
   grok_retry_after_seconds?: number | null
@@ -1372,10 +1389,12 @@ export interface AccountUsageInfo {
   grok_billing?: GrokBillingSummary | null
   subscription_tier?: string
   subscription_tier_raw?: string
+  antigravity_subscription_state?: AntigravityObservationState
+  antigravity_ineligible?: boolean
   ai_credits?: Array<{
     credit_type?: string
-    amount?: number
-    minimum_balance?: number
+    amount?: number | null
+    minimum_balance?: number | null
   }> | null
   // Antigravity 403 forbidden 状态
   is_forbidden?: boolean

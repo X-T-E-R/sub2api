@@ -526,6 +526,7 @@ import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRules
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { getAntigravityTier } from '@/utils/antigravityUsage'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -830,7 +831,7 @@ const queueBatchedUsage = (account: Account, options?: { force?: boolean }) => {
 
   if (force) {
     usageBatchCache.delete(cacheKey)
-  } else {
+  } else if (account.platform !== 'antigravity') {
     const cached = usageBatchCache.get(cacheKey)
     if (cached && Date.now() - cached.ts < USAGE_BATCH_CACHE_TTL) {
       setUsageBatchState(cacheKey, cached.data, null)
@@ -1690,14 +1691,8 @@ function getOpenAIAuthMode(row: any): string | undefined {
 function getAntigravityTierFromRow(row: any): string | null {
   if (row.platform !== 'antigravity') return null
   const extra = row.extra as Record<string, unknown> | undefined
-  if (!extra) return null
-  const lca = extra.load_code_assist as Record<string, unknown> | undefined
-  if (!lca) return null
-  const paid = lca.paidTier as Record<string, unknown> | undefined
-  if (paid && typeof paid.id === 'string') return paid.id
-  const current = lca.currentTier as Record<string, unknown> | undefined
-  if (current && typeof current.id === 'string') return current.id
-  return null
+  const usage = usageBatchByAccountId.value[String(row.id)]
+  return getAntigravityTier(usage, extra)
 }
 
 function getAntigravityTierLabel(row: any): string | null {
@@ -1706,7 +1701,7 @@ function getAntigravityTierLabel(row: any): string | null {
     case 'free-tier': return t('admin.accounts.tier.free')
     case 'g1-pro-tier': return t('admin.accounts.tier.pro')
     case 'g1-ultra-tier': return t('admin.accounts.tier.ultra')
-    default: return null
+    default: return tier
   }
 }
 
@@ -1775,7 +1770,7 @@ function getAntigravityTierClass(row: any): string {
     case 'free-tier': return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
     case 'g1-pro-tier': return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
     case 'g1-ultra-tier': return 'bg-purple-100 text-purple-600 dark:bg-purple-900/40 dark:text-purple-300'
-    default: return ''
+    default: return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
   }
 }
 

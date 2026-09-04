@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,8 +50,25 @@ func TestNormalizeTier(t *testing.T) {
 // buildUsageInfo
 // ---------------------------------------------------------------------------
 
-func aqfBoolPtr(v bool) *bool { return &v }
-func aqfIntPtr(v int) *int    { return &v }
+func aqfBoolPtr(v bool) *bool        { return &v }
+func aqfIntPtr(v int) *int           { return &v }
+func aqfFloatPtr(v float64) *float64 { return &v }
+
+func TestAntigravityQuotaFetcherCanFetchOnlyOAuthWithToken(t *testing.T) {
+	fetcher := &AntigravityQuotaFetcher{}
+	require.False(t, fetcher.CanFetch(nil))
+	require.False(t, fetcher.CanFetch(&Account{Platform: PlatformAntigravity, Type: AccountTypeOAuth}))
+	require.False(t, fetcher.CanFetch(&Account{
+		Platform:    PlatformAntigravity,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"access_token": "token"},
+	}))
+	require.True(t, fetcher.CanFetch(&Account{
+		Platform:    PlatformAntigravity,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "token"},
+	}))
+}
 
 func TestBuildUsageInfo_BasicModels(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
@@ -59,7 +77,7 @@ func TestBuildUsageInfo_BasicModels(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.75,
+					RemainingFraction: aqfFloatPtr(0.75),
 					ResetTime:         "2026-03-08T12:00:00Z",
 				},
 				DisplayName:      "Claude Sonnet 4",
@@ -76,7 +94,7 @@ func TestBuildUsageInfo_BasicModels(t *testing.T) {
 			},
 			"gemini-2.5-pro": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.50,
+					RemainingFraction: aqfFloatPtr(0.50),
 					ResetTime:         "2026-03-08T15:00:00Z",
 				},
 				DisplayName:     "Gemini 2.5 Pro",
@@ -136,7 +154,7 @@ func TestBuildUsageInfo_DeprecatedModels(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 1.0,
+					RemainingFraction: aqfFloatPtr(1.0),
 				},
 			},
 		},
@@ -159,7 +177,7 @@ func TestBuildUsageInfo_NoDeprecatedModels(t *testing.T) {
 	modelsResp := &antigravity.FetchAvailableModelsResponse{
 		Models: map[string]antigravity.ModelInfo{
 			"some-model": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: 0.9},
+				QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: aqfFloatPtr(0.9)},
 			},
 		},
 	}
@@ -214,13 +232,13 @@ func TestBuildUsageInfo_FiveHourPriorityOrder(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"gemini-2.5-pro": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.40,
+					RemainingFraction: aqfFloatPtr(0.40),
 					ResetTime:         "2026-03-08T18:00:00Z",
 				},
 			},
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.80,
+					RemainingFraction: aqfFloatPtr(0.80),
 					ResetTime:         "2026-03-08T12:00:00Z",
 				},
 			},
@@ -244,13 +262,13 @@ func TestBuildUsageInfo_FiveHourFallbackToClaude4(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.60,
+					RemainingFraction: aqfFloatPtr(0.60),
 					ResetTime:         "2026-03-08T14:00:00Z",
 				},
 			},
 			"gemini-2.5-pro": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.30,
+					RemainingFraction: aqfFloatPtr(0.30),
 				},
 			},
 		},
@@ -271,12 +289,12 @@ func TestBuildUsageInfo_FiveHourFallbackToGemini(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"gemini-2.5-pro": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.30,
+					RemainingFraction: aqfFloatPtr(0.30),
 				},
 			},
 			"other-model": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.90,
+					RemainingFraction: aqfFloatPtr(0.90),
 				},
 			},
 		},
@@ -297,7 +315,7 @@ func TestBuildUsageInfo_FiveHourNoPriorityModel(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"some-other-model": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.50,
+					RemainingFraction: aqfFloatPtr(0.50),
 				},
 			},
 		},
@@ -315,7 +333,7 @@ func TestBuildUsageInfo_FiveHourWithEmptyResetTime(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.50,
+					RemainingFraction: aqfFloatPtr(0.50),
 					ResetTime:         "", // empty reset time
 				},
 			},
@@ -336,7 +354,7 @@ func TestBuildUsageInfo_FullUtilization(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.0, // fully used
+					RemainingFraction: aqfFloatPtr(0.0), // fully used
 					ResetTime:         "2026-03-08T12:00:00Z",
 				},
 			},
@@ -357,7 +375,7 @@ func TestBuildUsageInfo_ZeroUtilization(t *testing.T) {
 		Models: map[string]antigravity.ModelInfo{
 			"claude-sonnet-4-20250514": {
 				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 1.0, // fully available
+					RemainingFraction: aqfFloatPtr(1.0), // fully available
 				},
 			},
 		},
@@ -367,6 +385,69 @@ func TestBuildUsageInfo_ZeroUtilization(t *testing.T) {
 	quota := info.AntigravityQuota["claude-sonnet-4-20250514"]
 	require.NotNil(t, quota)
 	require.Equal(t, 0, quota.Utilization)
+}
+
+func TestBuildUsageInfo_QuotaObservationState(t *testing.T) {
+	fetcher := &AntigravityQuotaFetcher{}
+
+	t.Run("missing fraction is unavailable, not exhausted", func(t *testing.T) {
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{
+				"gemini-3.8-flash": {QuotaInfo: &antigravity.ModelQuotaInfo{}},
+			},
+		}, "", "", nil)
+
+		require.Equal(t, antigravityObservationUnavailable, info.AntigravityQuotaState)
+		require.Empty(t, info.AntigravityQuota)
+	})
+
+	t.Run("valid and invalid fractions are partial", func(t *testing.T) {
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{
+				"gemini-3.8-flash": {
+					QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: aqfFloatPtr(0.75)},
+				},
+				"future-model": {
+					QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: aqfFloatPtr(1.5)},
+				},
+			},
+		}, "", "", nil)
+
+		require.Equal(t, antigravityObservationPartial, info.AntigravityQuotaState)
+		require.Equal(t, 25, info.AntigravityQuota["gemini-3.8-flash"].Utilization)
+		require.NotContains(t, info.AntigravityQuota, "future-model")
+	})
+
+	t.Run("missing reset remains an available explicit zero", func(t *testing.T) {
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{
+				"gemini-3.8-flash": {
+					QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: aqfFloatPtr(1)},
+				},
+			},
+		}, "", "", nil)
+
+		require.Equal(t, antigravityObservationAvailable, info.AntigravityQuotaState)
+		require.Equal(t, 0, info.AntigravityQuota["gemini-3.8-flash"].Utilization)
+		require.Empty(t, info.AntigravityQuota["gemini-3.8-flash"].ResetTime)
+	})
+
+	t.Run("malformed reset keeps utilization but marks partial", func(t *testing.T) {
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{
+				"gemini-3.8-flash": {
+					QuotaInfo: &antigravity.ModelQuotaInfo{
+						RemainingFraction: aqfFloatPtr(0.5),
+						ResetTime:         "not-a-time",
+					},
+				},
+			},
+		}, "", "", nil)
+
+		require.Equal(t, antigravityObservationPartial, info.AntigravityQuotaState)
+		require.Equal(t, 50, info.AntigravityQuota["gemini-3.8-flash"].Utilization)
+		require.Empty(t, info.AntigravityQuota["gemini-3.8-flash"].ResetTime)
+	})
 }
 
 func TestBuildUsageInfo_AICredits(t *testing.T) {
@@ -391,8 +472,32 @@ func TestBuildUsageInfo_AICredits(t *testing.T) {
 
 	require.Len(t, info.AICredits, 1)
 	require.Equal(t, "GOOGLE_ONE_AI", info.AICredits[0].CreditType)
-	require.Equal(t, 25.0, info.AICredits[0].Amount)
-	require.Equal(t, 5.0, info.AICredits[0].MinimumBalance)
+	require.NotNil(t, info.AICredits[0].Amount)
+	require.Equal(t, 25.0, *info.AICredits[0].Amount)
+	require.NotNil(t, info.AICredits[0].MinimumBalance)
+	require.Equal(t, 5.0, *info.AICredits[0].MinimumBalance)
+}
+
+func TestBuildUsageInfo_AICreditsDoNotFabricateZero(t *testing.T) {
+	fetcher := &AntigravityQuotaFetcher{}
+	loadResp := &antigravity.LoadCodeAssistResponse{
+		PaidTier: &antigravity.PaidTierInfo{
+			ID: "g1-pro-tier",
+			AvailableCredits: []antigravity.AvailableCredit{
+				{CreditType: "GOOGLE_ONE_AI", CreditAmount: "not-a-number"},
+				{CreditType: "OTHER_CREDIT", CreditAmount: "99"},
+			},
+		},
+		IneligibleTiers: []*antigravity.IneligibleTier{{ReasonCode: "INELIGIBLE_ACCOUNT"}},
+	}
+
+	info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{}, "g1-pro-tier", "PRO", loadResp)
+
+	require.True(t, info.AntigravityIneligible)
+	require.Len(t, info.AICredits, 1)
+	require.Equal(t, "GOOGLE_ONE_AI", info.AICredits[0].CreditType)
+	require.Nil(t, info.AICredits[0].Amount)
+	require.Nil(t, info.AICredits[0].MinimumBalance)
 }
 
 func TestFetchQuotaUsesConfiguredModelsListBodyLimit(t *testing.T) {
@@ -423,6 +528,34 @@ func TestFetchQuotaUsesConfiguredModelsListBodyLimit(t *testing.T) {
 		},
 	}, "")
 	require.ErrorContains(t, err, "响应超过 8 字节")
+}
+
+func TestFetchQuotaKeepsModelsWhenSubscriptionEndpointFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/v1internal:fetchAvailableModels") {
+			_, _ = w.Write([]byte(`{"models":{"gemini-3.8-flash":{"quotaInfo":{"remainingFraction":0.6}}}}`))
+			return
+		}
+		http.Error(w, `{"error":"tier unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	withAntigravityUsageBaseURL(t, server.URL)
+
+	fetcher := NewAntigravityQuotaFetcher(nil, nil)
+	result, err := fetcher.FetchQuota(context.Background(), &Account{
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "token",
+			"project_id":   "project",
+		},
+	}, "")
+
+	require.NoError(t, err)
+	require.Equal(t, antigravityObservationAvailable, result.UsageInfo.AntigravityQuotaState)
+	require.Equal(t, 40, result.UsageInfo.AntigravityQuota["gemini-3.8-flash"].Utilization)
+	require.Equal(t, antigravityObservationUnavailable, result.UsageInfo.AntigravitySubscriptionState)
 }
 
 func TestFetchQuota_ForbiddenReturnsIsForbidden(t *testing.T) {

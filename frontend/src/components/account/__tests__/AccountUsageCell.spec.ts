@@ -120,7 +120,7 @@ describe('AccountUsageCell', () => {
     expect(updatedAccount?.ollama_cloud_usage?.auto_refresh_enabled).toBe(false)
   })
 
-  it('Antigravity 图片用量会聚合新旧 image 模型', async () => {
+  it('Antigravity 图片用量会分别显示新旧 image 模型的真实观测', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
         'gemini-2.5-flash-image': {
@@ -160,7 +160,9 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini3Image|70|2026-03-01T09:00:00Z')
+    expect(wrapper.text()).toContain('G2.5I|45|2026-03-01T11:00:00Z')
+    expect(wrapper.text()).toContain('G3.1I|20|2026-03-01T10:00:00Z')
+    expect(wrapper.text()).toContain('G3I|70|2026-03-01T09:00:00Z')
   })
 
   it('Antigravity 会显示 AI Credits 余额信息', async () => {
@@ -195,6 +197,204 @@ describe('AccountUsageCell', () => {
 
     expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
     expect(wrapper.text()).toContain('25')
+  })
+
+  it('Antigravity 会显示当前未硬编码的模型额度与实时订阅等级', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      antigravity_quota_state: 'available',
+      antigravity_quota: {
+        'gemini-3.8-flash': {
+          utilization: 42,
+          reset_time: null
+        }
+      },
+      antigravity_quota_details: {
+        'gemini-3.8-flash': {
+          display_name: 'Gemini 3.8 Flash'
+        }
+      },
+      subscription_tier: 'PRO',
+      subscription_tier_raw: 'g1-pro-tier'
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1003, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'labelTitle', 'utilization'],
+            template: '<div class="usage-bar">{{ label }}|{{ labelTitle }}|{{ utilization }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('G3.8F|Gemini 3.8 Flash (gemini-3.8-flash)|42')
+    expect(wrapper.text()).toContain('admin.accounts.tier.pro')
+    expect(getUsage).toHaveBeenCalledWith(1003, 'passive', false)
+  })
+
+  it('Antigravity 不把缺失额度或缺失积分金额显示为零', async () => {
+    getUsage.mockResolvedValueOnce({
+      source: 'active',
+      antigravity_quota_state: 'unavailable',
+      antigravity_quota: {},
+      ai_credits: [{ credit_type: 'GOOGLE_ONE_AI' }]
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1004, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityUnavailable')
+    expect(wrapper.text()).toContain('common.unknown')
+    expect(wrapper.text()).not.toContain('0')
+  })
+
+  it('Antigravity 显式零积分仍显示为零', async () => {
+    getUsage.mockResolvedValueOnce({
+      source: 'active',
+      antigravity_quota_state: 'unavailable',
+      antigravity_quota: {},
+      ai_credits: [{ credit_type: 'GOOGLE_ONE_AI', amount: 0 }]
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1005, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
+    expect(wrapper.text()).toContain('0')
+  })
+
+  it('Antigravity 查询按钮使用 active force 刷新路径', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      antigravity_quota_state: 'unavailable',
+      antigravity_quota: {}
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1006, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+    await flushPromises()
+    getUsage.mockClear()
+
+    const queryButton = wrapper.findAll('button').find((button) =>
+      button.text().includes('admin.accounts.usageWindow.activeQuery')
+    )
+    expect(queryButton).toBeDefined()
+    await queryButton!.trigger('click')
+    await flushPromises()
+
+    expect(getUsage).toHaveBeenCalledWith(1006, 'active', true)
+  })
+
+  it('Antigravity 部分额度可用时保留有效值并标明部分数据', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      antigravity_quota_state: 'partial',
+      antigravity_quota: {
+        'claude-opus-4-8': { utilization: 61, reset_time: null }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1007, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('O4.8|61')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityPartial')
+  })
+
+  it('Antigravity 非 OAuth 账号不会触发 account usage 请求', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1008, type: 'apikey', extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(getUsage).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('-')
+  })
+
+  it('Antigravity 被动缓存过期时显示待刷新状态', async () => {
+    getUsage.mockResolvedValue({
+      source: 'passive',
+      antigravity_quota_state: 'available',
+      antigravity_quota_stale: true,
+      antigravity_quota: {
+        'gemini-3.8-flash': { utilization: 10 }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1009, extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
   })
 
 

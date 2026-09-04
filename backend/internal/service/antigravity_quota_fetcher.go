@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,10 @@ const (
 	errorCodeUnauthenticated = "unauthenticated"
 	errorCodeRateLimited     = "rate_limited"
 	errorCodeNetworkError    = "network_error"
+
+	antigravityObservationAvailable   AntigravityObservationState = "available"
+	antigravityObservationPartial     AntigravityObservationState = "partial"
+	antigravityObservationUnavailable AntigravityObservationState = "unavailable"
 )
 
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
@@ -39,7 +45,7 @@ func NewAntigravityQuotaFetcher(proxyRepo ProxyRepository, cfg *config.Config) *
 
 // CanFetch 检查是否可以获取此账户的额度
 func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
-	if account.Platform != PlatformAntigravity {
+	if account == nil || account.Platform != PlatformAntigravity || account.Type != AccountTypeOAuth {
 		return false
 	}
 	accessToken := account.GetCredential("access_token")
@@ -66,14 +72,17 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 			fbType := classifyForbiddenType(forbiddenErr.Body)
 			return &QuotaResult{
 				UsageInfo: &UsageInfo{
-					UpdatedAt:       &now,
-					IsForbidden:     true,
-					ForbiddenReason: forbiddenErr.Body,
-					ForbiddenType:   fbType,
-					ValidationURL:   extractValidationURL(forbiddenErr.Body),
-					NeedsVerify:     fbType == forbiddenTypeValidation,
-					IsBanned:        fbType == forbiddenTypeViolation,
-					ErrorCode:       errorCodeForbidden,
+					Source:                       "active",
+					UpdatedAt:                    &now,
+					AntigravityQuotaState:        antigravityObservationUnavailable,
+					AntigravitySubscriptionState: antigravityObservationUnavailable,
+					IsForbidden:                  true,
+					ForbiddenReason:              forbiddenErr.Body,
+					ForbiddenType:                fbType,
+					ValidationURL:                extractValidationURL(forbiddenErr.Body),
+					NeedsVerify:                  fbType == forbiddenTypeValidation,
+					IsBanned:                     fbType == forbiddenTypeViolation,
+					ErrorCode:                    errorCodeForbidden,
 				},
 			}, nil
 		}
@@ -81,10 +90,11 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	}
 
 	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
-	tierRaw, tierNormalized, loadResp := f.fetchSubscriptionTier(ctx, client, accessToken)
+	tierRaw, tierNormalized, loadResp, subscriptionState := f.fetchSubscriptionTier(ctx, client, accessToken)
 
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
+	usageInfo.AntigravitySubscriptionState = subscriptionState
 
 	return &QuotaResult{
 		UsageInfo: usageInfo,
@@ -94,19 +104,23 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 
 // fetchSubscriptionTier 获取账号订阅等级，失败返回空字符串。
 // 同时返回 LoadCodeAssistResponse，以便提取 AI Credits 余额。
-func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse) {
+func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse, state AntigravityObservationState) {
 	loadResp, _, err := client.LoadCodeAssist(ctx, accessToken)
 	if err != nil {
 		slog.Warn("failed to fetch subscription tier", "error", err)
-		return "", "", nil
+		return "", "", nil, antigravityObservationUnavailable
 	}
 	if loadResp == nil {
-		return "", "", nil
+		return "", "", nil, antigravityObservationUnavailable
 	}
 
 	raw = loadResp.GetTier() // 已有方法：paidTier > currentTier
 	normalized = normalizeTier(raw)
-	return raw, normalized, loadResp
+	state = antigravityObservationUnavailable
+	if strings.TrimSpace(raw) != "" {
+		state = antigravityObservationAvailable
+	}
+	return raw, normalized, loadResp, state
 }
 
 // normalizeTier 将原始 tier 字符串归一化为 FREE/PRO/ULTRA/UNKNOWN
@@ -131,25 +145,44 @@ func normalizeTier(raw string) string {
 func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAvailableModelsResponse, tierRaw, tierNormalized string, loadResp *antigravity.LoadCodeAssistResponse) *UsageInfo {
 	now := time.Now()
 	info := &UsageInfo{
+		Source:                  "active",
 		UpdatedAt:               &now,
 		AntigravityQuota:        make(map[string]*AntigravityModelQuota),
 		AntigravityQuotaDetails: make(map[string]*AntigravityModelDetail),
 		SubscriptionTier:        tierNormalized,
 		SubscriptionTierRaw:     tierRaw,
+		AntigravityQuotaState:   antigravityObservationUnavailable,
+	}
+	if loadResp != nil {
+		info.AntigravityIneligible = len(loadResp.IneligibleTiers) > 0
+	}
+	if modelsResp == nil {
+		return info
 	}
 
 	// 遍历所有模型，填充 AntigravityQuota 和 AntigravityQuotaDetails
+	invalidObservations := 0
 	for modelName, modelInfo := range modelsResp.Models {
 		if modelInfo.QuotaInfo == nil {
 			continue
 		}
+		modelName = strings.TrimSpace(modelName)
+		remainingFraction, ok := validRemainingFraction(modelInfo.QuotaInfo.RemainingFraction)
+		if modelName == "" || !ok {
+			invalidObservations++
+			continue
+		}
 
 		// remainingFraction 是剩余比例 (0.0-1.0)，转换为使用率百分比
-		utilization := int((1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100)
+		utilization := int(math.Round((1.0 - remainingFraction) * 100))
+		resetTime, resetValid := normalizeAntigravityResetTime(modelInfo.QuotaInfo.ResetTime)
+		if !resetValid {
+			invalidObservations++
+		}
 
 		info.AntigravityQuota[modelName] = &AntigravityModelQuota{
 			Utilization: utilization,
-			ResetTime:   modelInfo.QuotaInfo.ResetTime,
+			ResetTime:   resetTime,
 		}
 
 		// 填充模型详细能力信息
@@ -165,6 +198,12 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 		info.AntigravityQuotaDetails[modelName] = detail
 	}
+	if len(info.AntigravityQuota) > 0 {
+		info.AntigravityQuotaState = antigravityObservationAvailable
+		if invalidObservations > 0 {
+			info.AntigravityQuotaState = antigravityObservationPartial
+		}
+	}
 
 	// 废弃模型转发规则
 	if len(modelsResp.DeprecatedModelIDs) > 0 {
@@ -177,13 +216,12 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 	// 同时设置 FiveHour 用于兼容展示（取主要模型）
 	priorityModels := []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"}
 	for _, modelName := range priorityModels {
-		if modelInfo, ok := modelsResp.Models[modelName]; ok && modelInfo.QuotaInfo != nil {
-			utilization := (1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100
+		if modelQuota, ok := info.AntigravityQuota[modelName]; ok {
 			progress := &UsageProgress{
-				Utilization: utilization,
+				Utilization: float64(modelQuota.Utilization),
 			}
-			if modelInfo.QuotaInfo.ResetTime != "" {
-				if resetTime, err := time.Parse(time.RFC3339, modelInfo.QuotaInfo.ResetTime); err == nil {
+			if modelQuota.ResetTime != "" {
+				if resetTime, err := time.Parse(time.RFC3339, modelQuota.ResetTime); err == nil {
 					progress.ResetsAt = &resetTime
 					progress.RemainingSeconds = int(time.Until(resetTime).Seconds())
 				}
@@ -195,15 +233,50 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 
 	if loadResp != nil {
 		for _, credit := range loadResp.GetAvailableCredits() {
+			if credit.CreditType != "GOOGLE_ONE_AI" {
+				continue
+			}
 			info.AICredits = append(info.AICredits, AICredit{
 				CreditType:     credit.CreditType,
-				Amount:         credit.GetAmount(),
-				MinimumBalance: credit.GetMinimumAmount(),
+				Amount:         parseOptionalCreditAmount(credit.CreditAmount),
+				MinimumBalance: parseOptionalCreditAmount(credit.MinimumCreditAmountForUsage),
 			})
 		}
 	}
 
 	return info
+}
+
+func validRemainingFraction(value *float64) (float64, bool) {
+	if value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 1 {
+		return 0, false
+	}
+	return *value, true
+}
+
+// normalizeAntigravityResetTime keeps a missing reset as an unknown value and
+// rejects malformed non-empty timestamps without discarding the utilization.
+func normalizeAntigravityResetTime(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", true
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func parseOptionalCreditAmount(value string) *float64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return nil
+	}
+	return &parsed
 }
 
 // GetProxyURL 获取账户的代理 URL

@@ -1537,8 +1537,8 @@ func TestClient_FetchAvailableModels_Success_RealCall(t *testing.T) {
 	if flashModel.QuotaInfo == nil {
 		t.Fatal("gemini-2.0-flash QuotaInfo 不应为 nil")
 	}
-	if flashModel.QuotaInfo.RemainingFraction != 0.85 {
-		t.Errorf("RemainingFraction 不匹配: got %f, want 0.85", flashModel.QuotaInfo.RemainingFraction)
+	if flashModel.QuotaInfo.RemainingFraction == nil || *flashModel.QuotaInfo.RemainingFraction != 0.85 {
+		t.Errorf("RemainingFraction 不匹配: got %v, want 0.85", flashModel.QuotaInfo.RemainingFraction)
 	}
 	if flashModel.QuotaInfo.ResetTime != "2025-01-01T00:00:00Z" {
 		t.Errorf("ResetTime 不匹配: got %s", flashModel.QuotaInfo.ResetTime)
@@ -1551,8 +1551,8 @@ func TestClient_FetchAvailableModels_Success_RealCall(t *testing.T) {
 	if proModel.QuotaInfo == nil {
 		t.Fatal("gemini-2.5-pro QuotaInfo 不应为 nil")
 	}
-	if proModel.QuotaInfo.RemainingFraction != 0.5 {
-		t.Errorf("RemainingFraction 不匹配: got %f, want 0.5", proModel.QuotaInfo.RemainingFraction)
+	if proModel.QuotaInfo.RemainingFraction == nil || *proModel.QuotaInfo.RemainingFraction != 0.5 {
+		t.Errorf("RemainingFraction 不匹配: got %v, want 0.5", proModel.QuotaInfo.RemainingFraction)
 	}
 
 	// 验证原始 JSON map

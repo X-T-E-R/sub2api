@@ -156,9 +156,11 @@ type UsageProgress struct {
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
 type AntigravityModelQuota struct {
-	Utilization int    `json:"utilization"` // 使用率 0-100
-	ResetTime   string `json:"reset_time"`  // 重置时间 ISO8601
+	Utilization int    `json:"utilization"`          // 使用率 0-100
+	ResetTime   string `json:"reset_time,omitempty"` // 重置时间 ISO8601；缺失表示未知
 }
+
+type AntigravityObservationState string
 
 // AntigravityModelDetail Antigravity 单个模型的详细能力信息
 type AntigravityModelDetail struct {
@@ -174,9 +176,9 @@ type AntigravityModelDetail struct {
 
 // AICredit 表示 Antigravity 账号的 AI Credits 余额信息。
 type AICredit struct {
-	CreditType     string  `json:"credit_type,omitempty"`
-	Amount         float64 `json:"amount,omitempty"`
-	MinimumBalance float64 `json:"minimum_balance,omitempty"`
+	CreditType     string   `json:"credit_type,omitempty"`
+	Amount         *float64 `json:"amount,omitempty"`
+	MinimumBalance *float64 `json:"minimum_balance,omitempty"`
 }
 
 // UsageInfo 账号使用量信息
@@ -196,6 +198,12 @@ type UsageInfo struct {
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
+	// AntigravityQuotaState describes whether the upstream response contained
+	// complete, partial, or no usable model quota observations.
+	AntigravityQuotaState AntigravityObservationState `json:"antigravity_quota_state,omitempty"`
+	// AntigravityQuotaStale marks a passive cache snapshot older than its active
+	// refresh TTL. The observation timestamp remains in UpdatedAt.
+	AntigravityQuotaStale bool `json:"antigravity_quota_stale,omitempty"`
 
 	// Grok / xAI 被动额度快照
 	GrokRequestQuota       *xai.QuotaWindow `json:"grok_request_quota,omitempty"`
@@ -218,6 +226,10 @@ type UsageInfo struct {
 	// Antigravity 账号级信息
 	SubscriptionTier    string `json:"subscription_tier,omitempty"`     // 归一化订阅等级: FREE/PRO/ULTRA/UNKNOWN
 	SubscriptionTierRaw string `json:"subscription_tier_raw,omitempty"` // 上游原始订阅等级名称
+	// AntigravitySubscriptionState is "available" only when loadCodeAssist
+	// returned a concrete tier in this observation.
+	AntigravitySubscriptionState AntigravityObservationState `json:"antigravity_subscription_state,omitempty"`
+	AntigravityIneligible        bool                        `json:"antigravity_ineligible,omitempty"`
 
 	// Antigravity 模型详细能力信息（与 antigravity_quota 同 key）
 	AntigravityQuotaDetails map[string]*AntigravityModelDetail `json:"antigravity_quota_details,omitempty"`
@@ -338,6 +350,11 @@ func supportsAnthropicPassiveUsage(account *Account) bool {
 	return account != nil && account.IsAnthropicOAuthOrSetupToken()
 }
 
+func supportsPassiveUsage(account *Account) bool {
+	return supportsAnthropicPassiveUsage(account) ||
+		(account != nil && account.Platform == PlatformAntigravity && account.Type == AccountTypeOAuth)
+}
+
 func batchUsageErrorMessage(err error) string {
 	if err == nil {
 		return ""
@@ -376,7 +393,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
-		usage, err := s.getAntigravityUsage(ctx, account)
+		usage, err := s.getAntigravityUsage(ctx, account, forceProbe)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -511,7 +528,8 @@ func (s *AccountUsageService) GetUsageForAccount(ctx context.Context, account *A
 }
 
 // GetUsageBatch 批量获取账号使用量。
-// Anthropic OAuth/SetupToken 统一走 passive 链路，其他账号复用现有主动查询逻辑。
+// Anthropic OAuth/SetupToken 与 Antigravity OAuth 统一走 passive 链路，
+// 避免账号列表加载隐式触发上游探测；其他账号复用现有主动查询逻辑。
 // 单个账号失败不会中断整批请求，错误会按账号返回。
 func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []int64, force bool) (map[int64]*UsageInfo, map[int64]string, error) {
 	uniqueIDs := make([]int64, 0, len(accountIDs))
@@ -561,7 +579,7 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 		g.Go(func() error {
 			var usage *UsageInfo
 			var usageErr error
-			if supportsAnthropicPassiveUsage(account) {
+			if supportsPassiveUsage(account) {
 				usage, usageErr = s.getPassiveUsageForAccount(gctx, account)
 			} else {
 				usage, usageErr = s.getUsageForAccount(gctx, account, force)
@@ -585,8 +603,8 @@ func (s *AccountUsageService) GetUsageBatch(ctx context.Context, accountIDs []in
 	return usageByAccount, errorsByAccount, nil
 }
 
-// GetPassiveUsage 从 Account.Extra 中的被动采样数据构建 UsageInfo，不调用外部 API。
-// 仅适用于 Anthropic OAuth / SetupToken 账号。
+// GetPassiveUsage 返回不调用外部 API 的最近观测。
+// Anthropic 从 Account.Extra 构建；Antigravity 只读取进程内主动查询缓存。
 func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int64) (*UsageInfo, error) {
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
@@ -597,8 +615,11 @@ func (s *AccountUsageService) GetPassiveUsage(ctx context.Context, accountID int
 }
 
 func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, account *Account) (*UsageInfo, error) {
+	if account != nil && account.Platform == PlatformAntigravity && account.Type == AccountTypeOAuth {
+		return s.getPassiveAntigravityUsage(account), nil
+	}
 	if !supportsAnthropicPassiveUsage(account) {
-		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken accounts")
+		return nil, fmt.Errorf("passive usage only supported for Anthropic OAuth/SetupToken or Antigravity OAuth accounts")
 	}
 
 	// 复用 estimateSetupTokenUsage 构建 5h 窗口（OAuth 和 SetupToken 逻辑一致）
@@ -627,6 +648,30 @@ func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, acc
 	}
 
 	return info, nil
+}
+
+func (s *AccountUsageService) getPassiveAntigravityUsage(account *Account) *UsageInfo {
+	if s != nil && s.cache != nil && account != nil {
+		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache != nil && cache.usageInfo != nil {
+				usage := *cache.usageInfo
+				usage.Source = "passive"
+				usage.AntigravityQuotaStale = time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo)
+				if usage.FiveHour != nil {
+					fiveHour := *usage.FiveHour
+					usage.FiveHour = &fiveHour
+				}
+				recalcAntigravityRemainingSeconds(&usage)
+				return &usage
+			}
+		}
+	}
+
+	return &UsageInfo{
+		Source:                       "passive",
+		AntigravityQuotaState:        antigravityObservationUnavailable,
+		AntigravitySubscriptionState: antigravityObservationUnavailable,
+	}
 }
 
 func applySyntheticWindowStats(info *UsageInfo, extra map[string]any) {
@@ -1028,22 +1073,27 @@ func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Accou
 }
 
 // getAntigravityUsage 获取 Antigravity 账户额度
-func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
 	if s.antigravityQuotaFetcher == nil || !s.antigravityQuotaFetcher.CanFetch(account) {
 		now := time.Now()
-		return &UsageInfo{UpdatedAt: &now}, nil
+		return &UsageInfo{
+			Source:                       "active",
+			UpdatedAt:                    &now,
+			AntigravityQuotaState:        antigravityObservationUnavailable,
+			AntigravitySubscriptionState: antigravityObservationUnavailable,
+		}, nil
 	}
 
 	// 1. 检查缓存
-	if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-		if cache, ok := cached.(*antigravityUsageCache); ok {
-			ttl := antigravityCacheTTL(cache.usageInfo)
-			if time.Since(cache.timestamp) < ttl {
-				usage := cache.usageInfo
-				if usage.FiveHour != nil && usage.FiveHour.ResetsAt != nil {
-					usage.FiveHour.RemainingSeconds = int(time.Until(*usage.FiveHour.ResetsAt).Seconds())
+	if !force {
+		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok {
+				ttl := antigravityCacheTTL(cache.usageInfo)
+				if time.Since(cache.timestamp) < ttl {
+					usage := cache.usageInfo
+					recalcAntigravityRemainingSeconds(usage)
+					return usage, nil
 				}
-				return usage, nil
 			}
 		}
 	}
@@ -1052,14 +1102,16 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
 	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
 		// 再次检查缓存（等待期间可能已被填充）
-		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok {
-				ttl := antigravityCacheTTL(cache.usageInfo)
-				if time.Since(cache.timestamp) < ttl {
-					usage := cache.usageInfo
-					// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
-					recalcAntigravityRemainingSeconds(usage)
-					return usage, nil
+		if !force {
+			if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
+				if cache, ok := cached.(*antigravityUsageCache); ok {
+					ttl := antigravityCacheTTL(cache.usageInfo)
+					if time.Since(cache.timestamp) < ttl {
+						usage := cache.usageInfo
+						// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
+						recalcAntigravityRemainingSeconds(usage)
+						return usage, nil
+					}
 				}
 			}
 		}
@@ -1094,7 +1146,12 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 	usage, ok := result.(*UsageInfo)
 	if !ok || usage == nil {
 		now := time.Now()
-		return &UsageInfo{UpdatedAt: &now}, nil
+		return &UsageInfo{
+			Source:                       "active",
+			UpdatedAt:                    &now,
+			AntigravityQuotaState:        antigravityObservationUnavailable,
+			AntigravitySubscriptionState: antigravityObservationUnavailable,
+		}, nil
 	}
 	return usage, nil
 }
@@ -1293,8 +1350,11 @@ func buildAntigravityDegradedUsage(err error) *UsageInfo {
 	slog.Warn("antigravity usage fetch failed, returning degraded response", "error", err)
 
 	info := &UsageInfo{
-		UpdatedAt: &now,
-		Error:     errMsg,
+		Source:                       "active",
+		UpdatedAt:                    &now,
+		AntigravityQuotaState:        antigravityObservationUnavailable,
+		AntigravitySubscriptionState: antigravityObservationUnavailable,
+		Error:                        errMsg,
 	}
 
 	// 从错误信息推断 error_code 和状态标记

@@ -30,6 +30,7 @@
       <!-- Label badge (fixed width for alignment) -->
       <span
         :class="['w-[32px] shrink-0 rounded px-1 text-center text-[10px] font-medium', labelClass]"
+        :title="labelTitle || undefined"
       >
         {{ label }}
       </span>
@@ -64,6 +65,7 @@ import { formatCompactNumber } from '@/utils/format'
 
 const props = defineProps<{
   label: string
+  labelTitle?: string
   utilization: number // Percentage (0-100+)
   resetsAt?: string | null
   color: 'indigo' | 'emerald' | 'purple' | 'amber'
