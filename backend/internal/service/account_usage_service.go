@@ -102,6 +102,7 @@ type windowStatsCache struct {
 type antigravityUsageCache struct {
 	usageInfo *UsageInfo
 	timestamp time.Time
+	scope     string
 }
 
 const (
@@ -176,9 +177,11 @@ type AntigravityModelDetail struct {
 
 // AICredit 表示 Antigravity 账号的 AI Credits 余额信息。
 type AICredit struct {
-	CreditType     string   `json:"credit_type,omitempty"`
-	Amount         *float64 `json:"amount,omitempty"`
-	MinimumBalance *float64 `json:"minimum_balance,omitempty"`
+	CreditType         string   `json:"credit_type,omitempty"`
+	AmountText         string   `json:"amount_text,omitempty"`
+	MinimumBalanceText string   `json:"minimum_balance_text,omitempty"`
+	Amount             *float64 `json:"amount,omitempty"`
+	MinimumBalance     *float64 `json:"minimum_balance,omitempty"`
 }
 
 // UsageInfo 账号使用量信息
@@ -203,7 +206,10 @@ type UsageInfo struct {
 	AntigravityQuotaState AntigravityObservationState `json:"antigravity_quota_state,omitempty"`
 	// AntigravityQuotaStale marks a passive cache snapshot older than its active
 	// refresh TTL. The observation timestamp remains in UpdatedAt.
-	AntigravityQuotaStale bool `json:"antigravity_quota_stale,omitempty"`
+	AntigravityQuotaStale      bool                               `json:"antigravity_quota_stale,omitempty"`
+	AntigravityWindows         map[string]*AntigravityQuotaWindow `json:"antigravity_windows,omitempty"`
+	AntigravityWindowState     AntigravityObservationState        `json:"antigravity_window_state,omitempty"`
+	AntigravityWindowCheckedAt *time.Time                         `json:"antigravity_window_checked_at,omitempty"`
 
 	// Grok / xAI 被动额度快照
 	GrokRequestQuota       *xai.QuotaWindow `json:"grok_request_quota,omitempty"`
@@ -653,16 +659,10 @@ func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, acc
 func (s *AccountUsageService) getPassiveAntigravityUsage(account *Account) *UsageInfo {
 	if s != nil && s.cache != nil && account != nil {
 		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok && cache != nil && cache.usageInfo != nil {
-				usage := *cache.usageInfo
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache != nil && cache.usageInfo != nil && cache.scope == antigravityQuotaScope(account) {
+				usage := copyAntigravityUsage(cache.usageInfo, time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo))
 				usage.Source = "passive"
-				usage.AntigravityQuotaStale = time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo)
-				if usage.FiveHour != nil {
-					fiveHour := *usage.FiveHour
-					usage.FiveHour = &fiveHour
-				}
-				recalcAntigravityRemainingSeconds(&usage)
-				return &usage
+				return usage
 			}
 		}
 	}
@@ -1074,6 +1074,7 @@ func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Accou
 
 // getAntigravityUsage 获取 Antigravity 账户额度
 func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	scope := antigravityQuotaScope(account)
 	if s.antigravityQuotaFetcher == nil || !s.antigravityQuotaFetcher.CanFetch(account) {
 		now := time.Now()
 		return &UsageInfo{
@@ -1087,11 +1088,10 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 	// 1. 检查缓存
 	if !force {
 		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache.scope == scope {
 				ttl := antigravityCacheTTL(cache.usageInfo)
 				if time.Since(cache.timestamp) < ttl {
-					usage := cache.usageInfo
-					recalcAntigravityRemainingSeconds(usage)
+					usage := copyAntigravityUsage(cache.usageInfo, false)
 					return usage, nil
 				}
 			}
@@ -1099,17 +1099,15 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 	}
 
 	// 2. singleflight 防止并发击穿
-	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
+	flightKey := "ag-usage:" + scope
 	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
 		// 再次检查缓存（等待期间可能已被填充）
 		if !force {
 			if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-				if cache, ok := cached.(*antigravityUsageCache); ok {
+				if cache, ok := cached.(*antigravityUsageCache); ok && cache.scope == scope {
 					ttl := antigravityCacheTTL(cache.usageInfo)
 					if time.Since(cache.timestamp) < ttl {
-						usage := cache.usageInfo
-						// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
-						recalcAntigravityRemainingSeconds(usage)
+						usage := copyAntigravityUsage(cache.usageInfo, false)
 						return usage, nil
 					}
 				}
@@ -1122,20 +1120,30 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
 		fetchResult, err := s.antigravityQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
+		var previous *UsageInfo
+		if value, ok := s.cache.antigravityCache.Load(account.ID); ok {
+			if cache, ok := value.(*antigravityUsageCache); ok && cache.scope == scope {
+				previous = cache.usageInfo
+			}
+		}
 		if err != nil {
 			degraded := buildAntigravityDegradedUsage(err)
+			retainAntigravityWindows(degraded, previous)
 			enrichUsageWithAccountError(degraded, account)
 			s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 				usageInfo: degraded,
 				timestamp: time.Now(),
+				scope:     scope,
 			})
 			return degraded, nil
 		}
 
 		enrichUsageWithAccountError(fetchResult.UsageInfo, account)
+		retainAntigravityWindows(fetchResult.UsageInfo, previous)
 		s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 			usageInfo: fetchResult.UsageInfo,
 			timestamp: time.Now(),
+			scope:     scope,
 		})
 		return fetchResult.UsageInfo, nil
 	})

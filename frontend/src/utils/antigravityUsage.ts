@@ -3,6 +3,22 @@ import type {
   AntigravityModelDetail,
   AntigravityModelQuota
 } from '@/types'
+import type { AntigravityWindowKey } from '@/types'
+
+export const antigravityWindowPercent = (usage: AccountUsageInfo, key: AntigravityWindowKey): number | null => {
+  const value = usage.antigravity_windows?.[key]?.remaining_fraction
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+    ? Math.round(value * 1000) / 10
+    : null
+}
+
+export const antigravityCreditAmount = (credit: NonNullable<AccountUsageInfo['ai_credits']>[number]): string | null => {
+  if (typeof credit.amount_text === 'string') {
+    const value = credit.amount_text.trim()
+    return value !== '' && Number.isFinite(Number(value)) ? value : null
+  }
+  return typeof credit.amount === 'number' && Number.isFinite(credit.amount) ? String(credit.amount) : null
+}
 
 export type AntigravityQuotaFamily = 'gemini-pro' | 'gemini-flash' | 'gemini-image' | 'claude' | 'other'
 
