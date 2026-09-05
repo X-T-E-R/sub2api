@@ -249,6 +249,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		account.AutoPauseOnExpired = true
 	}
 
+	if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, account); err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, fmt.Errorf("create account: %w", err)
 	}
@@ -318,6 +321,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)
 	}
+	previousDailyPolicy := codexDailySessionUpdatedAccount(account, nil, nil)
 
 	// 更新字段
 	if req.Name != nil {
@@ -374,6 +378,14 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	// 执行更新
+	if req.Extra != nil {
+		if err := validateCodexDailySessionShadowUpdate(previousDailyPolicy, account, *req.Extra); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, account); err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.Update(ctx, account); err != nil {
 		return nil, fmt.Errorf("update account: %w", err)
 	}

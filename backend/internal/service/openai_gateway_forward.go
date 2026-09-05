@@ -530,14 +530,24 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Account namespace is orthogonal to fingerprint convergence: preserve
 		// each client's identity cardinality, but never reuse it across OAuth
 		// credentials after scheduler failover.
-		if !isCompactRequest && projectCodexRequestBody(c, account, decoded) {
-			markDecodedModified()
+		if !isCompactRequest {
+			changed, err := projectCodexRequestBodyWithDailySession(c, account, decoded)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				markDecodedModified()
+			}
 		}
 		if isCompactRequest {
 			// Legacy compact accepts an explicit cache key, but not the normal
 			// client_metadata shape. Scope only that supported body field.
 			cacheBody := map[string]any{"prompt_cache_key": decoded["prompt_cache_key"]}
-			if projectCodexRequestBody(c, account, cacheBody) {
+			changed, err := projectCodexRequestBodyWithDailySession(c, account, cacheBody)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
 				decoded["prompt_cache_key"] = cacheBody["prompt_cache_key"]
 				markDecodedModified()
 			}

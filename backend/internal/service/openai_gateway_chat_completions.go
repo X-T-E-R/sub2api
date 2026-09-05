@@ -269,7 +269,9 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		} else if promptCacheKey != "" {
 			reqBody["prompt_cache_key"] = promptCacheKey
 		}
-		projectCodexRequestBody(c, account, reqBody)
+		if _, err := projectCodexRequestBodyWithDailySession(c, account, reqBody); err != nil {
+			return nil, err
+		}
 		responsesBody, err = json.Marshal(reqBody)
 		if err != nil {
 			return nil, fmt.Errorf("remarshal after codex transform: %w", err)

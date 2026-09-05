@@ -212,6 +212,56 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     createOpenAICodexPATMock.mockReset().mockResolvedValue({})
   })
 
+  it('keeps the daily pool opt-in and sends explicitly selected bounds to Codex import', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    expect(wrapper.find('[data-testid="codex-daily-session-pool"]').exists()).toBe(false)
+    wrapper.getComponent('[data-testid="create-codex-fingerprint-mode-select"]').vm.$emit('update:modelValue', 'session')
+    await flushPromises()
+    await wrapper.get('[data-testid="daily-session-pool-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="daily-session-pool-min"]').setValue('6')
+    await wrapper.get('[data-testid="daily-session-pool-max"]').setValue('8')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Codex daily pool')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock).toHaveBeenCalledWith(expect.objectContaining({ extra: expect.objectContaining({
+      codex_fingerprint_mode: 'session',
+      codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 6,
+      codex_daily_session_pool_max: 8
+    }) }))
+  })
+
+  it('does not overwrite daily pool settings on untouched imports', async () => {
+    const wrapper = await openCodexImportStep()
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    const extra = importCodexSessionMock.mock.calls[0][0].extra
+    expect(extra).not.toHaveProperty('codex_daily_session_pool_enabled')
+    expect(extra).not.toHaveProperty('codex_daily_session_pool_min')
+    expect(extra).not.toHaveProperty('codex_daily_session_pool_max')
+  })
+
+  it('rejects invalid daily bounds before starting OAuth and does not leak settings to API-key accounts', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    wrapper.getComponent('[data-testid="create-codex-fingerprint-mode-select"]').vm.$emit('update:modelValue', 'session')
+    await flushPromises()
+    await wrapper.get('[data-testid="daily-session-pool-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="daily-session-pool-min"]').setValue('12')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Invalid pool')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    expect(wrapper.find('[data-testid="import-codex-session"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-key')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock).toHaveBeenCalled()
+    expect(createAccountMock.mock.calls[0][0].extra).not.toHaveProperty('codex_daily_session_pool_enabled')
+    expect(createAccountMock.mock.calls[0][0].extra).not.toHaveProperty('codex_fingerprint_mode')
+  })
+
   it('hides only the redundant account toggle when every selected group enables tier pricing', async () => {
     authIsSimpleMode.value = false
     const wrapper = mountModal([

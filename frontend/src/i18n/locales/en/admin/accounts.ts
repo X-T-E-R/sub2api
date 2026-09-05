@@ -634,6 +634,16 @@ export default {
         codexFingerprintDevice: 'Device only',
         codexFingerprintSession: 'Device + Session',
         codexFingerprintFull: 'Full convergence (merge threads)',
+        dailySessionPool: {
+          title: 'Daily new-session pool',
+          description: 'Each account gets a daily allocation within this range, using the server time zone. Equal limits give a fixed budget. Slots are used on demand; new conversations reuse today’s sessions once the budget is full. Returning conversations keep their bindings without using new slots. Range changes apply the next day; disabling only stops new allocations.',
+          min: 'Minimum daily slots',
+          max: 'Maximum daily slots',
+          invalidRange: 'Enter integers from 1 to 1000, with the minimum no greater than the maximum.',
+          inherited: 'This shadow account inherits the session pool from parent account #{id}. Change these settings on the parent.',
+          bulkEdit: 'Change daily session pool settings',
+          bulkModeRequired: 'To enable the pool in bulk, also select the fingerprint mode field and choose Device + Session.'
+        },
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:
           'Controls the hosted image_generation bridge and client-declared image tools on Codex /responses text requests. Hosted auto-injection applies only to non-Responses Lite requests. Account policy takes precedence over channel and global settings; standalone image-generation endpoints are unaffected.',

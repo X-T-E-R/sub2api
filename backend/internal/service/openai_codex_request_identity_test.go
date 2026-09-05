@@ -455,89 +455,110 @@ func (c *codexIdentityFrameConn) ReadFrame(ctx context.Context) (coderws.Message
 
 func TestCodexIdentityProjectionRealWSIngressFrames(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, ingress := range []string{OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough} {
-		t.Run(string(ingress), func(t *testing.T) {
-			cfg := &config.Config{}
-			cfg.Gateway.OpenAIWS.Enabled = true
-			cfg.Gateway.OpenAIWS.OAuthEnabled = true
-			cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
-			cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
-			cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
-			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
-			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
-			cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
-			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
-			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
-			capture := &codexIdentityFrameConn{replies: make(chan []byte, 1)}
-			dialer := &openAIWSSingleConnDialer{conn: capture}
-			pool := newOpenAIWSConnPool(cfg)
-			pool.setClientDialerForTest(dialer)
-			svc := &OpenAIGatewayService{cfg: cfg, cache: &stubGatewayCache{}, toolCorrector: NewCodexToolCorrector(), openaiWSResolver: NewOpenAIWSProtocolResolver(cfg), openaiWSPool: pool, openaiWSPassthroughDialer: dialer}
-			account := newTestOAuthAccount(30, map[string]any{codexFingerprintModeExtraKey: "session", "openai_oauth_responses_websockets_v2_mode": ingress})
-			account.Credentials = map[string]any{"chatgpt_account_id": "credential-a"}
-			account.Concurrency = 1
-			done := make(chan error, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				conn, err := coderws.Accept(w, r, nil)
-				if err != nil {
-					done <- err
-					return
+	for _, dailyEnabled := range []bool{false, true} {
+		for _, ingress := range []string{OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough} {
+			t.Run(fmt.Sprintf("%s/daily=%t", ingress, dailyEnabled), func(t *testing.T) {
+				cfg := &config.Config{}
+				cfg.Gateway.OpenAIWS.Enabled = true
+				cfg.Gateway.OpenAIWS.OAuthEnabled = true
+				cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+				cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+				cfg.Gateway.OpenAIWS.IngressModeDefault = OpenAIWSIngressModeCtxPool
+				cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+				cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+				cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+				cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
+				cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+				capture := &codexIdentityFrameConn{replies: make(chan []byte, 1)}
+				dialer := &openAIWSSingleConnDialer{conn: capture}
+				pool := newOpenAIWSConnPool(cfg)
+				pool.setClientDialerForTest(dialer)
+				svc := &OpenAIGatewayService{cfg: cfg, cache: &stubGatewayCache{}, toolCorrector: NewCodexToolCorrector(), openaiWSResolver: NewOpenAIWSProtocolResolver(cfg), openaiWSPool: pool, openaiWSPassthroughDialer: dialer}
+				dailyRepo := &dailyPoolFixtureRepo{}
+				if dailyEnabled {
+					svc.codexDailySessionPool = fixtureDailyPool(t, dailyRepo)
 				}
-				defer conn.CloseNow()
-				c, _ := gin.CreateTestContext(httptest.NewRecorder())
-				c.Request = r.Clone(r.Context())
-				c.Request.Header.Set(openAIWSTurnMetadataHeader, `{"thread_id":"stale-thread","turn_id":"stale-turn","turn_started_at_unix_ms":1}`)
-				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+				account := newTestOAuthAccount(30, map[string]any{codexFingerprintModeExtraKey: "session", "openai_oauth_responses_websockets_v2_mode": ingress})
+				if dailyEnabled {
+					account.Extra[CodexDailySessionEnabledKey] = true
+					account.Extra[CodexDailySessionMinKey] = 5
+					account.Extra[CodexDailySessionMaxKey] = 10
+				}
+				account.Credentials = map[string]any{"chatgpt_account_id": "credential-a"}
+				if dailyEnabled {
+					account.Credentials["chatgpt_user_id"] = "user-a"
+				}
+				account.Concurrency = 1
+				done := make(chan error, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, err := coderws.Accept(w, r, nil)
+					if err != nil {
+						done <- err
+						return
+					}
+					defer conn.CloseNow()
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = r.Clone(r.Context())
+					c.Request.Header.Set(openAIWSTurnMetadataHeader, `{"thread_id":"stale-thread","turn_id":"stale-turn","turn_started_at_unix_ms":1}`)
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					_, first, err := conn.Read(ctx)
+					if err != nil {
+						done <- err
+						return
+					}
+					done <- svc.ProxyResponsesWebSocketFromClient(ctx, c, conn, account, "fixture-token", first, nil)
+				}))
+				defer server.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_, first, err := conn.Read(ctx)
-				if err != nil {
-					done <- err
-					return
-				}
-				done <- svc.ProxyResponsesWebSocketFromClient(ctx, c, conn, account, "fixture-token", first, nil)
-			}))
-			defer server.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-			require.NoError(t, err)
-			defer client.CloseNow()
-			for i, turn := range []string{"turn-a", "turn-a", "turn-b"} {
-				body := identityFixture(t, "tree-a", "child-a", turn, 2, nil)
-				body["type"], body["model"], body["input"] = "response.create", "gpt-5.1", []any{}
-				if i == 2 {
-					// Older clients send a flat per-frame identity, not a full blob.
-					cm := codexIdentityMetadata(body)
-					delete(cm, openAIWSTurnMetadataHeader)
-					cm["turn_id"] = turn
-					cm["turn_started_at_unix_ms"] = "1700000000001"
-				}
-				raw, err := json.Marshal(body)
+				client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 				require.NoError(t, err)
-				require.NoError(t, client.Write(ctx, coderws.MessageText, raw))
-				_, _, err = client.Read(ctx)
-				require.NoError(t, err)
-			}
-			_ = client.Close(coderws.StatusNormalClosure, "fixture complete")
-			select {
-			case err := <-done:
-				if err != nil {
-					require.Contains(t, err.Error(), "StatusNormalClosure")
+				defer client.CloseNow()
+				for i, turn := range []string{"turn-a", "turn-a", "turn-b"} {
+					body := identityFixture(t, "tree-a", "child-a", turn, 2, nil)
+					body["type"], body["model"], body["input"] = "response.create", "gpt-5.1", []any{}
+					if i == 2 {
+						// Older clients send a flat per-frame identity, not a full blob.
+						cm := codexIdentityMetadata(body)
+						delete(cm, openAIWSTurnMetadataHeader)
+						cm["turn_id"] = turn
+						cm["turn_started_at_unix_ms"] = "1700000000001"
+					}
+					raw, err := json.Marshal(body)
+					require.NoError(t, err)
+					require.NoError(t, client.Write(ctx, coderws.MessageText, raw))
+					_, _, err = client.Read(ctx)
+					require.NoError(t, err)
 				}
-			case <-ctx.Done():
-				t.Fatal("ingress did not finish")
-			}
-			capture.mu.Lock()
-			defer capture.mu.Unlock()
-			require.Len(t, capture.writes, 3)
-			first := projectedMetadata(t, capture.writes[0])
-			second := projectedMetadata(t, capture.writes[1])
-			third := projectedMetadata(t, capture.writes[2])
-			require.Equal(t, first["turn_id"], second["turn_id"])
-			require.Equal(t, first["turn_started_at_unix_ms"], second["turn_started_at_unix_ms"])
-			require.NotEqual(t, first["turn_id"], third["turn_id"])
-			require.Equal(t, first["thread_id"], third["thread_id"])
-			require.Equal(t, "1700000000001", third["turn_started_at_unix_ms"])
-		})
+				_ = client.Close(coderws.StatusNormalClosure, "fixture complete")
+				select {
+				case err := <-done:
+					if err != nil {
+						require.Contains(t, err.Error(), "StatusNormalClosure")
+					}
+				case <-ctx.Done():
+					t.Fatal("ingress did not finish")
+				}
+				capture.mu.Lock()
+				defer capture.mu.Unlock()
+				require.Len(t, capture.writes, 3)
+				first := projectedMetadata(t, capture.writes[0])
+				second := projectedMetadata(t, capture.writes[1])
+				third := projectedMetadata(t, capture.writes[2])
+				require.Equal(t, first["turn_id"], second["turn_id"])
+				require.Equal(t, first["turn_started_at_unix_ms"], second["turn_started_at_unix_ms"])
+				require.NotEqual(t, first["turn_id"], third["turn_id"])
+				require.Equal(t, first["thread_id"], third["thread_id"])
+				require.Equal(t, "1700000000001", third["turn_started_at_unix_ms"])
+				if dailyEnabled {
+					require.Equal(t, 1, dailyRepo.allocations)
+					require.Equal(t, first["session_id"], third["session_id"])
+					for _, assigned := range dailyRepo.bindings {
+						require.Equal(t, assigned, first["session_id"], "outbound WS frame consumes the durable allocation")
+					}
+				}
+			})
+		}
 	}
 }

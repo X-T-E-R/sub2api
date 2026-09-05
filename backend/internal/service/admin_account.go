@@ -509,6 +509,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, account); err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
 	}
@@ -553,6 +556,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	previousDailyPolicy := codexDailySessionUpdatedAccount(account, nil, nil)
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
 		normalizedExtra, err = normalizeOpenAILongContextBillingUpdateExtra(account, input)
@@ -807,6 +811,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 	}
 
+	if err := validateCodexDailySessionShadowUpdate(previousDailyPolicy, account, input.Extra); err != nil {
+		return nil, err
+	}
+	if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, account); err != nil {
+		return nil, err
+	}
 	billingSettingsAppliedAtomically := false
 	updater := s.accountBillingRepo
 	if updater == nil {
@@ -872,6 +882,19 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
+	if hasCodexDailySessionSettings(updates) || updates[codexFingerprintModeExtraKey] != nil {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		candidate := codexDailySessionUpdatedAccount(account, updates, nil)
+		if err := validateCodexDailySessionShadowUpdate(account, candidate, updates); err != nil {
+			return err
+		}
+		if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, candidate); err != nil {
+			return err
+		}
+	}
 	updates = sanitizedCodexFingerprintExtraUpdates(updates)
 	updates = stripOpenAIAutoResetCreditManagedExtra(updates, true)
 	delete(updates, UpstreamBillingProbeEnabledExtraKey)
@@ -1103,6 +1126,23 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 
 	// Run bulk update for column/jsonb fields first.
+	if hasCodexDailySessionSettings(input.Extra) || input.Extra[codexFingerprintModeExtraKey] != nil || len(input.Credentials) > 0 {
+		accounts, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
+		if err != nil {
+			return nil, err
+		}
+		candidates := make([]*Account, 0, len(accounts))
+		for _, account := range accounts {
+			candidate := codexDailySessionUpdatedAccount(account, input.Extra, input.Credentials)
+			if err := validateCodexDailySessionShadowUpdate(account, candidate, input.Extra); err != nil {
+				return nil, err
+			}
+			candidates = append(candidates, candidate)
+		}
+		if err := validateCodexDailySessionAccounts(ctx, s.accountRepo, candidates...); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
 		return nil, err
 	}

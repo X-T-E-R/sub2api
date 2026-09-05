@@ -98,6 +98,58 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it('requires an explicit session mode when enabling the daily pool in bulk', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-codex-daily-session-pool-enabled').setValue(true)
+    await wrapper.get('[data-testid="daily-session-pool-toggle"]').trigger('click')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.openai.dailySessionPool.bulkModeRequired')
+    await wrapper.get('#bulk-edit-openai-codex-fingerprint-mode-enabled').setValue(true)
+    await wrapper.get('[data-testid="bulk-codex-fingerprint-mode-select"]').setValue('session')
+    await wrapper.get('[data-testid="daily-session-pool-min"]').setValue('6')
+    await wrapper.get('[data-testid="daily-session-pool-max"]').setValue('6')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
+      extra: {
+        codex_fingerprint_mode: 'session',
+        codex_daily_session_pool_enabled: true,
+        codex_daily_session_pool_min: 6,
+        codex_daily_session_pool_max: 6
+      }
+    }))
+  })
+
+  it('sends explicit daily disable without overwriting fingerprint mode or bounds', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['setup-token'] })
+    await wrapper.get('#bulk-edit-codex-daily-session-pool-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
+      extra: { codex_daily_session_pool_enabled: false }
+    }))
+  })
+
+  it('blocks invalid daily bounds and leaves an unchecked pool untouched', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-openai-codex-fingerprint-mode-enabled').setValue(true)
+    await wrapper.get('[data-testid="bulk-codex-fingerprint-mode-select"]').setValue('session')
+    await wrapper.get('#bulk-edit-codex-daily-session-pool-enabled').setValue(true)
+    await wrapper.get('[data-testid="daily-session-pool-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="daily-session-pool-max"]').setValue('1')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+    await wrapper.get('#bulk-edit-codex-daily-session-pool-enabled').setValue(false)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], expect.objectContaining({
+      extra: { codex_fingerprint_mode: 'session' }
+    }))
+  })
+
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 
@@ -941,7 +993,8 @@ describe('BulkEditAccountModal', () => {
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
       extra: {
-        codex_fingerprint_mode: 'off'
+        codex_fingerprint_mode: 'off',
+        codex_daily_session_pool_enabled: false
       }
     })
 

@@ -18,6 +18,7 @@ const codexRequestIdentityContextKey = "openai_codex_request_identity"
 // codexRequestIdentity is an immutable projection of original request carriers.
 // Applying it more than once never hashes an already projected value.
 type codexRequestIdentity struct {
+	originalSession  string
 	accountID        int64
 	values           map[string]string
 	cacheKey         string
@@ -168,6 +169,7 @@ func resolveCodexRequestIdentity(account, source *Account, apiKeyID int64, heade
 		return scopeCodexAccountIdentityValue(source, apiKeyID, kind, raw)
 	}
 	p := &codexRequestIdentity{accountID: account.ID, values: make(map[string]string), lifecycle: make(map[string]any), scoped: codexAccountIdentityNamespace(source) != "", omitted: omitted, canonical: bodyMetadata != nil}
+	p.originalSession = original["session"]
 	if bodyMetadata != nil {
 		p.memoryRequest = bodyMetadata["request_kind"] == "memory"
 	} else {
@@ -459,6 +461,9 @@ func projectCodexIdentityBodyRaw(c *gin.Context, account *Account, body []byte, 
 		headers = c.Request.Header
 	}
 	p := resolveCodexRequestIdentity(account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c), headers, small)
+	if err := resolveCodexDailySessionProjection(c, account, p); err != nil {
+		return body, false, err
+	}
 	if c != nil {
 		c.Set(codexRequestIdentityContextKey, p)
 	}

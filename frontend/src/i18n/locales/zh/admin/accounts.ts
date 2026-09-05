@@ -715,6 +715,16 @@ export default {
         codexFingerprintDevice: '仅设备',
         codexFingerprintSession: '设备+会话',
         codexFingerprintFull: '完全收敛（合并线程）',
+        dailySessionPool: {
+          title: '每日新增 Session 池',
+          description: '按本账号和服务器时区，每天在设定范围内确定新增名额；最小值等于最大值时固定数量。新对话不足时按需使用，名额用完后复用当天 Session。旧对话跨天保持原绑定，不占新名额；数量修改次日生效，关闭仅停止新分配。',
+          min: '每日最少名额',
+          max: '每日最多名额',
+          invalidRange: '填写 1–1000 的整数，最小值应不大于最大值。',
+          inherited: '此影子账号继承父账号 #{id} 的 Session 池设置，请在父账号修改。',
+          bulkEdit: '修改每日 Session 池设置',
+          bulkModeRequired: '批量开启时，同时勾选指纹模式并选择“设备+会话”。'
+        },
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',

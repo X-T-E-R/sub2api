@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -326,6 +326,105 @@ function mountModal(account = buildAccount()) {
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
+  })
+
+  it.each(['oauth', 'setup-token'])('round-trips account daily pool bounds for %s', async type => {
+    const account = { ...buildOpenAIOAuthParentAccount(), type, extra: {
+      codex_fingerprint_mode: 'session',
+      codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 5,
+      codex_daily_session_pool_max: 10
+    } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    expect((wrapper.get('[data-testid="daily-session-pool-min"]').element as HTMLInputElement).value).toBe('5')
+    await wrapper.get('[data-testid="daily-session-pool-min"]').setValue('7')
+    await wrapper.get('[data-testid="daily-session-pool-max"]').setValue('7')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledWith(account.id, expect.objectContaining({ extra: expect.objectContaining({
+      codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 7,
+      codex_daily_session_pool_max: 7
+    }) }))
+  })
+
+  it('writes false for disabled daily allocation and blocks invalid ranges', async () => {
+    const account = { ...buildOpenAIOAuthParentAccount(), extra: {
+      codex_fingerprint_mode: 'session',
+      codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 5,
+      codex_daily_session_pool_max: 10
+    } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="daily-session-pool-min"]').setValue('11')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="daily-session-pool-toggle"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0][1].extra.codex_daily_session_pool_enabled).toBe(false)
+  })
+
+  it('does not write daily defaults for untouched accounts and shows parent inheritance for shadows', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0][1].extra).not.toHaveProperty('codex_daily_session_pool_enabled')
+    const shadow = mountModal({ ...account, id: 12, parent_account_id: 7, extra: { codex_fingerprint_mode: 'session' } })
+    await flushPromises()
+    expect(shadow.find('[data-testid="daily-session-pool-inherited"]').exists()).toBe(true)
+    expect(shadow.find('[data-testid="codex-daily-session-pool"]').exists()).toBe(false)
+  })
+
+  it('does not carry one account’s pool settings into another account', async () => {
+    const first = { ...buildOpenAIOAuthParentAccount(), extra: {
+      codex_fingerprint_mode: 'session',
+      codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 8,
+      codex_daily_session_pool_max: 9
+    } }
+    const second = { ...buildOpenAIOAuthParentAccount(), id: 8, extra: { codex_fingerprint_mode: 'session' } }
+    updateAccountMock.mockReset().mockResolvedValue(second)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(first)
+    await flushPromises()
+    await wrapper.setProps({ account: second })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="daily-session-pool-toggle"]').attributes('aria-checked')).toBe('false')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalledWith(second.id, expect.objectContaining({ extra: expect.not.objectContaining({
+      codex_daily_session_pool_enabled: true
+    }) }))
+    expect(updateAccountMock.mock.calls[0][1].extra).not.toHaveProperty('codex_daily_session_pool_min')
+  })
+
+  it('switching fingerprint mode explicitly disables new daily allocations', async () => {
+    const account = { ...buildOpenAIOAuthParentAccount(), extra: {
+      codex_fingerprint_mode: 'session', codex_daily_session_pool_enabled: true,
+      codex_daily_session_pool_min: 5, codex_daily_session_pool_max: 10
+    } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').setValue('device')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0][1].extra).toMatchObject({
+      codex_fingerprint_mode: 'device', codex_daily_session_pool_enabled: false
+    })
   })
 
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {

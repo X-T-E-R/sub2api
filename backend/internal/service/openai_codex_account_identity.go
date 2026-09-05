@@ -27,6 +27,7 @@ func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Con
 		source = resolved
 	}
 	if c != nil {
+		c.Set(codexDailySessionResolverContextKey, codexDailySessionResolver{gateway: s, ctx: ctx})
 		c.Set(codexAccountIdentitySourceContextKey, source)
 		c.Set(codexAccountIdentitySelectedContextKey, account)
 		c.Set(codexRequestIdentityContextKey, (*codexRequestIdentity)(nil))

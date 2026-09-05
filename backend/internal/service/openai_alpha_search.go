@@ -61,6 +61,11 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	if err := s.ensureOpenAIAlphaSearchAuthMetadata(ctx, account, token, proxyURL); err != nil {
 		return nil, err
 	}
+	// Standalone search's body id is not a conversation identity. Resolve only
+	// explicit session carriers after the existing credential metadata backfill.
+	if _, err := projectCodexRequestBodyWithDailySession(c, account, nil); err != nil {
+		return nil, err
+	}
 	SetOpsUpstreamModel(c, upstreamModel)
 
 	// Codex Personal Access Token（at-...）目前可访问 ChatGPT Codex

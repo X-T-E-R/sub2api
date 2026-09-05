@@ -991,6 +991,25 @@
           <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
         </div>
       </div>
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="flex items-center justify-between gap-4 text-sm" for="bulk-edit-codex-daily-session-pool-enabled">
+          {{ t('admin.accounts.openai.dailySessionPool.bulkEdit') }}
+          <input
+            id="bulk-edit-codex-daily-session-pool-enabled"
+            v-model="enableCodexDailySessionPool"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </label>
+        <CodexDailySessionPoolFields
+          v-if="enableCodexDailySessionPool"
+          v-model="codexDailySessionPool"
+          id-prefix="bulk-codex-daily-pool"
+        />
+        <p v-if="enableCodexDailySessionPool" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.openai.dailySessionPool.bulkModeRequired') }}
+        </p>
+      </div>
 
       <!-- Upstream billing auto probe (any API-key platform) -->
       <div v-if="allBillingProbeCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
@@ -1498,6 +1517,8 @@ import {
   getPresetMappingsByPlatform
 } from '@/composables/useModelWhitelist'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
+import CodexDailySessionPoolFields from '@/components/account/CodexDailySessionPoolFields.vue'
+import { isCodexDailySessionPoolValid, readCodexDailySessionPool, writeCodexDailySessionPool } from '@/components/account/codexDailySessionPool'
 import {
   buildHeaderOverridesObject,
   isHeaderOverrideCapable,
@@ -1708,6 +1729,8 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
+const enableCodexDailySessionPool = ref(false)
+const codexDailySessionPool = ref(readCodexDailySessionPool())
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
@@ -2107,6 +2130,13 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     // 与本函数里其它"关闭/清除"字段的写法一致：codex_cli_only 直接落 false，
     // load_factor 落 0，proxy_id 落 0 —— 批量路径一律用显式哨兵值，不用省略。
     extra.codex_fingerprint_mode = codexFingerprintMode.value
+    if (allOpenAIOAuth.value && codexFingerprintMode.value !== 'session') {
+      extra.codex_daily_session_pool_enabled = false
+    }
+  }
+
+  if (enableCodexDailySessionPool.value && allOpenAIOAuth.value) {
+    writeCodexDailySessionPool(ensureExtra(), codexDailySessionPool.value, 'session', true)
   }
 
   if (enableOpenAICompactMode.value) {
@@ -2194,6 +2224,17 @@ const preCheckMixedChannelRisk = async (built: Record<string, unknown>): Promise
 }
 
 const handleSubmit = async () => {
+  if (enableCodexDailySessionPool.value && allOpenAIOAuth.value) {
+    if (codexDailySessionPool.value.enabled &&
+      (!enableCodexFingerprintMode.value || codexFingerprintMode.value !== 'session')) {
+      appStore.showError(t('admin.accounts.openai.dailySessionPool.bulkModeRequired'))
+      return
+    }
+    if (!isCodexDailySessionPoolValid(codexDailySessionPool.value)) {
+      appStore.showError(t('admin.accounts.openai.dailySessionPool.invalidRange'))
+      return
+    }
+  }
   if (targetMode.value === 'selected' && props.accountIds.length === 0) {
     appStore.showError(t('admin.accounts.bulkEdit.noSelection'))
     return
@@ -2223,6 +2264,7 @@ const handleSubmit = async () => {
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
     enableCodexFingerprintMode.value ||
+    (enableCodexDailySessionPool.value && allOpenAIOAuth.value) ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -2374,6 +2416,8 @@ watch(
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
       enableCodexFingerprintMode.value = false
+      enableCodexDailySessionPool.value = false
+      codexDailySessionPool.value = readCodexDailySessionPool()
       codexFingerprintMode.value = 'off'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false
