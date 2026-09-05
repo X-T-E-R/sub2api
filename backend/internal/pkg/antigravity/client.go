@@ -78,10 +78,13 @@ type UserInfo struct {
 
 // LoadCodeAssistRequest loadCodeAssist 请求
 type LoadCodeAssistRequest struct {
+	Mode     string `json:"mode,omitempty"`
+	Project  string `json:"cloudaicompanionProject,omitempty"`
 	Metadata struct {
-		IDEType    string `json:"ideType"`
-		IDEVersion string `json:"ideVersion"`
-		IDEName    string `json:"ideName"`
+		DuetProject string `json:"duetProject,omitempty"`
+		IDEType     string `json:"ideType"`
+		IDEVersion  string `json:"ideVersion"`
+		IDEName     string `json:"ideName"`
 	} `json:"metadata"`
 }
 
@@ -129,6 +132,33 @@ type LoadCodeAssistResponse struct {
 	CurrentTier             *TierInfo         `json:"currentTier,omitempty"`
 	PaidTier                *PaidTierInfo     `json:"paidTier,omitempty"`
 	IneligibleTiers         []*IneligibleTier `json:"ineligibleTiers,omitempty"`
+}
+
+// UnmarshalJSON accepts both Cloud Code project representations without losing
+// subscription data when the optional project is absent or unrecognized.
+func (r *LoadCodeAssistResponse) UnmarshalJSON(data []byte) error {
+	type response LoadCodeAssistResponse
+	var decoded struct {
+		*response
+		Project json.RawMessage `json:"cloudaicompanionProject"`
+	}
+	var value response
+	decoded.response = &value
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var project string
+	if json.Unmarshal(decoded.Project, &project) != nil {
+		var object struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(decoded.Project, &object) == nil {
+			project = object.ID
+		}
+	}
+	value.CloudAICompanionProject = strings.TrimSpace(project)
+	*r = LoadCodeAssistResponse(value)
+	return nil
 }
 
 // PaidTierInfo 付费等级信息，包含 AI Credits 余额。
@@ -438,7 +468,16 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (*UserInfo
 // LoadCodeAssist 获取账户信息，返回解析后的结构体和原始 JSON
 // 支持 URL fallback：sandbox → daily → prod
 func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadCodeAssistResponse, map[string]any, error) {
-	reqBody := LoadCodeAssistRequest{}
+	return c.loadCodeAssist(ctx, accessToken, LoadCodeAssistRequest{})
+}
+
+func (c *Client) LoadCodeAssistForQuota(ctx context.Context, accessToken, projectID string) (*LoadCodeAssistResponse, map[string]any, error) {
+	reqBody := LoadCodeAssistRequest{Mode: "FULL_ELIGIBILITY_CHECK", Project: strings.TrimSpace(projectID)}
+	reqBody.Metadata.DuetProject = reqBody.Project
+	return c.loadCodeAssist(ctx, accessToken, reqBody)
+}
+
+func (c *Client) loadCodeAssist(ctx context.Context, accessToken string, reqBody LoadCodeAssistRequest) (*LoadCodeAssistResponse, map[string]any, error) {
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
 	reqBody.Metadata.IDEVersion = GetUserAgentVersionForContext(ctx)
 	reqBody.Metadata.IDEName = "antigravity"
@@ -645,7 +684,7 @@ type DeprecatedModelInfo struct {
 
 // FetchAvailableModelsRequest fetchAvailableModels 请求
 type FetchAvailableModelsRequest struct {
-	Project string `json:"project"`
+	Project string `json:"project,omitempty"`
 }
 
 // FetchAvailableModelsResponse fetchAvailableModels 响应

@@ -103,6 +103,7 @@ type antigravityUsageCache struct {
 	usageInfo *UsageInfo
 	timestamp time.Time
 	scope     string
+	projectID string // Actual query project; discovery need not persist it.
 }
 
 const (
@@ -1121,9 +1122,14 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
 		fetchResult, err := s.antigravityQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
 		var previous *UsageInfo
-		if value, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := value.(*antigravityUsageCache); ok && cache.scope == scope {
-				previous = cache.usageInfo
+		projectID := ""
+		if fetchResult != nil && fetchResult.antigravityScope != "" {
+			scope = fetchResult.antigravityScope
+			projectID = fetchResult.antigravityProjectID
+			if value, ok := s.cache.antigravityCache.Load(account.ID); ok {
+				if cache, ok := value.(*antigravityUsageCache); ok && cache.scope == scope && cache.projectID == projectID {
+					previous = cache.usageInfo
+				}
 			}
 		}
 		if err != nil {
@@ -1134,6 +1140,7 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 				usageInfo: degraded,
 				timestamp: time.Now(),
 				scope:     scope,
+				projectID: projectID,
 			})
 			return degraded, nil
 		}
@@ -1144,6 +1151,7 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 			usageInfo: fetchResult.UsageInfo,
 			timestamp: time.Now(),
 			scope:     scope,
+			projectID: projectID,
 		})
 		return fetchResult.UsageInfo, nil
 	})

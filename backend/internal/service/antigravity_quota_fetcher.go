@@ -34,8 +34,15 @@ const (
 
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
 type AntigravityQuotaFetcher struct {
-	proxyRepo ProxyRepository
-	cfg       *config.Config
+	proxyRepo     ProxyRepository
+	cfg           *config.Config
+	tokenProvider *AntigravityTokenProvider
+}
+
+func ProvideAntigravityQuotaFetcher(proxyRepo ProxyRepository, cfg *config.Config, tokenProvider *AntigravityTokenProvider) *AntigravityQuotaFetcher {
+	fetcher := NewAntigravityQuotaFetcher(proxyRepo, cfg)
+	fetcher.tokenProvider = tokenProvider
+	return fetcher
 }
 
 // NewAntigravityQuotaFetcher 创建 AntigravityQuotaFetcher
@@ -56,11 +63,30 @@ func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
 func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
+	if f.tokenProvider != nil {
+		var err error
+		accessToken, account, err = f.tokenProvider.GetAccessTokenForQuota(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		projectID = account.GetCredential("project_id")
+	}
+	scope := antigravityQuotaScope(account)
 
 	client, err := antigravity.NewClient(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}
+
+	// Resolve the project before quota reads; discovery never onboards or persists
+	// a project and failure still permits quota reads with the stored hint.
+	tierRaw, tierNormalized, loadResp, subscriptionState := f.fetchSubscriptionTier(ctx, client, accessToken, projectID)
+	if loadResp != nil && strings.TrimSpace(loadResp.CloudAICompanionProject) != "" {
+		projectID = strings.TrimSpace(loadResp.CloudAICompanionProject)
+	}
+	// Keep acquisition provenance even if the model endpoint fails after token
+	// rotation. The stored credential scope and actual query project are distinct.
+	result := &QuotaResult{antigravityScope: scope, antigravityProjectID: projectID}
 
 	// 调用 API 获取配额
 	modelsResp, modelsRaw, err := client.FetchAvailableModels(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
@@ -71,6 +97,8 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 			now := time.Now()
 			fbType := classifyForbiddenType(forbiddenErr.Body)
 			return &QuotaResult{
+				antigravityScope:     scope,
+				antigravityProjectID: projectID,
 				UsageInfo: &UsageInfo{
 					Source:                       "active",
 					UpdatedAt:                    &now,
@@ -86,11 +114,8 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 				},
 			}, nil
 		}
-		return nil, err
+		return result, err
 	}
-
-	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
-	tierRaw, tierNormalized, loadResp, subscriptionState := f.fetchSubscriptionTier(ctx, client, accessToken)
 
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
@@ -102,16 +127,18 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	}
 	applyAntigravitySummary(usageInfo, summary, time.Now())
 
-	return &QuotaResult{
-		UsageInfo: usageInfo,
-		Raw:       modelsRaw,
-	}, nil
+	result.UsageInfo = usageInfo
+	result.Raw = modelsRaw
+	return result, nil
 }
 
 // fetchSubscriptionTier 获取账号订阅等级，失败返回空字符串。
 // 同时返回 LoadCodeAssistResponse，以便提取 AI Credits 余额。
-func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse, state AntigravityObservationState) {
-	loadResp, _, err := client.LoadCodeAssist(ctx, accessToken)
+func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken, projectID string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse, state AntigravityObservationState) {
+	// Discovery is optional and must leave time for the model quota request.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	loadResp, _, err := client.LoadCodeAssistForQuota(ctx, accessToken, projectID)
 	if err != nil {
 		slog.Warn("failed to fetch subscription tier", "error", err)
 		return "", "", nil, antigravityObservationUnavailable

@@ -306,6 +306,10 @@ func (s *AntigravityOAuthService) RefreshAccountToken(ctx context.Context, accou
 
 	// 每次刷新都调用 LoadCodeAssist 获取 project_id + plan_type，失败时重试
 	existingProjectID := strings.TrimSpace(account.GetCredential("project_id"))
+	if isAntigravityQuotaTokenContext(ctx) {
+		tokenInfo.ProjectID = existingProjectID
+		return tokenInfo, nil
+	}
 	loadResult, loadErr := s.loadProjectIDWithRetry(ctx, tokenInfo.AccessToken, proxyURL, 3)
 
 	if loadErr != nil {

@@ -915,7 +915,7 @@ var ProviderSet = wire.NewSet(
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,
 	ProvideDeferredService,
-	NewAntigravityQuotaFetcher,
+	ProvideAntigravityQuotaFetcher,
 	NewGrokQuotaFetcher,
 	NewUserAttributeService,
 	NewUsageCache,
