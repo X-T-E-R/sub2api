@@ -650,6 +650,7 @@ type FetchAvailableModelsRequest struct {
 
 // FetchAvailableModelsResponse fetchAvailableModels 响应
 type FetchAvailableModelsResponse struct {
+	QuotaBaseURL       string                         `json:"-"`
 	Models             map[string]ModelInfo           `json:"models"`
 	DeprecatedModelIDs map[string]DeprecatedModelInfo `json:"deprecatedModelIds,omitempty"`
 }
@@ -726,13 +727,20 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 		if err := json.Unmarshal(respBodyBytes, &modelsResp); err != nil {
 			return nil, nil, fmt.Errorf("响应解析失败: %w", err)
 		}
+		if resp.Request == nil {
+			return nil, nil, errors.New("model response request is missing")
+		}
+		modelsResp.QuotaBaseURL, err = allowedModelQuotaBase(resp.Request.URL)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		// 解析原始 JSON 为 map
 		var rawResp map[string]any
 		_ = json.Unmarshal(respBodyBytes, &rawResp)
 
 		// 标记成功的 URL，下次优先使用
-		DefaultURLAvailability.MarkSuccess(baseURL)
+		DefaultURLAvailability.MarkSuccess(modelsResp.QuotaBaseURL)
 		return &modelsResp, rawResp, nil
 	}
 
@@ -752,27 +760,24 @@ func checkFetchAvailableModelsRedirect(req *http.Request, via []*http.Request) e
 	if req == nil || req.URL == nil {
 		return errors.New("redirect url is nil")
 	}
-	if !isAllowedFetchAvailableModelsRedirectHost(req.URL.Hostname()) {
-		return fmt.Errorf("redirect to unsupported host: %s", req.URL.Hostname())
-	}
-	return nil
+	_, err := allowedModelQuotaBase(req.URL)
+	return err
 }
 
-func isAllowedFetchAvailableModelsRedirectHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return false
+func allowedModelQuotaBase(target *url.URL) (string, error) {
+	if target == nil || target.User != nil {
+		return "", errors.New("invalid model quota destination")
 	}
 	for _, baseURL := range BaseURLs {
 		parsed, err := url.Parse(baseURL)
 		if err != nil {
 			continue
 		}
-		if strings.EqualFold(host, parsed.Hostname()) {
-			return true
+		if strings.EqualFold(target.Scheme, parsed.Scheme) && strings.EqualFold(target.Host, parsed.Host) {
+			return baseURL, nil
 		}
 	}
-	return false
+	return "", errors.New("unsupported model quota destination")
 }
 
 // ── Privacy API ──────────────────────────────────────────────────────

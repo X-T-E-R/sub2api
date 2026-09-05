@@ -20,6 +20,7 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
+      locale: { value: 'en' },
       t: (key: string) => key
     })
   }
@@ -160,9 +161,9 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G2.5I|45|2026-03-01T11:00:00Z')
-    expect(wrapper.text()).toContain('G3.1I|20|2026-03-01T10:00:00Z')
-    expect(wrapper.text()).toContain('G3I|70|2026-03-01T09:00:00Z')
+    expect(wrapper.text()).toContain('G2.5I|55|2026-03-01T11:00:00Z')
+    expect(wrapper.text()).toContain('G3.1I|80|2026-03-01T10:00:00Z')
+    expect(wrapper.text()).toContain('G3I|30|2026-03-01T09:00:00Z')
   })
 
   it('Antigravity 会显示 AI Credits 余额信息', async () => {
@@ -235,7 +236,7 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G3.8F|Gemini 3.8 Flash (gemini-3.8-flash)|42')
+    expect(wrapper.text()).toContain('G3.8F|Gemini 3.8 Flash (gemini-3.8-flash)|58')
     expect(wrapper.text()).toContain('admin.accounts.tier.pro')
     expect(getUsage).toHaveBeenCalledWith(1003, 'passive', false)
   })
@@ -262,7 +263,7 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityUnavailable')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.explicitWindowsUnavailable')
     expect(wrapper.text()).toContain('common.unknown')
     expect(wrapper.text()).not.toContain('0')
   })
@@ -349,7 +350,7 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('O4.8|61')
+    expect(wrapper.text()).toContain('O4.8|39')
     expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityPartial')
   })
 
@@ -397,6 +398,23 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
   })
 
+
+  it('Antigravity 刷新失败时仍展示明确标旧的窗口，保留零剩余量', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active', error: 'network_error', error_code: 'network_error',
+      antigravity_window_state: 'unavailable',
+      antigravity_windows: {
+        claude_5h: { source_bucket_id: '3p-5h', remaining_fraction: 0, reset_time: '2026-09-04T00:00:00Z', observed_at: '2026-09-03T12:00:00Z', stale: true }
+      }
+    })
+    const wrapper = mount(AccountUsageCell, { props: { account: makeAccount({ id: 1010, extra: {} }) } })
+    await flushPromises()
+    expect(wrapper.get('[data-window="claude_5h"] [role="progressbar"]').attributes('aria-valuenow')).toBe('0')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.explicitWindowsUnavailable')
+    expect(wrapper.findAll('[role="progressbar"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
 
   it('OpenAI OAuth 快照已过期时首屏会重新请求 usage', async () => {
     getUsage.mockResolvedValue({

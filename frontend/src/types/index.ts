@@ -1354,6 +1354,16 @@ export interface GrokBillingSummary {
   failed_windows?: string[]
 }
 
+export type AntigravityWindowKey = 'claude_5h' | 'claude_weekly' | 'gemini_5h' | 'gemini_weekly'
+
+export interface AntigravityQuotaWindow {
+  source_bucket_id: string
+  remaining_fraction: number
+  reset_time?: string
+  observed_at: string
+  stale?: boolean
+}
+
 export interface AccountUsageInfo {
   source?: 'passive' | 'active'
   updated_at?: string | null
@@ -1371,6 +1381,9 @@ export interface AccountUsageInfo {
   antigravity_quota?: Record<string, AntigravityModelQuota> | null
   antigravity_quota_state?: AntigravityObservationState
   antigravity_quota_stale?: boolean
+  antigravity_windows?: Partial<Record<AntigravityWindowKey, AntigravityQuotaWindow>> | null
+  antigravity_window_state?: AntigravityObservationState
+  antigravity_window_checked_at?: string | null
   antigravity_quota_details?: Record<string, AntigravityModelDetail> | null
   model_forwarding_rules?: Record<string, string> | null
   grok_request_quota?: GrokQuotaWindow | null
@@ -1393,6 +1406,8 @@ export interface AccountUsageInfo {
   antigravity_ineligible?: boolean
   ai_credits?: Array<{
     credit_type?: string
+    amount_text?: string
+    minimum_balance_text?: string
     amount?: number | null
     minimum_balance?: number | null
   }> | null

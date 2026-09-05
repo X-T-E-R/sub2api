@@ -95,6 +95,12 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
 	usageInfo.AntigravitySubscriptionState = subscriptionState
+	summary, summaryErr := client.RetrieveUserQuotaSummary(ctx, accessToken, projectID, modelsResp.QuotaBaseURL, resolveModelsListReadLimit(f.cfg))
+	if summaryErr != nil {
+		// Summary is optional; do not expose upstream bodies or discard model data.
+		summary = nil
+	}
+	applyAntigravitySummary(usageInfo, summary, time.Now())
 
 	return &QuotaResult{
 		UsageInfo: usageInfo,
@@ -213,33 +219,17 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 	}
 
-	// 同时设置 FiveHour 用于兼容展示（取主要模型）
-	priorityModels := []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"}
-	for _, modelName := range priorityModels {
-		if modelQuota, ok := info.AntigravityQuota[modelName]; ok {
-			progress := &UsageProgress{
-				Utilization: float64(modelQuota.Utilization),
-			}
-			if modelQuota.ResetTime != "" {
-				if resetTime, err := time.Parse(time.RFC3339, modelQuota.ResetTime); err == nil {
-					progress.ResetsAt = &resetTime
-					progress.RemainingSeconds = int(time.Until(resetTime).Seconds())
-				}
-			}
-			info.FiveHour = progress
-			break
-		}
-	}
-
 	if loadResp != nil {
 		for _, credit := range loadResp.GetAvailableCredits() {
-			if credit.CreditType != "GOOGLE_ONE_AI" {
+			if strings.TrimSpace(credit.CreditType) == "" {
 				continue
 			}
 			info.AICredits = append(info.AICredits, AICredit{
-				CreditType:     credit.CreditType,
-				Amount:         parseOptionalCreditAmount(credit.CreditAmount),
-				MinimumBalance: parseOptionalCreditAmount(credit.MinimumCreditAmountForUsage),
+				CreditType:         credit.CreditType,
+				AmountText:         credit.CreditAmount,
+				MinimumBalanceText: credit.MinimumCreditAmountForUsage,
+				Amount:             parseOptionalCreditAmount(credit.CreditAmount),
+				MinimumBalance:     parseOptionalCreditAmount(credit.MinimumCreditAmountForUsage),
 			})
 		}
 	}

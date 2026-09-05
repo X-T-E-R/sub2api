@@ -288,40 +288,8 @@
       </div>
 
       <!-- Usage data from API -->
-      <div v-else-if="antigravityQuotaRows.length > 0" class="space-y-1">
-        <UsageProgressBar
-          v-for="row in antigravityQuotaRows"
-          :key="row.key"
-          :label="antigravityQuotaLabel(row)"
-          :label-title="row.title"
-          :utilization="row.utilization"
-          :resets-at="row.resetTime"
-          :color="antigravityQuotaColor(row)"
-        />
-
-        <div v-if="antigravityQuotaIsPartial" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityPartial') }}
-        </div>
-        <div v-if="usageInfo?.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityStale') }}
-        </div>
-
-        <div v-if="aiCreditsDisplay" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
-          💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
-        </div>
-      </div>
-      <div v-else-if="usageInfo" class="space-y-1">
-        <div class="text-[10px] text-gray-500 dark:text-gray-400">
-          {{ t('admin.accounts.usageWindow.antigravityUnavailable') }}
-        </div>
-        <div v-if="usageInfo.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityStale') }}
-        </div>
-        <div v-if="aiCreditsDisplay" class="text-[10px] text-gray-500 dark:text-gray-400">
-          💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
-        </div>
-      </div>
-      <div v-else class="text-xs text-gray-400">-</div>
+      <div v-else-if="!usageInfo" class="text-xs text-gray-400">-</div>
+      <AntigravityQuotaPanel v-if="usageInfo && !loading && !error" :usage="usageInfo" />
 
       <button
         type="button"
@@ -655,14 +623,13 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import {
-  buildAntigravityQuotaRows,
   getAntigravityTier,
-  hasAntigravityIneligibleTier,
-  type AntigravityQuotaRow
+  hasAntigravityIneligibleTier
 } from '@/utils/antigravityUsage'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
+import AntigravityQuotaPanel from './AntigravityQuotaPanel.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
@@ -801,47 +768,6 @@ const shouldAutoLoadUsageOnMount = computed(() => {
 
 const shouldLazyLoadOnMobile = computed(() => {
   return shouldFetchUsage.value && !isDesktopViewport.value
-})
-
-// ===== Antigravity quota from API (usageInfo.antigravity_quota) =====
-
-const antigravityQuotaRows = computed(() => buildAntigravityQuotaRows(usageInfo.value))
-
-const antigravityQuotaIsPartial = computed(() =>
-  usageInfo.value?.antigravity_quota_state === 'partial'
-)
-
-const antigravityQuotaLabel = (row: AntigravityQuotaRow): string => {
-  if (row.compactLabel) return row.compactLabel
-  switch (row.family) {
-    case 'gemini-pro': return t('admin.accounts.usageWindow.geminiQuotaPro')
-    case 'gemini-flash': return t('admin.accounts.usageWindow.geminiQuotaFlash')
-    case 'gemini-image': return t('admin.accounts.usageWindow.geminiQuotaImage')
-    case 'claude': return t('admin.accounts.usageWindow.claude')
-    default: return row.key
-  }
-}
-
-const antigravityQuotaColor = (row: AntigravityQuotaRow): 'indigo' | 'emerald' | 'purple' | 'amber' => {
-  switch (row.family) {
-    case 'gemini-pro': return 'indigo'
-    case 'gemini-flash': return 'emerald'
-    case 'gemini-image': return 'purple'
-    default: return 'amber'
-  }
-}
-
-const aiCreditsDisplay = computed(() => {
-  const credits = usageInfo.value?.ai_credits
-  if (!credits || credits.length === 0) return null
-
-  const amounts = credits
-    .map((credit) => credit.amount)
-    .filter((amount): amount is number => typeof amount === 'number' && Number.isFinite(amount))
-  if (amounts.length === 0) return t('common.unknown')
-
-  const total = amounts.reduce((sum, amount) => sum + amount, 0)
-  return total.toFixed(0)
 })
 
 // Antigravity 账户类型：实时 usage 结果优先，账号 extra 仅作加载前兼容回退。
