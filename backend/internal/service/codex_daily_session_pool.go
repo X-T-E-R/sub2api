@@ -53,25 +53,25 @@ func resolveCodexDailySessionProjection(c *gin.Context, account *Account, p *cod
 	enabled = enabled && account.GetCodexFingerprintMode() == codexFingerprintSession
 	if p.originalSession == "" {
 		if enabled {
-			return errors.New("Codex daily session pooling requires an original root session_id")
+			return errors.New("codex daily session pooling requires an original root session_id")
 		}
 		return nil
 	}
 	if gateway == nil || gateway.codexDailySessionPool == nil {
 		if enabled {
-			return errors.New("Codex daily session storage is unavailable")
+			return errors.New("codex daily session storage is unavailable")
 		}
 		return nil
 	}
 	namespace := codexAccountIdentityNamespace(source)
 	if namespace == "" {
 		if enabled {
-			return errors.New("Codex daily session pooling requires a stable credential identity")
+			return errors.New("codex daily session pooling requires a stable credential identity")
 		}
 		return nil
 	}
 	if resolver.ctx == nil {
-		return errors.New("Codex daily session resolution requires request context")
+		return errors.New("codex daily session resolution requires request context")
 	}
 	session, err := gateway.codexDailySessionPool.resolve(resolver.ctx, namespace, getAPIKeyIDFromContext(c), p.originalSession, source)
 	if err != nil {
@@ -121,7 +121,9 @@ func (s *CodexDailySessionPool) resolve(ctx context.Context, namespace string, a
 	key := scope + ":" + binding
 	if s.cache != nil {
 		if value, ok := s.cache.Get(key); ok {
-			return value.(string), nil
+			if session, ok := value.(string); ok && session != "" {
+				return session, nil
+			}
 		}
 	}
 	session, err := s.repo.FindBinding(ctx, scope, binding)

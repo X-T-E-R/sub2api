@@ -70,7 +70,7 @@ func (r *codexDailySessionRepository) Allocate(ctx context.Context, scope, bindi
 		return "", err
 	}
 	if !enabled || service.CodexDailySessionScope(owner) != scope {
-		return "", fmt.Errorf("Codex daily session policy changed or is disabled; refresh the selected account")
+		return "", fmt.Errorf("codex daily session policy changed or is disabled; refresh the selected account")
 	}
 	// Read only matching credential aliases, not every opted-in account's JSON.
 	query := `SELECT id,type,credentials,extra FROM accounts WHERE platform='openai' AND deleted_at IS NULL AND parent_account_id IS NULL AND extra->>'codex_daily_session_pool_enabled'='true' AND `
@@ -115,7 +115,7 @@ func (r *codexDailySessionRepository) Allocate(ctx context.Context, scope, bindi
 		return "", err
 	}
 	if len(aliases) == 0 {
-		return "", fmt.Errorf("Codex daily session policy changed or is disabled; refresh the selected account")
+		return "", fmt.Errorf("codex daily session policy changed or is disabled; refresh the selected account")
 	}
 	_, min, max, err = service.CodexDailySessionPolicy(aliases[0])
 	if err != nil {

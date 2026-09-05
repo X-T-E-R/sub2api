@@ -52,7 +52,7 @@ func (c *Client) RetrieveUserQuotaSummary(ctx context.Context, accessToken, proj
 	if err != nil {
 		return nil, fmt.Errorf("quota summary request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 	if err != nil {
 		return nil, fmt.Errorf("quota summary read: %w", err)

@@ -114,7 +114,9 @@ func TestCodexIdentityProjectionGraphAndLifetimes(t *testing.T) {
 			next, _ := project(identityFixture(t, "tree-a", "child-a", "turn-new", 1, nil))
 			require.NotEqual(t, child["turn_id"], next["turn_id"])
 			require.Equal(t, child["thread_id"], next["thread_id"])
-			require.Equal(t, next["thread_id"].(string)+":1", next["window_id"])
+			thread, ok := next["thread_id"].(string)
+			require.True(t, ok)
+			require.Equal(t, thread+":1", next["window_id"])
 			require.Equal(t, float64(1), next["window_number"])
 			require.NotEqual(t, child["context_window_id"], next["context_window_id"])
 			require.Equal(t, float64(1700000000000), next["turn_started_at_unix_ms"])
@@ -266,6 +268,59 @@ func TestCodexIdentityProjectionMissingDefaultsAndCompact(t *testing.T) {
 	require.False(t, projectCodexRequestBody(identityContext(t, nil), account, body))
 	after, _ := json.Marshal(body)
 	require.Equal(t, before, after, "API-key accounts retain original metadata")
+}
+
+func TestCodexIdentityProjectionCompactOriginalIdentityRelations(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough=%t", passthrough), func(t *testing.T) {
+			build := func(credential, root, thread string) *http.Request {
+				account := &Account{ID: 10, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": credential}}
+				c := identityContext(t, nil)
+				c.Request.URL.Path = "/v1/responses/compact"
+				if root != "" {
+					c.Request.Header.Set("session-id", root)
+					c.Request.Header.Set("x-client-request-id", thread)
+				}
+				body := []byte(`{"model":"gpt-5.1","input":[]}`)
+				var req *http.Request
+				var err error
+				if passthrough {
+					req, err = svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "token")
+				} else {
+					req, err = svc.buildUpstreamRequest(context.Background(), c, account, body, "token", false, "", true)
+				}
+				require.NoError(t, err)
+				require.Equal(t, chatgptCodexURL+"/compact", req.URL.String())
+				require.Equal(t, "application/json", req.Header.Get("Accept"))
+				require.Equal(t, "Bearer token", req.Header.Get("Authorization"))
+				return req
+			}
+			for i := 0; i < 2; i++ {
+				missing := build("credential-a", "", "")
+				for _, header := range []string{"session_id", "session-id", "thread-id", "x-client-request-id"} {
+					require.Empty(t, missing.Header.Get(header), "missing originals do not create synthetic identity")
+				}
+			}
+			root := build("credential-a", "root-a", "root-a")
+			child := build("credential-a", "root-a", "child-a")
+			repeated := build("credential-a", "root-a", "child-a")
+			other := build("credential-b", "root-a", "child-a")
+			require.NotEmpty(t, root.Header.Get("session_id"))
+			require.NotEqual(t, "root-a", root.Header.Get("session_id"))
+			require.Equal(t, root.Header.Get("session_id"), root.Header.Get("thread-id"), "one root entity has one projection")
+			require.Equal(t, root.Header.Get("session_id"), child.Header.Get("session_id"))
+			require.NotEqual(t, root.Header.Get("thread-id"), child.Header.Get("thread-id"))
+			for _, req := range []*http.Request{root, child, repeated, other} {
+				require.Equal(t, req.Header.Get("session_id"), req.Header.Get("session-id"))
+				require.Equal(t, req.Header.Get("thread-id"), req.Header.Get("x-client-request-id"))
+			}
+			for _, header := range []string{"session_id", "thread-id"} {
+				require.Equal(t, child.Header.Get(header), repeated.Header.Get(header))
+				require.NotEqual(t, child.Header.Get(header), other.Header.Get(header))
+			}
+		})
+	}
 }
 
 func TestCodexIdentityProjectionCanonicalAbsenceAndCacheGrouping(t *testing.T) {
@@ -496,7 +551,7 @@ func TestCodexIdentityProjectionRealWSIngressFrames(t *testing.T) {
 						done <- err
 						return
 					}
-					defer conn.CloseNow()
+					defer func() { _ = conn.CloseNow() }()
 					c, _ := gin.CreateTestContext(httptest.NewRecorder())
 					c.Request = r.Clone(r.Context())
 					c.Request.Header.Set(openAIWSTurnMetadataHeader, `{"thread_id":"stale-thread","turn_id":"stale-turn","turn_started_at_unix_ms":1}`)
@@ -514,7 +569,7 @@ func TestCodexIdentityProjectionRealWSIngressFrames(t *testing.T) {
 				defer cancel()
 				client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 				require.NoError(t, err)
-				defer client.CloseNow()
+				defer func() { _ = client.CloseNow() }()
 				for i, turn := range []string{"turn-a", "turn-a", "turn-b"} {
 					body := identityFixture(t, "tree-a", "child-a", turn, 2, nil)
 					body["type"], body["model"], body["input"] = "response.create", "gpt-5.1", []any{}

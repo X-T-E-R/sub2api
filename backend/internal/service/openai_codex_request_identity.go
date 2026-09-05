@@ -391,7 +391,9 @@ func (p *codexRequestIdentity) applyHeaders(headers http.Header) {
 	}
 	metadata := map[string]any{openAIWSTurnMetadataHeader: headers.Get(openAIWSTurnMetadataHeader)}
 	if p.applyEmbedded(metadata) {
-		headers.Set(openAIWSTurnMetadataHeader, metadata[openAIWSTurnMetadataHeader].(string))
+		if value, ok := metadata[openAIWSTurnMetadataHeader].(string); ok {
+			headers.Set(openAIWSTurnMetadataHeader, value)
+		}
 	}
 }
 

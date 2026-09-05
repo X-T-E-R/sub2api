@@ -119,6 +119,31 @@ func TestCodexDailyPoolSettingsAndAliases(t *testing.T) {
 	require.NotEqual(t, CodexDailySessionScope(base), CodexDailySessionScope(&otherUser))
 }
 
+func TestCodexDailyPoolInvalidCacheEntryUsesDurableBinding(t *testing.T) {
+	for _, invalid := range []any{42, ""} {
+		repo := &dailyPoolFixtureRepo{}
+		pool := fixtureDailyPool(t, repo)
+		account := dailyPoolAccount()
+		key := codexPoolDigest("codex-daily-account:v1:credential") + ":" + codexPoolDigest("codex-daily-root:v1:77:root")
+		repo.bindings = map[string]string{key: "durable-session"}
+		require.True(t, pool.cache.Set(key, invalid, 1))
+		pool.cache.Wait()
+		session, err := pool.resolve(context.Background(), "credential", 77, "root", account)
+		require.NoError(t, err)
+		require.Equal(t, "durable-session", session)
+		require.Equal(t, 1, repo.reads)
+		require.Zero(t, repo.allocations)
+		pool.cache.Wait()
+		require.True(t, pool.cache.Set(key, invalid, 1))
+		pool.cache.Wait()
+		repo.err = errors.New("storage unavailable")
+		session, err = pool.resolve(context.Background(), "credential", 77, "root", account)
+		require.ErrorIs(t, err, repo.err)
+		require.Empty(t, session)
+		require.Zero(t, repo.allocations)
+	}
+}
+
 func TestCodexDailyPoolSetupTokenIdentityShapes(t *testing.T) {
 	for _, shape := range []struct {
 		name, accountID, userID string
@@ -226,16 +251,18 @@ func TestCodexDailyPoolActualHTTPAndCompatibilityRoutes(t *testing.T) {
 			require.NoError(t, err)
 			upstream := &httpUpstreamRecorder{resp: response}
 			svc := &OpenAIGatewayService{codexDailySessionPool: pool, httpUpstream: upstream, cfg: &config.Config{}, toolCorrector: NewCodexToolCorrector()}
-			if route == "messages" || route == "chat" {
+			switch route {
+			case "messages", "chat":
 				raw = []byte(`{"model":"gpt-5.4","max_tokens":16,"messages":[{"role":"user","content":"fixture"}],"stream":false}`)
-				if route == "messages" {
+				switch route {
+				case "messages":
 					_, err = svc.ForwardAsAnthropic(context.Background(), c, account, raw, "root-A", "gpt-5.4")
-				} else {
+				case "chat":
 					_, err = svc.ForwardAsChatCompletions(context.Background(), c, account, raw, "root-A", "gpt-5.4")
 				}
-			} else if route == "alpha" {
+			case "alpha":
 				_, err = svc.ForwardAlphaSearch(context.Background(), c, account, raw)
-			} else {
+			default:
 				_, err = svc.Forward(context.Background(), c, account, raw)
 			}
 			require.NoError(t, err)
@@ -327,7 +354,9 @@ func TestCodexDailyPoolShadowAndAccountABA(t *testing.T) {
 		body := identityFixture(t, "same-root", "child", "turn", 1, nil)
 		_, err = projectCodexRequestBodyWithDailySession(c, account, body)
 		require.NoError(t, err)
-		return projectedMetadata(t, body)["session_id"].(string)
+		session, ok := projectedMetadata(t, body)["session_id"].(string)
+		require.True(t, ok)
+		return session
 	}
 	a := project(parent)
 	require.Equal(t, a, project(shadow), "shadow uses parent pool settings and actual credential scope")
