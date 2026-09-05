@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AntigravityQuotaPanel from '../AntigravityQuotaPanel.vue'
+import UsageProgressBar from '../UsageProgressBar.vue'
 import type { AccountUsageInfo, AntigravityQuotaWindow } from '@/types'
 import accounts from '@/i18n/locales/en/admin/accounts'
 import { antigravityWindowPercent, antigravityCreditAmount } from '@/utils/antigravityUsage'
@@ -41,14 +42,17 @@ describe('explicit Antigravity quota presentation', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-05T12:00:00Z')) })
   afterEach(() => { vi.useRealTimers() })
 
-  it('shows two named columns and remaining percentages including true zero', () => {
+  it('uses compact shared bars and keeps exact windows and typed credits in closed details', () => {
     const wrapper = render({ ...empty(), antigravity_window_state: 'available', antigravity_windows: {
       claude_5h: observation(0, '2026-09-05T13:00:00Z'),
       claude_weekly: observation(0.256),
       gemini_5h: observation(0.42, '2026-09-07T12:00:00Z'),
       gemini_weekly: observation(1)
     }, ai_credits: [{ credit_type: 'GOOGLE_ONE_AI', amount_text: '0' }, { credit_type: 'OTHER', amount_text: '12.340' }] })
-    expect(wrapper.get('[data-testid="quota-columns"]').classes()).toContain('grid-cols-2')
+    expect(wrapper.get('[data-testid="quota-windows"]').findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.get('details').attributes('open')).toBeUndefined()
+    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.props('utilization'))).toEqual([0, 42])
+    expect(wrapper.get('[data-testid="quota-compact"]').text()).not.toContain('GOOGLE_ONE_AI')
     expect(wrapper.findAll('section').map(node => node.attributes('aria-label'))).toEqual(['Claude', 'Gemini'])
     expect(wrapper.findAll('[role="progressbar"]').map(node => node.attributes('aria-valuenow'))).toEqual(['0', '25.6', '42', '100'])
     expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('2d 0h')
@@ -59,7 +63,7 @@ describe('explicit Antigravity quota presentation', () => {
     wrapper.unmount()
   })
 
-  it('keeps absent windows unknown even with high/low model fallback data', () => {
+  it('shows real model fallback without fabricating windows', () => {
     const wrapper = render({ ...empty(), antigravity_quota: {
       'claude-sonnet-high': { utilization: 20 }, 'claude-sonnet-low': { utilization: 40 }
     } })
@@ -67,7 +71,39 @@ describe('explicit Antigravity quota presentation', () => {
     expect(wrapper.findAll('[data-window]').every(node => node.text().includes('Unknown'))).toBe(true)
     expect(wrapper.text()).toContain('Window quotas unavailable')
     expect(wrapper.get('summary').text()).toBe('Model quotas (remaining)')
-    expect(wrapper.text()).toContain('80%')
+    expect(wrapper.get('[data-testid="quota-compact"]').text()).toContain('80%')
+    expect(wrapper.get('[data-testid="quota-compact"]').text()).not.toContain('5h')
+    wrapper.unmount()
+  })
+
+  it('does not spend collapsed rows on missing windows and keeps stale status visible', () => {
+    const wrapper = render({ ...empty(), antigravity_window_state: 'partial', antigravity_windows: {
+      claude_5h: { ...observation(0), stale: true }
+    } })
+    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)).toHaveLength(1)
+    expect(wrapper.get('summary').text()).toContain('Stale')
+    expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('Unknown')
+    expect(wrapper.get('[data-window="claude_5h"]').text()).toContain('Source: 3p-5h')
+    wrapper.unmount()
+  })
+
+  it('bounds default model rows but keeps every full model name in details', () => {
+    const quota = Object.fromEntries(['a', 'b', 'c', 'd'].map(id => [`model-${id}`, { utilization: 30 }]))
+    const wrapper = render({ ...empty(), antigravity_quota: quota })
+    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)).toHaveLength(2)
+    for (const id of Object.keys(quota)) expect(wrapper.get('details').text()).toContain(id)
+    wrapper.unmount()
+  })
+
+  it('selects the lowest known window per family without inventing missing values or reset times', () => {
+    const wrapper = render({ ...empty(), antigravity_windows: {
+      claude_5h: observation(0.87), claude_weekly: observation(0.25, 'bad'),
+      gemini_5h: observation(NaN), gemini_weekly: observation(0.35)
+    } })
+    const bars = wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)
+    expect(bars.map(bar => [bar.props('label'), bar.props('utilization')])).toEqual([['C 7d', 25], ['G 7d', 35]])
+    expect(bars[0].props('resetsAt')).toBeNull()
+    expect(wrapper.text()).not.toContain('NaN')
     wrapper.unmount()
   })
 

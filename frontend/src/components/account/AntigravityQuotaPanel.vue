@@ -1,53 +1,85 @@
 <template>
-  <div class="min-w-[256px] max-w-[340px] space-y-2 whitespace-normal text-[10px]" data-testid="antigravity-quota-panel">
-    <div class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.usageWindow.remainingQuota') }}</div>
-    <div class="grid grid-cols-2 gap-3" data-testid="quota-columns">
-      <section v-for="family in families" :key="family.name" :aria-label="family.name" class="contents">
-        <h4 class="row-start-1 font-semibold text-gray-800 dark:text-gray-200">{{ family.name }}</h4>
-        <div v-for="(window, index) in family.windows" :key="window.key" class="min-w-0 space-y-0.5" :style="{ gridRow: index + 2 }" :data-window="window.key">
-          <div class="flex justify-between gap-2 text-gray-600 dark:text-gray-300">
-            <span>{{ t(`admin.accounts.usageWindow.${window.label}`) }}</span>
-            <span class="tabular-nums font-medium">{{ percent(window.key) === null ? t('common.unknown') : `${percent(window.key)}%` }}</span>
+  <div class="space-y-1 text-[10px]" data-testid="antigravity-quota-panel">
+    <div class="space-y-1" data-testid="quota-compact">
+      <UsageProgressBar
+        v-for="window in compactWindows" :key="window.key"
+        :label="window.compact" :label-title="window.title"
+        :utilization="percent(window.key)!" :resets-at="window.resetTime"
+        color="emerald" remaining-capacity
+      />
+      <template v-if="!compactWindows.length">
+        <UsageProgressBar
+          v-for="row in compactModels" :key="row.key"
+          :label="row.compactLabel || familyLabels[row.family]" :label-title="row.title"
+          :utilization="100 - row.utilization" :resets-at="row.resetTime"
+          color="emerald" remaining-capacity
+        />
+        <span v-if="!modelRows.length" class="text-gray-500 dark:text-gray-400">{{ t('common.unknown') }}</span>
+      </template>
+    </div>
+    <details class="text-gray-600 dark:text-gray-400" data-testid="quota-details">
+      <summary class="w-fit cursor-pointer rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500" :title="compactWindows.length ? t('admin.accounts.usageWindow.quotaCompactHint') : undefined">
+        {{ t(!compactWindows.length && modelRows.length ? 'admin.accounts.usageWindow.modelQuotaDetails' : 'admin.accounts.usageWindow.remainingQuota') }}
+        <span v-if="isStale" class="text-amber-700 dark:text-amber-400"> · {{ t('admin.accounts.usageWindow.quotaStaleCompact') }}</span>
+        <span v-else-if="usage.antigravity_window_state === 'partial' || usage.antigravity_quota_state === 'partial'" class="text-amber-700 dark:text-amber-400"> · {{ t('admin.accounts.usageWindow.quotaPartialCompact') }}</span>
+      </summary>
+      <div class="mt-2 w-full min-w-0 space-y-2 whitespace-normal">
+        <div class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.usageWindow.remainingQuota') }}</div>
+        <div class="space-y-3" data-testid="quota-windows">
+          <section v-for="family in families" :key="family.name" :aria-label="family.name" class="space-y-2">
+            <h4 class="font-semibold text-gray-800 dark:text-gray-200">{{ family.name }}</h4>
+            <div v-for="window in family.windows" :key="window.key" class="min-w-0 space-y-0.5" :data-window="window.key">
+              <div class="flex justify-between gap-2 text-gray-600 dark:text-gray-300">
+                <span>{{ t(`admin.accounts.usageWindow.${window.label}`) }}</span>
+                <span class="tabular-nums font-medium">{{ percent(window.key) === null ? t('common.unknown') : `${percent(window.key)}%` }}</span>
+              </div>
+              <div
+                class="h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
+                :role="percent(window.key) === null ? undefined : 'progressbar'"
+                :aria-label="`${family.name} ${t(`admin.accounts.usageWindow.${window.label}`)} ${t('admin.accounts.usageWindow.remainingQuota')}`"
+                :aria-valuenow="percent(window.key) ?? undefined"
+                :aria-valuemin="0"
+                :aria-valuemax="100"
+              >
+                <div v-if="percent(window.key) !== null" class="h-full rounded-full bg-emerald-500" :style="{ width: `${percent(window.key)}%` }"></div>
+              </div>
+              <div class="text-gray-500 dark:text-gray-400" :title="usage.antigravity_windows?.[window.key]?.reset_time">
+                {{ resetLabel(window.key) }}
+              </div>
+              <div v-if="usage.antigravity_windows?.[window.key]?.stale" class="text-amber-600 dark:text-amber-400">
+                {{ t('admin.accounts.usageWindow.antigravityStale') }}
+              </div>
+              <div v-if="usage.antigravity_windows?.[window.key]?.observed_at" class="text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.usageWindow.observedAt', { time: localTime(usage.antigravity_windows?.[window.key]?.observed_at) }) }}
+              </div>
+              <div v-if="usage.antigravity_windows?.[window.key]?.source_bucket_id" class="break-all text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.usageWindow.quotaSource', { source: usage.antigravity_windows?.[window.key]?.source_bucket_id }) }}
+              </div>
+            </div>
+          </section>
+        </div>
+        <div v-if="usage.antigravity_window_state !== 'available'" class="text-gray-500 dark:text-gray-400">
+          {{ t(usage.antigravity_window_state === 'partial' ? 'admin.accounts.usageWindow.explicitWindowsPartial' : 'admin.accounts.usageWindow.explicitWindowsUnavailable') }}
+        </div>
+        <div class="border-t border-gray-100 pt-1 text-gray-600 dark:border-gray-700 dark:text-gray-300">
+          <span>{{ t('admin.accounts.aiCreditsBalance') }}</span>
+          <div v-for="(credit, index) in usage.ai_credits || []" :key="index" class="flex justify-between gap-2 break-all">
+            <span>{{ credit.credit_type || t('common.unknown') }}</span>
+            <span class="tabular-nums">{{ antigravityCreditAmount(credit) ?? t('common.unknown') }}</span>
           </div>
-          <div
-            class="h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
-            :role="percent(window.key) === null ? undefined : 'progressbar'"
-            :aria-label="`${family.name} ${t(`admin.accounts.usageWindow.${window.label}`)} ${t('admin.accounts.usageWindow.remainingQuota')}`"
-            :aria-valuenow="percent(window.key) ?? undefined"
-            :aria-valuemin="0"
-            :aria-valuemax="100"
-          >
-            <div v-if="percent(window.key) !== null" class="h-full rounded-full bg-emerald-500" :style="{ width: `${percent(window.key)}%` }"></div>
-          </div>
-          <div class="text-gray-500 dark:text-gray-400" :title="usage.antigravity_windows?.[window.key]?.reset_time">
-            {{ resetLabel(window.key) }}
-          </div>
-          <div v-if="usage.antigravity_windows?.[window.key]?.stale" class="text-amber-600 dark:text-amber-400">
-            {{ t('admin.accounts.usageWindow.antigravityStale') }}
-          </div>
-          <div v-if="usage.antigravity_windows?.[window.key]?.observed_at" class="text-gray-500 dark:text-gray-400">
-            {{ t('admin.accounts.usageWindow.observedAt', { time: localTime(usage.antigravity_windows?.[window.key]?.observed_at) }) }}
+          <span v-if="!usage.ai_credits?.length">: {{ t('common.unknown') }}</span>
+        </div>
+        <div v-if="modelRows.length" class="text-gray-500 dark:text-gray-400">
+          <div>{{ t('admin.accounts.usageWindow.modelQuotaDetails') }}</div>
+          <div class="mt-1 space-y-1">
+            <div v-for="row in modelRows" :key="row.key">
+              <div class="break-words">{{ row.title }}</div>
+              <UsageProgressBar :label="row.compactLabel || familyLabels[row.family]" :label-title="row.title" :utilization="100 - row.utilization" :resets-at="row.resetTime" color="emerald" remaining-capacity />
+            </div>
+            <div v-if="usage.antigravity_quota_state === 'partial'" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityPartial') }}</div>
+            <div v-if="usage.antigravity_quota_stale" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityStale') }}</div>
           </div>
         </div>
-      </section>
-    </div>
-    <div v-if="usage.antigravity_window_state !== 'available'" class="text-gray-500 dark:text-gray-400">
-      {{ t(usage.antigravity_window_state === 'partial' ? 'admin.accounts.usageWindow.explicitWindowsPartial' : 'admin.accounts.usageWindow.explicitWindowsUnavailable') }}
-    </div>
-    <div class="border-t border-gray-100 pt-1 text-gray-600 dark:border-gray-700 dark:text-gray-300">
-      <span>{{ t('admin.accounts.aiCreditsBalance') }}</span>
-      <div v-for="(credit, index) in usage.ai_credits || []" :key="index" class="flex justify-between gap-2 break-all">
-        <span>{{ credit.credit_type || t('common.unknown') }}</span>
-        <span class="tabular-nums">{{ antigravityCreditAmount(credit) ?? t('common.unknown') }}</span>
-      </div>
-      <span v-if="!usage.ai_credits?.length">: {{ t('common.unknown') }}</span>
-    </div>
-    <details v-if="modelRows.length" class="text-gray-500 dark:text-gray-400">
-      <summary class="cursor-pointer">{{ t('admin.accounts.usageWindow.modelQuotaDetails') }}</summary>
-      <div class="mt-1 space-y-1">
-        <UsageProgressBar v-for="row in modelRows" :key="row.key" :label="row.compactLabel || row.family" :label-title="row.title" :utilization="100 - row.utilization" :resets-at="row.resetTime" color="emerald" remaining-capacity />
-        <div v-if="usage.antigravity_quota_state === 'partial'" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityPartial') }}</div>
-        <div v-if="usage.antigravity_quota_stale" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityStale') }}</div>
       </div>
     </details>
   </div>
@@ -75,7 +107,21 @@ watch(() => props.usage.antigravity_windows, (windows) => {
   else pause()
 }, { immediate: true })
 const modelRows = computed(() => buildAntigravityQuotaRows(props.usage))
+const compactModels = computed(() => [...modelRows.value].sort((a, b) => b.utilization - a.utilization).slice(0, 2))
+const familyLabels = { 'gemini-pro': 'G Pro', 'gemini-flash': 'G Fl', 'gemini-image': 'G Im', claude: 'C', other: '?' }
+const compactWindows = computed(() => families.flatMap(family => family.windows
+  .filter(window => percent(window.key) !== null)
+  .sort((a, b) => percent(a.key)! - percent(b.key)!)
+  .slice(0, 1)
+  .map(window => ({
+    ...window,
+    resetTime: validResetTime(props.usage.antigravity_windows?.[window.key]?.reset_time),
+    compact: `${family.name === 'Claude' ? 'C' : 'G'} ${window.label === 'explicitFiveHour' ? '5h' : '7d'}`,
+    title: `${family.name} ${t(`admin.accounts.usageWindow.${window.label}`)}`
+  }))))
+const isStale = computed(() => props.usage.antigravity_quota_stale || Object.values(props.usage.antigravity_windows || {}).some(window => window?.stale))
 const percent = (key: AntigravityWindowKey) => antigravityWindowPercent(props.usage, key)
+const validResetTime = (value?: string) => value && Number.isFinite(Date.parse(value)) ? value : null
 const localTime = (value?: string) => value && Number.isFinite(Date.parse(value))
   ? new Date(value).toLocaleString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   : t('common.unknown')
