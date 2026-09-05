@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func f64p(v float64) *float64 { return &v }
@@ -2022,22 +2023,25 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAnd
 
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	wantInstall := resolveConvergedInstallationID(account, seed)
-	wantSession := resolveConvergedSessionID(seed)
-	wantThread := resolveConvergedThreadID(seed, "header-session")
+	_ = seed
+	wantInstall := resolveConvergedInstallationID(account, codexAccountIdentityNamespace(account))
+	wantSession := resolveConvergedSessionID(codexAccountIdentityNamespace(account))
+	wantThread := scopeCodexAccountIdentityValue(account, 0, "session", "body-thread")
+	wantWindow := scopeCodexAccountIdentityValue(account, 0, "window", "body-window")
+	wantCache := scopeCodexAccountIdentityValue(account, 0, "session", "body-session")
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("thread-id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("x-client-request-id"))
-	require.Equal(t, wantThread+":0", upstream.lastReq.Header.Get("x-codex-window-id"))
+	require.Equal(t, wantWindow, upstream.lastReq.Header.Get("x-codex-window-id"))
 
-	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.Equal(t, wantCache, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, wantInstall, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").String())
 	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.Equal(t, wantThread, gjson.GetBytes(upstream.lastBody, "client_metadata.thread_id").String())
-	require.Equal(t, wantThread+":0", gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-window-id").String())
+	require.Equal(t, wantWindow, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-window-id").String())
 
 	bodyTurnMetadata := gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-turn-metadata").String()
 	headerTurnMetadata := upstream.lastReq.Header.Get("x-codex-turn-metadata")
@@ -2084,22 +2088,25 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPRawPassthroughHeaderBodyParity
 
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	wantInstall := resolveConvergedInstallationID(account, seed)
-	wantSession := resolveConvergedSessionID(seed)
-	wantThread := resolveConvergedThreadID(seed, "header-session")
+	_ = seed
+	wantInstall := resolveConvergedInstallationID(account, codexAccountIdentityNamespace(account))
+	wantSession := resolveConvergedSessionID(codexAccountIdentityNamespace(account))
+	wantThread := scopeCodexAccountIdentityValue(account, 0, "session", "body-thread")
+	wantWindow := scopeCodexAccountIdentityValue(account, 0, "window", "body-window")
+	wantCache := scopeCodexAccountIdentityValue(account, 0, "session", "body-session")
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("thread-id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("x-client-request-id"))
-	require.Equal(t, wantThread+":0", upstream.lastReq.Header.Get("x-codex-window-id"))
+	require.Equal(t, wantWindow, upstream.lastReq.Header.Get("x-codex-window-id"))
 
-	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.Equal(t, wantCache, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, wantInstall, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").String())
 	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.Equal(t, wantThread, gjson.GetBytes(upstream.lastBody, "client_metadata.thread_id").String())
-	require.Equal(t, wantThread+":0", gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-window-id").String())
+	require.Equal(t, wantWindow, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-window-id").String())
 
 	bodyTurnMetadata := gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-turn-metadata").String()
 	headerTurnMetadata := upstream.lastReq.Header.Get("x-codex-turn-metadata")
@@ -2108,7 +2115,62 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPRawPassthroughHeaderBodyParity
 	require.Equal(t, gjson.Get(bodyTurnMetadata, "turn_id").String(), gjson.Get(headerTurnMetadata, "turn_id").String())
 }
 
-func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyOrMetadata(t *testing.T) {
+// Native CompactionInput carries prompt_cache_key (codex-api/src/common.rs),
+// populated directly by core/src/client.rs. Compact's cache grouping therefore
+// has the same account/API-key scope regardless of the gateway's transport mode.
+func TestOpenAIGatewayService_CodexFingerprintCompactCacheActualForwardParity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, mode := range []string{"off", "device", "session", "full"} {
+		t.Run(mode, func(t *testing.T) {
+			forward := func(passthrough bool, credential string, apiKeyID int64, cacheKey string) string {
+				t.Helper()
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+				c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+				c.Request.Header.Set("session-id", "tree-a")
+				c.Set("api_key", &APIKey{ID: apiKeyID})
+				account := newTestOAuthAccount(4406, map[string]any{codexFingerprintModeExtraKey: mode, "openai_oauth_passthrough": passthrough})
+				account.Concurrency = 1
+				account.Credentials = map[string]any{"access_token": "fixture-token", "chatgpt_account_id": credential}
+				upstream := &httpUpstreamRecorder{resp: &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(compactProbeSSESuccessBody)),
+				}}
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream, toolCorrector: NewCodexToolCorrector()}
+				body := []byte(`{"model":"gpt-5.4","instructions":"compact fixture","input":[{"type":"message","role":"user","content":"compress"}]}`)
+				if cacheKey != "" {
+					var err error
+					body, err = sjson.SetBytes(body, "prompt_cache_key", cacheKey)
+					require.NoError(t, err)
+				}
+				_, err := svc.Forward(context.Background(), c, account, body)
+				require.NoError(t, err)
+				require.NotNil(t, upstream.lastReq)
+				require.True(t, strings.HasSuffix(upstream.lastReq.URL.Path, "/responses/compact"), "exercise actual compact forwarding")
+				require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata").Exists(), "legacy compact must not acquire unsupported metadata")
+				if cacheKey == "" {
+					require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
+				}
+				return gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
+			}
+			first := forward(false, "credential-a", 77, "tree-a")
+			raw := forward(true, "credential-a", 77, "tree-a")
+			require.Equal(t, first, raw, "same explicit compact cache key and scope must agree across actual routes")
+			require.NotEmpty(t, first)
+			require.NotEqual(t, "tree-a", first, "compact cache key remains credential scoped")
+			require.Equal(t, first, forward(false, "credential-a", 77, "tree-a"), "retry from the same original stays stable")
+			for _, passthrough := range []bool{false, true} {
+				require.NotEqual(t, first, forward(passthrough, "credential-b", 77, "tree-a"), "different actual credential")
+				require.NotEqual(t, first, forward(passthrough, "credential-a", 78, "tree-a"), "different downstream API key")
+				require.NotEqual(t, first, forward(passthrough, "credential-a", 77, "tree-b"), "distinct original cache grouping")
+				require.Empty(t, forward(passthrough, "credential-a", 77, ""), "missing cache key stays missing")
+			}
+		})
+	}
+}
+
+func TestOpenAIGatewayService_CodexFingerprintCompactScopesCacheWithoutRewritingMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
@@ -2135,18 +2197,16 @@ func TestOpenAIGatewayService_CodexFingerprintCompactDoesNotRewriteBodyCacheKeyO
 	account.Schedulable = true
 	account.Concurrency = 1
 	account.Credentials = map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"}
-	staleIDs := resolveCodexFingerprintIDs(account, "stale-session", codexFingerprintSession)
+	staleIDs := stageCodexRequestIdentity(c, account, map[string]any{"client_metadata": map[string]any{"session_id": "stale-session"}})
 	require.NotNil(t, staleIDs)
-	stageCodexFingerprintIDs(c, staleIDs)
 
 	_, err := svc.Forward(context.Background(), c, account, body)
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastReq)
 
-	seed, ok := codexFingerprintSeed(account.Extra)
-	require.True(t, ok)
-	require.NotEqual(t, resolveConvergedSessionID(seed), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.NotEqual(t, upstream.lastReq.Header.Get("session-id"), gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String(), "cache grouping is independent of converged session")
+	require.NotEmpty(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
+	require.NotEqual(t, "body-session", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 	require.Equal(t, "body-session", gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "client_metadata.x-codex-installation-id").Exists())
 	require.Empty(t, upstream.lastReq.Header.Get("x-codex-window-id"))
@@ -2184,9 +2244,9 @@ func TestOpenAIGatewayService_CodexFingerprintMessagesBridgeDoesNotInjectBodyPro
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastReq)
 
-	seed, ok := codexFingerprintSeed(account.Extra)
+	_, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	wantSession := resolveConvergedSessionID(seed)
+	wantSession := resolveConvergedSessionID(codexAccountIdentityNamespace(account))
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.Equal(t, wantSession, gjson.GetBytes(upstream.lastBody, "client_metadata.session_id").String())
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))

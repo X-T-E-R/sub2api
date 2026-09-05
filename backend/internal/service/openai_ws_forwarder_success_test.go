@@ -443,9 +443,8 @@ func TestOpenAIGatewayService_BuildOpenAIWSHeadersDeviceModePreservesNamespacedC
 	c.Request.Header.Set("x-client-request-id", "client-request")
 
 	account := newTestOAuthAccount(1300, map[string]any{codexFingerprintModeExtraKey: "device"})
-	ids := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+	ids := stageCodexRequestIdentity(c, account, nil)
 	require.NotNil(t, ids)
-	stageCodexFingerprintIDs(c, ids)
 
 	svc := &OpenAIGatewayService{}
 	headers, _, err := svc.buildOpenAIWSHeaders(
@@ -463,12 +462,12 @@ func TestOpenAIGatewayService_BuildOpenAIWSHeadersDeviceModePreservesNamespacedC
 	)
 
 	require.NoError(t, err)
-	require.Equal(t, ids.installationID, headers.Get("x-codex-installation-id"))
+	require.Equal(t, ids.values["installation"], headers.Get("x-codex-installation-id"))
 	require.NotEqual(t, "client-installation", headers.Get("x-codex-installation-id"))
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "window", "client-window"), headers.Get("x-codex-window-id"))
 	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", "client-session"), headers.Get("session-id"))
-	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "thread", "client-thread"), headers.Get("thread-id"))
-	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "request", "client-request"), headers.Get("x-client-request-id"))
+	require.Equal(t, scopeCodexAccountIdentityValue(account, 0, "session", "client-thread"), headers.Get("thread-id"))
+	require.Equal(t, headers.Get("thread-id"), headers.Get("x-client-request-id"))
 }
 
 func TestLogOpenAIWSBindResponseAccountWarn(t *testing.T) {
@@ -1155,9 +1154,12 @@ func TestOpenAIGatewayService_Forward_WSv2_CodexFingerprintHandshakeBodyParityAn
 
 	seed, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
-	wantInstall := resolveConvergedInstallationID(account, seed)
-	wantSession := resolveConvergedSessionID(seed)
-	wantThread := resolveConvergedThreadID(seed, "header-session")
+	_ = seed
+	wantInstall := resolveConvergedInstallationID(account, codexAccountIdentityNamespace(account))
+	wantSession := resolveConvergedSessionID(codexAccountIdentityNamespace(account))
+	wantThread := scopeCodexAccountIdentityValue(account, 0, "session", "body-thread")
+	wantWindow := scopeCodexAccountIdentityValue(account, 0, "window", "body-window")
+	wantCache := scopeCodexAccountIdentityValue(account, 0, "session", "body-session")
 	payloadJSON := requestToJSONString(captureConn.lastWrite)
 
 	require.Equal(t, wantInstall, captureDialer.lastHeaders.Get("x-codex-installation-id"))
@@ -1165,13 +1167,13 @@ func TestOpenAIGatewayService_Forward_WSv2_CodexFingerprintHandshakeBodyParityAn
 	require.Equal(t, wantSession, captureDialer.lastHeaders.Get("session_id"))
 	require.Equal(t, wantThread, captureDialer.lastHeaders.Get("thread-id"))
 	require.Equal(t, wantThread, captureDialer.lastHeaders.Get("x-client-request-id"))
-	require.Equal(t, wantThread+":0", captureDialer.lastHeaders.Get("x-codex-window-id"))
+	require.Equal(t, wantWindow, captureDialer.lastHeaders.Get("x-codex-window-id"))
 
-	require.Equal(t, wantSession, gjson.Get(payloadJSON, "prompt_cache_key").String())
+	require.Equal(t, wantCache, gjson.Get(payloadJSON, "prompt_cache_key").String())
 	require.Equal(t, wantInstall, gjson.Get(payloadJSON, "client_metadata.x-codex-installation-id").String())
 	require.Equal(t, wantSession, gjson.Get(payloadJSON, "client_metadata.session_id").String())
 	require.Equal(t, wantThread, gjson.Get(payloadJSON, "client_metadata.thread_id").String())
-	require.Equal(t, wantThread+":0", gjson.Get(payloadJSON, "client_metadata.x-codex-window-id").String())
+	require.Equal(t, wantWindow, gjson.Get(payloadJSON, "client_metadata.x-codex-window-id").String())
 
 	bodyTurnMetadata := gjson.Get(payloadJSON, "client_metadata.x-codex-turn-metadata").String()
 	headerTurnMetadata := captureDialer.lastHeaders.Get("x-codex-turn-metadata")
@@ -1180,7 +1182,7 @@ func TestOpenAIGatewayService_Forward_WSv2_CodexFingerprintHandshakeBodyParityAn
 	require.Equal(t, wantThread, gjson.Get(bodyTurnMetadata, "thread_id").String())
 	require.Equal(t, wantSession, gjson.Get(headerTurnMetadata, "session_id").String())
 	require.Equal(t, gjson.Get(bodyTurnMetadata, "turn_id").String(), gjson.Get(headerTurnMetadata, "turn_id").String())
-	require.NotZero(t, gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Int())
+	require.False(t, gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Exists())
 	require.Equal(t,
 		gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Int(),
 		gjson.Get(headerTurnMetadata, "turn_started_at_unix_ms").Int(),

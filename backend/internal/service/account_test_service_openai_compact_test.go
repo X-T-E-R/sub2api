@@ -307,8 +307,9 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 	require.NoError(t, svc.TestAccountConnection(c, account.ID, "gpt-5.4", "", AccountTestModeCompact))
 
 	// 显式 session 收敛模式：出站身份 = 账号级收敛值
-	seed, ok := codexFingerprintSeed(account.Extra)
+	_, ok := codexFingerprintSeed(account.Extra)
 	require.True(t, ok)
+	seed := codexAccountIdentityNamespace(&account)
 	converged := resolveConvergedSessionID(seed)
 	require.Equal(t, converged, upstream.lastReq.Header.Get("session-id"))
 	require.Equal(t, converged, upstream.lastReq.Header.Get("session_id"))

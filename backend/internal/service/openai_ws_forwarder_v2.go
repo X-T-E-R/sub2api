@@ -73,13 +73,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		turnMetadata = strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader))
 	}
 	setOpenAIWSTurnMetadata(payload, turnMetadata)
-	applyStagedCodexFingerprintClientMetadata(c, account, payload)
+	stagedCodexRequestIdentity(c, account).applyBody(payload)
 	previousResponseID := openAIWSPayloadString(payload, "previous_response_id")
 	previousResponseIDKind := ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 	promptCacheKey := strings.TrimSpace(clientPromptCacheKey)
 	if promptCacheKey == "" {
-		// Fingerprint convergence may inject a default key when the client did
-		// not send one; retain that fallback without replacing an explicit raw key.
+		// Retain a compatibility-generated key when no explicit client key exists.
 		promptCacheKey = openAIWSPayloadString(payload, "prompt_cache_key")
 	}
 	_, hasTools := payload["tools"]
