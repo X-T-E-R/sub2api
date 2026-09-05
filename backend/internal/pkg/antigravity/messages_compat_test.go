@@ -192,7 +192,7 @@ func TestGeminiMessagesCompatibilityRejectsUnsafeTailCompensation(t *testing.T) 
 		{name: "missing call identity then prefill", messages: `{"role":"assistant","content":[{"type":"tool_use","name":"echo","input":{}}]},{"role":"assistant","content":"prefix"}`, want: "unique id"},
 		{name: "wrong tool role then prefill", messages: `{"role":"user","content":[{"type":"tool_use","id":"a","name":"echo","input":{}}]},{"role":"assistant","content":"prefix"}`, want: "assistant tool_use"},
 		{name: "unsupported history then prefill", messages: `{"role":"user","content":[{"type":"document","source":{"type":"text","data":"old document"}}]},{"role":"assistant","content":"prefix"}`, want: "supported by Gemini Messages"},
-		{name: "thinking only", messages: `{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"sig"}]}`, want: "nonempty assistant text"},
+		{name: "thinking after model text", messages: `{"role":"assistant","content":"earlier answer"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"sig"}]}`, want: "nonempty assistant text"},
 		{name: "image tail", messages: `{"role":"assistant","content":[{"type":"text","text":"image:"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}]}`, want: "assistant text prefills"},
 		{name: "empty assistant after model", messages: `{"role":"assistant","content":"earlier answer"},{"role":"assistant","content":[]}`, want: "nonempty assistant text"},
 		{name: "terminal system is not prefill", messages: `{"role":"assistant","content":"answer"},{"role":"system","content":"new instructions"}`, want: "explicit assistant text prefill"},

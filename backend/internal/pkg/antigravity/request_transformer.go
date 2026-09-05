@@ -107,25 +107,37 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// 只有 Gemini 模型支持 dummy thought workaround
 	// Claude 模型通过 Vertex/Google API 需要有效的 thought signatures
 	allowDummyThought := strings.HasPrefix(targetModel, "gemini-")
+	messages := claudeReq.Messages
 	geminiOptions := geminiMessagesConversionOptions{enabled: opts.GeminiMessages.enabledForModel(targetModel)}
 	if geminiOptions.enabled {
 		geminiOptions.toolResultImages = supportsGeminiToolResultImages(targetModel)
-		geminiOptions.terminalMessage = effectiveGeminiTerminalMessage(claudeReq.Messages)
+		geminiOptions.terminalMessage = effectiveGeminiTerminalMessage(messages, false)
+		boundary := effectiveGeminiTerminalMessage(messages, true)
+		if boundary >= 0 && boundary < geminiOptions.terminalMessage && messages[boundary].Role == "user" {
+			// Retry at the real user/tool-result boundary, without changing caller
+			// history or turning a failed partial thought into a visible prefill.
+			if err := validateGeminiContinuationHistory(messages[:boundary+1], geminiOptions.toolResultImages); err != nil {
+				return nil, err
+			}
+			messages = messages[:boundary+1]
+			geminiOptions.terminalMessage = boundary
+			geminiOptions.recoveredThinkingTail = true
+		}
 	}
 	if geminiOptions.enabled && geminiOptions.terminalMessage >= 0 {
 		last := geminiOptions.terminalMessage
-		if err := validateGeminiMessageContent(claudeReq.Messages[last].Content, last, geminiOptions.toolResultImages); err != nil {
+		if err := validateGeminiMessageContent(messages[last].Content, last, geminiOptions.toolResultImages); err != nil {
 			return nil, err
 		}
 	}
 
 	// 1. 构建 contents
-	contents, messageSystemParts, strippedThinking, err := buildContents(claudeReq.Messages, toolIDToName, isThinkingEnabled, allowDummyThought, geminiOptions)
+	contents, messageSystemParts, strippedThinking, err := buildContents(messages, toolIDToName, isThinkingEnabled, allowDummyThought, geminiOptions)
 	if err != nil {
 		return nil, fmt.Errorf("build contents: %w", err)
 	}
 	if geminiOptions.enabled {
-		contents, err = finalizeGeminiMessages(claudeReq.Messages, contents, geminiOptions.toolResultImages)
+		contents, err = finalizeGeminiMessages(messages, contents, geminiOptions.toolResultImages)
 		if err != nil {
 			return nil, err
 		}
@@ -419,6 +431,9 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			continue
 		}
 		if geminiOptions.enabled && role == "user" && i == geminiOptions.terminalMessage && emptyGeminiTextParts(parts) {
+			if geminiOptions.recoveredThinkingTail {
+				return nil, nil, false, geminiMessagesError(fmt.Sprintf("messages[%d]", i), "send a nonempty user message or real tool results before retrying a partial assistant turn")
+			}
 			if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultImages); err != nil {
 				return nil, nil, false, err
 			}

@@ -16,9 +16,10 @@ type GeminiMessagesCompatibilityOptions struct {
 }
 
 type geminiMessagesConversionOptions struct {
-	enabled          bool
-	toolResultImages bool
-	terminalMessage  int
+	enabled               bool
+	toolResultImages      bool
+	terminalMessage       int
+	recoveredThinkingTail bool
 }
 
 func supportsGeminiToolResultImages(model string) bool {
@@ -33,9 +34,9 @@ func supportsGeminiToolResultImages(model string) bool {
 	return err == nil && major >= 3
 }
 
-// Empty assistant envelopes may disappear, but an unsupported block must not
-// count as empty merely because the parts builder does not map it.
-func effectiveGeminiTerminalMessage(messages []ClaudeMessage) int {
+// Only explicitly disposable assistant blocks may be skipped. Unsupported
+// blocks must not count as empty merely because the parts builder omits them.
+func effectiveGeminiTerminalMessage(messages []ClaudeMessage, skipThinking bool) int {
 	last := len(messages) - 1
 	for last >= 0 && messages[last].Role == "assistant" {
 		content := bytes.TrimSpace(messages[last].Content)
@@ -56,6 +57,9 @@ func effectiveGeminiTerminalMessage(messages []ClaudeMessage) int {
 		}
 		empty := true
 		for _, block := range blocks {
+			if skipThinking && block.Type == "thinking" {
+				continue
+			}
 			if block.Type != "text" || strings.TrimSpace(block.Text) != "" {
 				empty = false
 				break
@@ -200,8 +204,8 @@ func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, 
 	return append(contents, GeminiContent{Role: "user", Parts: []GeminiPart{{Text: geminiAssistantContinuation}}}), nil
 }
 
-// Validate pairing only when the adapter would synthesize a user turn. A missing
-// result must never be disguised as a successful tool run or a text prefill.
+// Validate pairing before synthesizing a user turn or recovering a partial
+// assistant suffix. Neither operation may hide a missing tool result.
 func validateGeminiContinuationHistory(messages []ClaudeMessage, toolResultImages bool) error {
 	pending := make(map[string]string)
 	seen := make(map[string]bool)

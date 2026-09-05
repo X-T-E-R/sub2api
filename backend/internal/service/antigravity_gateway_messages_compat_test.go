@@ -204,3 +204,56 @@ func TestAntigravityMessagesCompatibilityImageToolForward(t *testing.T) {
 		})
 	}
 }
+
+func TestAntigravityMessagesCompatibilityThinkingTailForward(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tt := range []struct {
+		name, model        string
+		policy             config.GatewayAntigravityGeminiMessagesConfig
+		pending, recovered bool
+	}{
+		{name: "closed tools", model: "gemini-3.8-flash", recovered: true},
+		{name: "pending tools", model: "gemini-3.8-flash", pending: true},
+		{name: "disabled", model: "gemini-3.8-flash", policy: config.GatewayAntigravityGeminiMessagesConfig{Disabled: true}},
+		{name: "opted out", model: "gemini-3.8-flash", policy: config.GatewayAntigravityGeminiMessagesConfig{Models: []string{"gemini-2.5-flash"}}},
+		{name: "Claude", model: "claude-sonnet-4-5"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize, AntigravityGeminiMessages: tt.policy}, upstream)
+			calls := `{"type":"tool_use","id":"call-a","name":"echo","input":{"n":1}}`
+			if tt.pending {
+				calls += `,{"type":"tool_use","id":"call-b","name":"echo","input":{}}`
+			}
+			body := []byte(`{"model":"client-alias","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":[` + calls + `]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-a","content":"actual output"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"partial","signature":"signed-partial"}]}]}`)
+			original := string(body)
+			c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/messages", body)
+			_, err := svc.Forward(context.Background(), c, antigravityMessagesMappedTestAccount(tt.model), body, false)
+			require.Equal(t, original, string(body))
+			if tt.pending {
+				require.ErrorContains(t, err, "every pending tool_use")
+				require.Equal(t, http.StatusBadRequest, recorder.Code)
+				require.Equal(t, "invalid_request_error", gjson.GetBytes(recorder.Body.Bytes(), "error.type").String())
+				require.Zero(t, upstream.callCount)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, 1, upstream.callCount)
+			var request antigravity.V1InternalRequest
+			require.NoError(t, json.Unmarshal(upstream.requestBodies[0], &request))
+			contents := request.Request.Contents
+			require.Equal(t, antigravity.GeminiContent{Role: "user", Parts: []antigravity.GeminiPart{{Text: "inspect"}}}, contents[0])
+			require.Equal(t, "model", contents[1].Role)
+			require.Len(t, contents[1].Parts, 1)
+			require.Equal(t, &antigravity.GeminiFunctionCall{ID: "call-a", Name: "echo", Args: map[string]any{"n": float64(1)}}, contents[1].Parts[0].FunctionCall)
+			require.Equal(t, antigravity.GeminiContent{Role: "user", Parts: []antigravity.GeminiPart{{FunctionResponse: &antigravity.GeminiFunctionResponse{ID: "call-a", Name: "echo", Response: map[string]any{"result": "actual output"}}}}}, contents[2])
+			if tt.recovered {
+				require.Len(t, contents, 3)
+			} else {
+				require.Len(t, contents, 4)
+				require.Equal(t, antigravity.GeminiContent{Role: "model", Parts: []antigravity.GeminiPart{{Text: "partial", Thought: true, ThoughtSignature: "signed-partial"}}}, contents[3])
+			}
+		})
+	}
+}
