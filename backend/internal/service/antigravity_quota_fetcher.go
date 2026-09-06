@@ -61,19 +61,29 @@ func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
 
 // FetchQuota 获取 Antigravity 账户额度信息
 func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
+	account, err := f.prepareQuotaAccount(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	return f.fetchQuotaWithOrigin(ctx, account, proxyURL, resolveAntigravityForwardBaseURL(account))
+}
+
+// Prepare the credential snapshot before admitting a request to a quota flight.
+// The flight must not reread the account and change its origin after admission.
+func (f *AntigravityQuotaFetcher) prepareQuotaAccount(ctx context.Context, account *Account) (*Account, error) {
+	if f.tokenProvider != nil {
+		_, snapshot, err := f.tokenProvider.GetAccessTokenForQuota(ctx, account)
+		return snapshot, err
+	}
+	return snapshotOAuthRefreshAccount(account), nil
+}
+
+func (f *AntigravityQuotaFetcher) fetchQuotaWithOrigin(ctx context.Context, account *Account, proxyURL, baseURL string) (*QuotaResult, error) {
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
-	if f.tokenProvider != nil {
-		var err error
-		accessToken, account, err = f.tokenProvider.GetAccessTokenForQuota(ctx, account)
-		if err != nil {
-			return nil, err
-		}
-		projectID = account.GetCredential("project_id")
-	}
-	scope := antigravityQuotaScope(account)
+	scope := antigravityQuotaScopeForOrigin(account, baseURL)
 
-	client, err := antigravity.NewClient(proxyURL)
+	client, err := antigravity.NewQuotaClient(proxyURL, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}

@@ -98,10 +98,14 @@ func retainAntigravityWindows(current, previous *UsageInfo) {
 
 // The scope is a private in-memory freshness fingerprint, never a log/DTO field.
 func antigravityQuotaScope(account *Account) string {
+	return antigravityQuotaScopeForOrigin(account, resolveAntigravityForwardBaseURL(account))
+}
+
+func antigravityQuotaScopeForOrigin(account *Account, baseURL string) string {
 	if account == nil {
 		return ""
 	}
-	data, _ := json.Marshal([]any{account.ID, account.GetCredential("project_id"), account.GetCredential("access_token"), account.GetCredential("refresh_token")})
+	data, _ := json.Marshal([]any{account.ID, account.GetCredential("project_id"), account.GetCredential("access_token"), account.GetCredential("refresh_token"), baseURL})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 

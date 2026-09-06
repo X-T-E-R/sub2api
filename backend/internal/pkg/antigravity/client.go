@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -275,7 +276,30 @@ func TierIDToPlanType(tierID string) string {
 
 // Client Antigravity API 客户端
 type Client struct {
-	httpClient *http.Client
+	httpClient   *http.Client
+	quotaBaseURL string
+}
+
+// NewQuotaClient pins all quota observations to the forwarding origin. Ordinary
+// OAuth and onboarding clients retain their existing fallback behavior.
+func NewQuotaClient(proxyURL, baseURL string) (*Client, error) {
+	if !slices.Contains(BaseURLs, baseURL) || baseURL == "" {
+		return nil, errors.New("unsupported quota base URL")
+	}
+	c, err := NewClient(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	c.quotaBaseURL = baseURL
+	c.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return c, nil
+}
+
+func (c *Client) observationBaseURLs() []string {
+	if c.quotaBaseURL != "" {
+		return []string{c.quotaBaseURL}
+	}
+	return BaseURLs
 }
 
 const (
@@ -488,7 +512,7 @@ func (c *Client) loadCodeAssist(ctx context.Context, accessToken string, reqBody
 	}
 
 	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	availableURLs := c.observationBaseURLs()
 
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
@@ -711,7 +735,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 	}
 
 	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	availableURLs := c.observationBaseURLs()
 
 	fetchClient := c.fetchAvailableModelsHTTPClient()
 	var lastErr error
@@ -788,7 +812,9 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 
 func (c *Client) fetchAvailableModelsHTTPClient() *http.Client {
 	fetchClient := *c.httpClient
-	fetchClient.CheckRedirect = checkFetchAvailableModelsRedirect
+	if c.quotaBaseURL == "" {
+		fetchClient.CheckRedirect = checkFetchAvailableModelsRedirect
+	}
 	return &fetchClient
 }
 

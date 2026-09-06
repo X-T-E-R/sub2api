@@ -31,7 +31,7 @@ func (c *Client) RetrieveUserQuotaSummary(ctx context.Context, accessToken, proj
 	if c == nil || c.httpClient == nil || bodyLimit <= 0 {
 		return nil, errors.New("quota summary client or body limit is invalid")
 	}
-	if !slices.Contains(BaseURLs, baseURL) {
+	if !slices.Contains(BaseURLs, baseURL) || (c.quotaBaseURL != "" && baseURL != c.quotaBaseURL) {
 		return nil, errors.New("unsupported quota summary base URL")
 	}
 	payload := struct {

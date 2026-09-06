@@ -23,6 +23,7 @@ type quotaRedirectTransport func(*http.Request) (*http.Response, error)
 func (f quotaRedirectTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestAntigravitySummaryUsesEffectiveModelBase(t *testing.T) {
+	t.Setenv(antigravityForwardBaseURLEnv, "")
 	old := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = old })
 	prod, daily := antigravity.BaseURLs[0], antigravity.BaseURLs[1]
@@ -52,7 +53,7 @@ func TestAntigravitySummaryUsesEffectiveModelBase(t *testing.T) {
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: headers, Request: r}, nil
 	})
-	account := &Account{ID: 900, Platform: PlatformAntigravity, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "synthetic", "project_id": "shared"}}
+	account := &Account{ID: 900, Platform: PlatformAntigravity, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "synthetic", "project_id": "shared", "plan_type": "pro"}}
 	result, err := NewAntigravityQuotaFetcher(nil, nil).FetchQuota(context.Background(), account, "")
 	require.NoError(t, err)
 	require.Equal(t, daily+"/v1internal:retrieveUserQuotaSummary", summaryURL)

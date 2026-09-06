@@ -1102,6 +1102,24 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 		}
 	}
 
+	// Acquire the snapshot before flight admission: token refresh can replace the
+	// account's plan/project, so the input snapshot is not a valid flight key.
+	// An independent context keeps caller cancellation from aborting shared work.
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer fetchCancel()
+	prepared, err := s.antigravityQuotaFetcher.prepareQuotaAccount(fetchCtx, account)
+	if err != nil {
+		degraded := buildAntigravityDegradedUsage(err)
+		enrichUsageWithAccountError(degraded, account)
+		s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
+			usageInfo: degraded, timestamp: time.Now(), scope: scope,
+		})
+		return degraded, nil
+	}
+	account = prepared
+	baseURL := resolveAntigravityForwardBaseURL(account)
+	scope = antigravityQuotaScopeForOrigin(account, baseURL)
+
 	// 2. singleflight 防止并发击穿
 	flightKey := "ag-usage:" + scope
 	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
@@ -1118,12 +1136,8 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 			}
 		}
 
-		// 使用独立 context，避免调用方 cancel 导致所有共享 flight 的请求失败
-		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer fetchCancel()
-
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
-		fetchResult, err := s.antigravityQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
+		fetchResult, err := s.antigravityQuotaFetcher.fetchQuotaWithOrigin(fetchCtx, account, proxyURL, baseURL)
 		var previous *UsageInfo
 		projectID := ""
 		if fetchResult != nil && fetchResult.antigravityScope != "" {
