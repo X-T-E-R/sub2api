@@ -236,7 +236,9 @@ type UsageInfo struct {
 	// AntigravitySubscriptionState is "available" only when loadCodeAssist
 	// returned a concrete tier in this observation.
 	AntigravitySubscriptionState AntigravityObservationState `json:"antigravity_subscription_state,omitempty"`
-	AntigravityIneligible        bool                        `json:"antigravity_ineligible,omitempty"`
+	// Legacy presence flag for tier restrictions; never an account access verdict.
+	AntigravityIneligible      bool                        `json:"antigravity_ineligible,omitempty"`
+	AntigravityIneligibleTiers []AntigravityIneligibleTier `json:"antigravity_ineligible_tiers,omitempty"`
 
 	// Antigravity 模型详细能力信息（与 antigravity_quota 同 key）
 	AntigravityQuotaDetails map[string]*AntigravityModelDetail `json:"antigravity_quota_details,omitempty"`

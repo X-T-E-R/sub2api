@@ -1403,7 +1403,13 @@ export interface AccountUsageInfo {
   subscription_tier?: string
   subscription_tier_raw?: string
   antigravity_subscription_state?: AntigravityObservationState
+  // Tier restriction presence, not an account-wide access verdict (legacy cache).
   antigravity_ineligible?: boolean
+  antigravity_ineligible_tiers?: Array<{
+    tier_id?: string
+    reason_code?: string
+    reason_message?: string
+  }>
   ai_credits?: Array<{
     credit_type?: string
     amount_text?: string

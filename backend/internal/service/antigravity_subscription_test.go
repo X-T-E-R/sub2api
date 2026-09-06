@@ -18,8 +18,8 @@ func TestNormalizeAntigravitySubscription_PaidTierWithIneligible(t *testing.T) {
 	result := NormalizeAntigravitySubscription(resp)
 
 	assert.Equal(t, "Pro", result.PlanType, "paid tier should preserve Pro even with ineligible tiers")
-	assert.Equal(t, "abnormal", result.SubscriptionStatus)
-	assert.Equal(t, "location validation required", result.SubscriptionError)
+	assert.Empty(t, result.SubscriptionStatus, "tier restrictions do not invalidate the current subscription")
+	assert.Empty(t, result.SubscriptionError)
 }
 
 func TestNormalizeAntigravitySubscription_FreeTierWithIneligible(t *testing.T) {
@@ -32,8 +32,8 @@ func TestNormalizeAntigravitySubscription_FreeTierWithIneligible(t *testing.T) {
 
 	result := NormalizeAntigravitySubscription(resp)
 
-	assert.Equal(t, "Abnormal", result.PlanType, "free tier with ineligible should be Abnormal")
-	assert.Equal(t, "abnormal", result.SubscriptionStatus)
+	assert.Equal(t, "Free", result.PlanType, "tier restrictions must preserve a current free tier")
+	assert.Empty(t, result.SubscriptionStatus)
 }
 
 func TestNormalizeAntigravitySubscription_NoIneligible(t *testing.T) {
@@ -61,6 +61,29 @@ func TestNormalizeAntigravitySubscription_NoTierWithIneligible(t *testing.T) {
 
 	result := NormalizeAntigravitySubscription(resp)
 
-	assert.Equal(t, "Abnormal", result.PlanType, "no tier + ineligible should be Abnormal")
-	assert.Equal(t, "abnormal", result.SubscriptionStatus)
+	assert.Equal(t, "Free", result.PlanType, "missing tier retains the existing default, not an inferred denial")
+	assert.Empty(t, result.SubscriptionStatus)
+}
+
+func TestNormalizeAntigravitySubscription_TierPrecedenceAndUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		current, paid string
+		want          string
+	}{
+		{"paid tier wins", "free-tier", "g1-pro-tier", "Pro"},
+		{"current free tier", "free-tier", "", "Free"},
+		{"unknown tier keeps identity", "future-tier", "", "future-tier"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := NormalizeAntigravitySubscription(&antigravity.LoadCodeAssistResponse{
+				CurrentTier:     &antigravity.TierInfo{ID: tc.current},
+				PaidTier:        &antigravity.PaidTierInfo{ID: tc.paid},
+				IneligibleTiers: []*antigravity.IneligibleTier{nil, {}, {Tier: &antigravity.TierInfo{ID: "other-tier"}, ReasonCode: "INELIGIBLE_ACCOUNT"}},
+			})
+			assert.Equal(t, tc.want, result.PlanType)
+			assert.Empty(t, result.SubscriptionStatus)
+			assert.Empty(t, result.SubscriptionError)
+		})
+	}
 }

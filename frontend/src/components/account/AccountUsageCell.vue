@@ -195,8 +195,9 @@
     <!-- Antigravity OAuth accounts: fetch usage from API -->
     <template v-else-if="account.platform === 'antigravity' && account.type === 'oauth'">
       <!-- 账户类型徽章 -->
-      <div v-if="antigravityTierLabel" class="mb-1 flex items-center gap-1">
+      <div v-if="antigravityTierLabel || hasIneligibleTiers" class="mb-1 flex items-center gap-1">
         <span
+          v-if="antigravityTierLabel"
           :class="[
             'inline-block rounded px-1.5 py-0.5 text-[10px] font-medium',
             antigravityTierClass
@@ -204,13 +205,15 @@
         >
           {{ antigravityTierLabel }}
         </span>
-        <!-- 不合格账户警告图标 -->
+        <!-- Tier eligibility information is separate from account access errors. -->
         <span
           v-if="hasIneligibleTiers"
           class="group relative cursor-help"
+          tabindex="0"
+          :aria-label="t('admin.accounts.tierEligibilityInfo')"
         >
           <svg
-            class="h-3.5 w-3.5 text-red-500"
+            class="h-3.5 w-3.5 text-gray-400"
             fill="currentColor"
             viewBox="0 0 20 20"
           >
@@ -221,9 +224,13 @@
             />
           </svg>
           <span
-            class="pointer-events-none absolute left-0 top-full z-50 mt-1 w-80 whitespace-normal break-words rounded bg-gray-900 px-3 py-2 text-xs leading-relaxed text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 dark:bg-gray-700"
+            role="tooltip"
+            class="pointer-events-none absolute left-0 top-full z-50 mt-1 w-80 whitespace-normal break-words rounded bg-gray-900 px-3 py-2 text-xs leading-relaxed text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus:opacity-100 dark:bg-gray-700"
           >
-            {{ t('admin.accounts.ineligibleWarning') }}
+            {{ t('admin.accounts.tierEligibilityInfo') }}
+            <span v-for="(tier, index) in ineligibleTiers" :key="index" class="mt-1 block">
+              {{ [tier.tier_id, tier.reason_code, tier.reason_message].filter(Boolean).join(' · ') }}
+            </span>
           </span>
         </span>
       </div>
@@ -624,7 +631,8 @@ import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import {
   getAntigravityTier,
-  hasAntigravityIneligibleTier
+  hasAntigravityIneligibleTier,
+  getAntigravityIneligibleTiers
 } from '@/utils/antigravityUsage'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
@@ -1169,7 +1177,8 @@ const antigravityTierClass = computed(() => {
   }
 })
 
-// 检测账户是否有不合格状态（ineligibleTiers）
+// Tier restrictions retain their upstream scope independently of access errors.
+const ineligibleTiers = computed(() => getAntigravityIneligibleTiers(usageInfo.value, props.account.extra))
 const hasIneligibleTiers = computed(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   return hasAntigravityIneligibleTier(usageInfo.value, extra)

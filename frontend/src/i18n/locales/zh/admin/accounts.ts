@@ -540,8 +540,8 @@ export default {
         personal: '个人版',
         unlimited: '无限制'
       },
-      ineligibleWarning:
-        '该账号无 Antigravity 使用权限，但仍能进行 API 转发。继续使用请自行承担风险。',
+      tierEligibilityInfo:
+        '部分套餐未满足资格条件。此信息不代表 API 转发权限。',
       forbidden: '已封禁',
       forbiddenValidation: '需要验证',
       forbiddenViolation: '违规封禁',

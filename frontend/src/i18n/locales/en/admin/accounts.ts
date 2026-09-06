@@ -1589,8 +1589,8 @@ export default {
         personal: 'Personal',
         unlimited: 'Unlimited'
       },
-      ineligibleWarning:
-        'This account is not eligible for Antigravity, but API forwarding still works. Use at your own risk.',
+      tierEligibilityInfo:
+        'Eligibility requirements are not met for some tiers. This does not determine API forwarding access.',
       forbidden: 'Forbidden',
       forbiddenValidation: 'Verification Required',
       forbiddenViolation: 'Violation Ban',

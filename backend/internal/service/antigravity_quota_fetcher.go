@@ -186,9 +186,8 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		SubscriptionTierRaw:     tierRaw,
 		AntigravityQuotaState:   antigravityObservationUnavailable,
 	}
-	if loadResp != nil {
-		info.AntigravityIneligible = len(loadResp.IneligibleTiers) > 0
-	}
+	info.AntigravityIneligibleTiers = normalizeAntigravityIneligibleTiers(loadResp)
+	info.AntigravityIneligible = len(info.AntigravityIneligibleTiers) > 0
 	if modelsResp == nil {
 		return info
 	}

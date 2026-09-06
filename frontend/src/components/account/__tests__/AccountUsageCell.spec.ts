@@ -56,6 +56,71 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountUsageCell', () => {
+  it('shows scoped tier restrictions and their reasons without claiming account denial', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      subscription_tier: 'PRO',
+      antigravity_ineligible: true,
+      antigravity_ineligible_tiers: [{
+        tier_id: 'g1-ultra-tier',
+        reason_code: 'INELIGIBLE_ACCOUNT',
+        reason_message: 'This tier is unavailable'
+      }]
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id: 5101 }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.accounts.tier.pro')
+    expect(wrapper.text()).toContain('g1-ultra-tier')
+    expect(wrapper.text()).toContain('INELIGIBLE_ACCOUNT')
+    expect(wrapper.text()).toContain('This tier is unavailable')
+    expect(wrapper.get('[role="tooltip"]').classes()).toContain('absolute')
+    expect(wrapper.get('[role="tooltip"]').classes()).toContain('opacity-0')
+    expect(wrapper.text()).not.toContain('admin.accounts.ineligibleWarning')
+    expect(wrapper.text()).not.toContain('admin.accounts.forbidden')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { id: 5102, usage: { source: 'active', antigravity_ineligible: true }, extra: {}, reason: '' },
+    { id: 5103, usage: { source: 'passive' }, extra: { load_code_assist: { ineligibleTiers: [{ reasonCode: 'INELIGIBLE_ACCOUNT', reasonMessage: '<img src=x onerror=alert(1)>' }] } }, reason: '<img src=x onerror=alert(1)>' }
+  ])('keeps no-tier and legacy restriction information scoped ($id)', async ({ id, usage, extra, reason }) => {
+    getUsage.mockResolvedValue(usage)
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id, extra }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.get('[role="tooltip"]').text()).toContain('admin.accounts.tierEligibilityInfo')
+    if (reason) expect(wrapper.get('[role="tooltip"]').text()).toContain(reason)
+    expect(wrapper.find('[role="tooltip"] img').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.forbidden')
+    expect(wrapper.text()).not.toContain('admin.accounts.needsReauth')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { id: 5104, signal: { is_forbidden: true, forbidden_type: 'forbidden' }, label: 'forbidden' },
+    { id: 5105, signal: { is_forbidden: true, forbidden_type: 'validation', needs_verify: true, validation_url: 'https://example.test/verify' }, label: 'forbiddenValidation' },
+    { id: 5106, signal: { is_forbidden: true, forbidden_type: 'violation', is_banned: true }, label: 'forbiddenViolation' },
+    { id: 5107, signal: { needs_reauth: true }, label: 'needsReauth' }
+  ])('keeps explicit account access signals visible ($label)', async ({ id, signal, label }) => {
+    getUsage.mockResolvedValue({ source: 'active', subscription_tier: 'FREE', antigravity_ineligible_tiers: [{ tier_id: 'other-tier' }], ...signal })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain(`admin.accounts.${label}`)
+    expect(wrapper.text()).toContain('other-tier')
+    if (label === 'forbiddenValidation') {
+      expect(wrapper.get('a[href="https://example.test/verify"]').text()).toBe('admin.accounts.openVerification')
+    }
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     getUsage.mockReset()
     Object.defineProperty(window, 'matchMedia', {

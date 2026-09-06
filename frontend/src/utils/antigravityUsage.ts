@@ -163,11 +163,11 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
 }
 
 const legacyAntigravityTier = (extra?: Record<string, unknown>): string | null => {
-  const loadCodeAssist = extra?.load_code_assist as Record<string, unknown> | undefined
-  const paidTier = loadCodeAssist?.paidTier as Record<string, unknown> | undefined
-  if (typeof paidTier?.id === 'string' && paidTier.id.trim()) return paidTier.id.trim()
-  const currentTier = loadCodeAssist?.currentTier as Record<string, unknown> | undefined
-  if (typeof currentTier?.id === 'string' && currentTier.id.trim()) return currentTier.id.trim()
+  const loadCodeAssist = record(extra?.load_code_assist)
+  for (const tier of [loadCodeAssist?.paidTier, loadCodeAssist?.currentTier]) {
+    const id = text(typeof tier === 'string' ? tier : record(tier)?.id)
+    if (id) return id
+  }
   return null
 }
 
@@ -196,11 +196,46 @@ export const getAntigravityTier = (
   return legacyAntigravityTier(extra)
 }
 
+type AntigravityIneligibleTier = NonNullable<AccountUsageInfo['antigravity_ineligible_tiers']>[number]
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+
+const text = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value.trim() || undefined : undefined
+
+export const getAntigravityIneligibleTiers = (
+  usage: AccountUsageInfo | null | undefined,
+  extra?: Record<string, unknown>
+): AntigravityIneligibleTier[] => {
+  const current = ownsAntigravityObservation(usage)
+  const entries = current
+    ? usage.antigravity_ineligible_tiers
+    : record(extra?.load_code_assist)?.ineligibleTiers
+  if (!Array.isArray(entries)) return []
+  return entries.flatMap((value: unknown) => {
+    const entry = record(value)
+    if (!entry) return []
+    const tier = entry.tier
+    const normalized = {
+      tier_id: text(current ? entry.tier_id : typeof tier === 'string' ? tier : record(tier)?.id),
+      reason_code: text(current ? entry.reason_code : entry.reasonCode),
+      reason_message: text(current ? entry.reason_message : entry.reasonMessage)
+    }
+    return Object.values(normalized).some(Boolean) ? [normalized] : []
+  })
+}
+
 export const hasAntigravityIneligibleTier = (
   usage: AccountUsageInfo | null | undefined,
   extra?: Record<string, unknown>
 ): boolean => {
-  if (ownsAntigravityObservation(usage)) return usage.antigravity_ineligible === true
-  const loadCodeAssist = extra?.load_code_assist as Record<string, unknown> | undefined
-  return Array.isArray(loadCodeAssist?.ineligibleTiers) && loadCodeAssist.ineligibleTiers.length > 0
+  // Old cache snapshots have only the presence flag. Keep it informational and
+  // never merge a current observation with unrelated legacy account metadata.
+  if (ownsAntigravityObservation(usage) && usage.antigravity_ineligible_tiers === undefined) {
+    return usage.antigravity_ineligible === true
+  }
+  return getAntigravityIneligibleTiers(usage, extra).length > 0
 }
