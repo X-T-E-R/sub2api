@@ -8,9 +8,12 @@ import type { AntigravityWindowKey } from '@/types'
 export const antigravityWindowPercent = (usage: AccountUsageInfo, key: AntigravityWindowKey): number | null => {
   const value = usage.antigravity_windows?.[key]?.remaining_fraction
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
-    ? Math.round(value * 1000) / 10
+    ? value * 100
     : null
 }
+
+// Format only at the text boundary; sorting and bars retain the observed precision.
+export const antigravityPercentLabel = (percent: number): string => `${Math.floor(percent)}%`
 
 export const antigravityCreditAmount = (credit: NonNullable<AccountUsageInfo['ai_credits']>[number]): string | null => {
   if (typeof credit.amount_text === 'string') {
@@ -29,6 +32,7 @@ export interface AntigravityQuotaRow {
   compactLabel: string
   title: string
   utilization: number
+  remainingPercent: number
   resetTime: string | null
 }
 
@@ -40,12 +44,19 @@ const familyOrder: Record<AntigravityQuotaFamily, number> = {
   other: 4
 }
 
+const modelRemainingPercent = (value: AntigravityModelQuota | undefined): number | null => {
+  if (!value) return null
+  if (value.remaining_fraction !== undefined && value.remaining_fraction !== null) {
+    const fraction = value.remaining_fraction
+    return typeof fraction === 'number' && Number.isFinite(fraction) && fraction >= 0 && fraction <= 1
+      ? fraction * 100 : null
+  }
+  return typeof value.utilization === 'number' && Number.isFinite(value.utilization) &&
+    value.utilization >= 0 && value.utilization <= 100 ? 100 - value.utilization : null
+}
+
 const validQuota = (value: AntigravityModelQuota | undefined): value is AntigravityModelQuota =>
-  value != null &&
-  typeof value.utilization === 'number' &&
-  Number.isFinite(value.utilization) &&
-  value.utilization >= 0 &&
-  value.utilization <= 100
+  modelRemainingPercent(value) !== null
 
 const quotaFamily = (modelID: string): AntigravityQuotaFamily => {
   const id = modelID.toLowerCase()
@@ -126,12 +137,13 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
         compactLabel: compactAntigravityModelLabel(entry.modelID),
         title: quotaTitle(entry.modelID, entry.detail),
         utilization: entry.quota.utilization,
+        remainingPercent: modelRemainingPercent(entry.quota)!,
         resetTime: quotaResetTime(entry.quota)
       })
       continue
     }
     const resetTime = quotaResetTime(entry.quota) ?? ''
-    const groupKey = `${entry.family}\u0000${entry.quota.utilization}\u0000${resetTime}`
+    const groupKey = `${entry.family}\u0000${modelRemainingPercent(entry.quota)}\u0000${resetTime}`
     const current = grouped.get(groupKey) ?? []
     current.push(entry)
     grouped.set(groupKey, current)
@@ -152,6 +164,7 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
         .map(({ modelID, detail }) => quotaTitle(modelID, detail))
         .join('; '),
       utilization: familyEntries[0].quota.utilization,
+      remainingPercent: modelRemainingPercent(familyEntries[0].quota)!,
       resetTime: quotaResetTime(familyEntries[0].quota)
     })
   }

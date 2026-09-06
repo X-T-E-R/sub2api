@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,28 @@ func TestNormalizeTier(t *testing.T) {
 func aqfBoolPtr(v bool) *bool        { return &v }
 func aqfIntPtr(v int) *int           { return &v }
 func aqfFloatPtr(v float64) *float64 { return &v }
+
+func TestBuildUsageInfo_PreservesModelFractionInJSON(t *testing.T) {
+	for _, fraction := range []float64{0, 1, 0.9968689, 0.99999, 0.256} {
+		fetcher := &AntigravityQuotaFetcher{}
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{"claude-model": {
+				QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: &fraction},
+			}},
+		}, "", "", nil)
+		encoded, err := json.Marshal(info)
+		require.NoError(t, err)
+		var decoded UsageInfo
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		quota := decoded.AntigravityQuota["claude-model"]
+		require.NotNil(t, quota.RemainingFraction)
+		require.Equal(t, fraction, *quota.RemainingFraction)
+	}
+	var legacy AntigravityModelQuota
+	require.NoError(t, json.Unmarshal([]byte(`{"utilization":0}`), &legacy))
+	require.Nil(t, legacy.RemainingFraction)
+	require.Zero(t, legacy.Utilization)
+}
 
 func TestAntigravityQuotaFetcherCanFetchOnlyOAuthWithToken(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}

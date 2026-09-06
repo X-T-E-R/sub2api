@@ -213,8 +213,9 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 
 		info.AntigravityQuota[modelName] = &AntigravityModelQuota{
-			Utilization: utilization,
-			ResetTime:   resetTime,
+			RemainingFraction: &remainingFraction,
+			Utilization:       utilization,
+			ResetTime:         resetTime,
 		}
 
 		// 填充模型详细能力信息

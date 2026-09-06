@@ -28,6 +28,63 @@ const render = (usage: AccountUsageInfo) => mount(AntigravityQuotaPanel, {
 })
 
 describe('explicit Antigravity quota presentation', () => {
+  it('keeps a partial window below full capacity in mounted compact and details', () => {
+    const wrapper = render({ ...empty(), antigravity_windows: {
+      claude_5h: observation(1), claude_weekly: observation(1),
+      gemini_5h: observation(1), gemini_weekly: observation(0.9968689)
+    } })
+    const bars = wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)
+    expect(bars.map(bar => bar.text().match(/\d+%/)?.[0])).toEqual(['100%', '99%'])
+    expect(wrapper.get('[data-window="gemini_weekly"]').text()).toContain('99%')
+    wrapper.unmount()
+  })
+  it.each([[0, '0%'], [1, '100%'], [0.9968689, '99%'], [0.99999, '99%'], [0.256, '25%']])(
+    'formats fraction %s only at the text boundary for windows and models', (fraction, label) => {
+      const window = render({ ...empty(), antigravity_windows: { claude_5h: observation(fraction as number) } })
+      expect(window.get('[data-testid="quota-compact"]').text()).toContain(label)
+      expect(window.get('[data-window="claude_5h"]').text()).toContain(label)
+      expect(Number(window.get('[role="progressbar"]').attributes('aria-valuenow'))).toBeCloseTo((fraction as number) * 100, 10)
+      const model = render({ ...empty(), antigravity_quota: {
+        'claude-sonnet': { utilization: 0, remaining_fraction: fraction as number }
+      } })
+      expect(model.get('[data-testid="quota-compact"]').text()).toContain(label)
+      expect(model.get('details').text()).toContain(label)
+      const bar = model.get('[data-testid="quota-compact"]').getComponent(UsageProgressBar)
+      expect(bar.props('utilization')).toBeCloseTo((fraction as number) * 100, 10)
+      expect(bar.find('.h-full').attributes('style')).toContain(`width: ${(fraction as number) * 100}%`)
+      window.unmount()
+      model.unmount()
+    }
+  )
+  it('selects raw lower windows and keeps distinct near-full models separate', () => {
+    const windows = render({ ...empty(), antigravity_windows: {
+      claude_5h: observation(0.99999), claude_weekly: observation(0.99998)
+    } })
+    expect(windows.get('[data-testid="quota-compact"]').text()).toContain('C 7d')
+    windows.unmount()
+    const models = render({ ...empty(), antigravity_quota_stale: true, antigravity_quota: {
+      'claude-a': { utilization: 0, remaining_fraction: 0.99999 },
+      'claude-b': { utilization: 0, remaining_fraction: 0.99998 },
+      'claude-c': { utilization: 0, remaining_fraction: 0.9968689 }
+    } })
+    expect(models.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.props('labelTitle'))).toEqual(['claude-c', 'claude-b'])
+    expect(models.get('details').findAllComponents(UsageProgressBar)).toHaveLength(3)
+    expect(models.get('summary').text()).toContain('Stale')
+    expect(models.get('[data-testid="quota-compact"]').text()).not.toContain('100%')
+    models.unmount()
+  })
+  it('rejects invalid raw model fractions while preserving old DTO-only balances', () => {
+    for (const fraction of [NaN, Infinity, -0.1, 1.1]) {
+      const wrapper = render({ ...empty(), antigravity_quota: { 'claude-bad': { utilization: 0, remaining_fraction: fraction } } })
+      expect(wrapper.get('[data-testid="quota-compact"]').text()).toBe('Unknown')
+      wrapper.unmount()
+    }
+    const legacy = render({ ...empty(), antigravity_quota: {
+      'claude-full': { utilization: 0 }, 'claude-empty': { utilization: 100, remaining_fraction: null }
+    } })
+    expect(legacy.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.text().match(/\d+%/)?.[0])).toEqual(['0%', '100%'])
+    legacy.unmount()
+  })
   it('expired exhausted model details use the real remaining-mode child and stay pending', async () => {
     const wrapper = render({ ...empty(), antigravity_quota: {
       'claude-sonnet': { utilization: 100, reset_time: '2026-09-04T12:00:00Z' }

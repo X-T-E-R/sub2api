@@ -6,14 +6,18 @@
         :label="window.compact" :label-title="window.title"
         :utilization="percent(window.key)!" :resets-at="window.resetTime"
         color="emerald" remaining-capacity
-      />
+      >
+        <template #percent>{{ antigravityPercentLabel(percent(window.key)!) }}</template>
+      </UsageProgressBar>
       <template v-if="!compactWindows.length">
         <UsageProgressBar
           v-for="row in compactModels" :key="row.key"
           :label="row.compactLabel || familyLabels[row.family]" :label-title="row.title"
-          :utilization="100 - row.utilization" :resets-at="row.resetTime"
+          :utilization="row.remainingPercent" :resets-at="row.resetTime"
           color="emerald" remaining-capacity
-        />
+        >
+          <template #percent>{{ antigravityPercentLabel(row.remainingPercent) }}</template>
+        </UsageProgressBar>
         <span v-if="!modelRows.length" class="text-gray-500 dark:text-gray-400">{{ t('common.unknown') }}</span>
       </template>
     </div>
@@ -31,7 +35,7 @@
             <div v-for="window in family.windows" :key="window.key" class="min-w-0 space-y-0.5" :data-window="window.key">
               <div class="flex justify-between gap-2 text-gray-600 dark:text-gray-300">
                 <span>{{ t(`admin.accounts.usageWindow.${window.label}`) }}</span>
-                <span class="tabular-nums font-medium">{{ percent(window.key) === null ? t('common.unknown') : `${percent(window.key)}%` }}</span>
+                <span class="tabular-nums font-medium">{{ percent(window.key) === null ? t('common.unknown') : antigravityPercentLabel(percent(window.key)!) }}</span>
               </div>
               <div
                 class="h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
@@ -74,7 +78,9 @@
           <div class="mt-1 space-y-1">
             <div v-for="row in modelRows" :key="row.key">
               <div class="break-words">{{ row.title }}</div>
-              <UsageProgressBar :label="row.compactLabel || familyLabels[row.family]" :label-title="row.title" :utilization="100 - row.utilization" :resets-at="row.resetTime" color="emerald" remaining-capacity />
+              <UsageProgressBar :label="row.compactLabel || familyLabels[row.family]" :label-title="row.title" :utilization="row.remainingPercent" :resets-at="row.resetTime" color="emerald" remaining-capacity>
+                <template #percent>{{ antigravityPercentLabel(row.remainingPercent) }}</template>
+              </UsageProgressBar>
             </div>
             <div v-if="usage.antigravity_quota_state === 'partial'" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityPartial') }}</div>
             <div v-if="usage.antigravity_quota_stale" class="text-amber-600 dark:text-amber-400">{{ t('admin.accounts.usageWindow.antigravityStale') }}</div>
@@ -90,7 +96,7 @@ import { computed, ref, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import type { AccountUsageInfo, AntigravityWindowKey } from '@/types'
-import { antigravityWindowPercent, antigravityCreditAmount, buildAntigravityQuotaRows } from '@/utils/antigravityUsage'
+import { antigravityWindowPercent, antigravityPercentLabel, antigravityCreditAmount, buildAntigravityQuotaRows } from '@/utils/antigravityUsage'
 import UsageProgressBar from './UsageProgressBar.vue'
 
 const props = defineProps<{ usage: AccountUsageInfo }>()
@@ -107,7 +113,7 @@ watch(() => props.usage.antigravity_windows, (windows) => {
   else pause()
 }, { immediate: true })
 const modelRows = computed(() => buildAntigravityQuotaRows(props.usage))
-const compactModels = computed(() => [...modelRows.value].sort((a, b) => b.utilization - a.utilization).slice(0, 2))
+const compactModels = computed(() => [...modelRows.value].sort((a, b) => a.remainingPercent - b.remainingPercent).slice(0, 2))
 const familyLabels = { 'gemini-pro': 'G Pro', 'gemini-flash': 'G Fl', 'gemini-image': 'G Im', claude: 'C', other: '?' }
 const compactWindows = computed(() => families.flatMap(family => family.windows
   .filter(window => percent(window.key) !== null)

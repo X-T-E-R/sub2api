@@ -1294,6 +1294,7 @@ export interface UsageProgress {
 
 // Antigravity 单个模型的配额信息
 export interface AntigravityModelQuota {
+  remaining_fraction?: number | null // 原始剩余比例 0-1；旧缓存可能缺失
   utilization: number // 使用率 0-100
   reset_time?: string | null // 重置时间 ISO8601；缺失表示未知
 }

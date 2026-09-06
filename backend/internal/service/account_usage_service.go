@@ -158,8 +158,9 @@ type UsageProgress struct {
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
 type AntigravityModelQuota struct {
-	Utilization int    `json:"utilization"`          // 使用率 0-100
-	ResetTime   string `json:"reset_time,omitempty"` // 重置时间 ISO8601；缺失表示未知
+	RemainingFraction *float64 `json:"remaining_fraction,omitempty"` // 原始剩余比例；旧缓存可能缺失
+	Utilization       int      `json:"utilization"`                  // 使用率 0-100
+	ResetTime         string   `json:"reset_time,omitempty"`         // 重置时间 ISO8601；缺失表示未知
 }
 
 type AntigravityObservationState string

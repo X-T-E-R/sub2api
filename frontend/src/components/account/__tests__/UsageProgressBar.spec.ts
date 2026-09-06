@@ -13,6 +13,14 @@ vi.mock('vue-i18n', async () => {
 })
 
 describe('UsageProgressBar', () => {
+  it.each([false, true])('retains default rounding without an Antigravity slot (remaining=%s)', (remainingCapacity) => {
+    const wrapper = mount(UsageProgressBar, { props: {
+      label: '5h', utilization: 99.68689, color: 'emerald', remainingCapacity
+    } })
+    expect(wrapper.text()).toContain('100%')
+    expect(wrapper.find('.h-full').attributes('style')).toContain('99.68689%')
+    wrapper.unmount()
+  })
   it.each([0, 40, 100])('remaining capacity %s stays pending after reset, including idle-display opt-in', (remaining) => {
     const wrapper = mount(UsageProgressBar, { props: {
       label: 'Model', utilization: remaining, remainingCapacity: true, showNowWhenIdle: true,

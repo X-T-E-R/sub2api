@@ -45,7 +45,7 @@
 
       <!-- Percentage -->
       <span :class="['w-[32px] shrink-0 text-right text-[10px] font-medium', textClass]">
-        {{ displayPercent }}
+        <slot name="percent">{{ displayPercent }}</slot>
       </span>
 
       <!-- Reset time -->
