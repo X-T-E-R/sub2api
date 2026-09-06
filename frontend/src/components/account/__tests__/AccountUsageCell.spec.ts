@@ -186,7 +186,7 @@ describe('AccountUsageCell', () => {
     expect(updatedAccount?.ollama_cloud_usage?.auto_refresh_enabled).toBe(false)
   })
 
-  it('Antigravity 图片用量会分别显示新旧 image 模型的真实观测', async () => {
+  it('Antigravity 模型额度不会冒充固定窗口额度', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
         'gemini-2.5-flash-image': {
@@ -226,12 +226,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G2.5I|55|2026-03-01T11:00:00Z')
-    expect(wrapper.text()).toContain('G3.1I|80|2026-03-01T10:00:00Z')
-    expect(wrapper.text()).toContain('G3I|30|2026-03-01T09:00:00Z')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.findAll('.usage-bar')).toHaveLength(0)
+    expect(wrapper.text()).toContain('common.unknown')
   })
 
-  it('Antigravity 会显示 AI Credits 余额信息', async () => {
+  it('Antigravity 固定窗口显示不附加积分详情', async () => {
     getUsage.mockResolvedValue({
       ai_credits: [
         {
@@ -261,11 +261,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
-    expect(wrapper.text()).toContain('25')
+    expect(wrapper.text()).not.toContain('admin.accounts.aiCreditsBalance')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.find('details').exists()).toBe(false)
   })
 
-  it('Antigravity 会显示当前未硬编码的模型额度与实时订阅等级', async () => {
+  it('Antigravity 固定窗口显示保留实时订阅等级', async () => {
     getUsage.mockResolvedValue({
       source: 'active',
       antigravity_quota_state: 'available',
@@ -301,7 +302,8 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G3.8F|Gemini 3.8 Flash (gemini-3.8-flash)|58')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.text()).not.toContain('G3.8F')
     expect(wrapper.text()).toContain('admin.accounts.tier.pro')
     expect(getUsage).toHaveBeenCalledWith(1003, 'passive', false)
   })
@@ -328,12 +330,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.explicitWindowsUnavailable')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
     expect(wrapper.text()).toContain('common.unknown')
     expect(wrapper.text()).not.toContain('0')
   })
 
-  it('Antigravity 显式零积分仍显示为零', async () => {
+  it('Antigravity 零积分不冒充窗口剩余额度', async () => {
     getUsage.mockResolvedValueOnce({
       source: 'active',
       antigravity_quota_state: 'unavailable',
@@ -355,8 +357,9 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
-    expect(wrapper.text()).toContain('0')
+    expect(wrapper.text()).not.toContain('admin.accounts.aiCreditsBalance')
+    expect(wrapper.text()).not.toContain('0%')
+    expect(wrapper.text()).toContain('common.unknown')
   })
 
   it('Antigravity 查询按钮使用 active force 刷新路径', async () => {
@@ -394,6 +397,9 @@ describe('AccountUsageCell', () => {
     getUsage.mockResolvedValue({
       source: 'active',
       antigravity_quota_state: 'partial',
+      antigravity_windows: {
+        claude_5h: { source_bucket_id: '3p-5h', remaining_fraction: 0.39 }
+      },
       antigravity_quota: {
         'claude-opus-4-8': { utilization: 61, reset_time: null }
       }
@@ -415,8 +421,8 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('O4.8|39')
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityPartial')
+    expect(wrapper.text()).toContain('C 5h|39')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaPartialCompact')
   })
 
   it('Antigravity 非 OAuth 账号不会触发 account usage 请求', async () => {
@@ -460,7 +466,7 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaStaleCompact')
   })
 
 
@@ -475,8 +481,8 @@ describe('AccountUsageCell', () => {
     const wrapper = mount(AccountUsageCell, { props: { account: makeAccount({ id: 1010, extra: {} }) } })
     await flushPromises()
     expect(wrapper.get('[data-window="claude_5h"] [role="progressbar"]').attributes('aria-valuenow')).toBe('0')
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.explicitWindowsUnavailable')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaStaleCompact')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
     expect(wrapper.findAll('[role="progressbar"]')).toHaveLength(1)
     wrapper.unmount()
   })

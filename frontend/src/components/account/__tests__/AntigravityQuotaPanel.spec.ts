@@ -3,189 +3,87 @@ import { mount } from '@vue/test-utils'
 import AntigravityQuotaPanel from '../AntigravityQuotaPanel.vue'
 import UsageProgressBar from '../UsageProgressBar.vue'
 import type { AccountUsageInfo, AntigravityQuotaWindow } from '@/types'
-import accounts from '@/i18n/locales/en/admin/accounts'
-import { antigravityWindowPercent, antigravityCreditAmount } from '@/utils/antigravityUsage'
 
 vi.mock('vue-i18n', async () => ({
   ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'),
-  useI18n: () => ({
-    locale: { value: 'en' },
-    t: (key: string, args: Record<string, string> = {}) => {
-      const messages: Record<string, unknown> = { admin: accounts, common: { unknown: 'Unknown' } }
-      let value: unknown = messages
-      for (const part of key.split('.')) value = (value as Record<string, unknown>)?.[part]
-      return typeof value === 'string' ? value.replace(/\{(\w+)\}/g, (_, name: string) => args[name] ?? '') : key
-    }
-  })
+  useI18n: () => ({ t: (key: string) => key })
 }))
 
 const empty = (): AccountUsageInfo => ({ five_hour: null, seven_day: null, seven_day_sonnet: null })
 const observation = (remaining_fraction: number, reset_time?: string): AntigravityQuotaWindow => ({
-  source_bucket_id: '3p-5h', remaining_fraction, reset_time, observed_at: '2026-09-05T12:00:00Z'
+  source_bucket_id: 'synthetic-window', remaining_fraction, reset_time
 })
-const render = (usage: AccountUsageInfo) => mount(AntigravityQuotaPanel, {
-  props: { usage }
-})
+const render = (usage: AccountUsageInfo) => mount(AntigravityQuotaPanel, { props: { usage } })
 
-describe('explicit Antigravity quota presentation', () => {
-  it('keeps a partial window below full capacity in mounted compact and details', () => {
-    const wrapper = render({ ...empty(), antigravity_windows: {
-      claude_5h: observation(1), claude_weekly: observation(1),
-      gemini_5h: observation(1), gemini_weekly: observation(0.9968689)
-    } })
-    const bars = wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)
-    expect(bars.map(bar => bar.text().match(/\d+%/)?.[0])).toEqual(['100%', '99%'])
-    expect(wrapper.get('[data-window="gemini_weekly"]').text()).toContain('99%')
-    wrapper.unmount()
-  })
-  it.each([[0, '0%'], [1, '100%'], [0.9968689, '99%'], [0.99999, '99%'], [0.256, '25%']])(
-    'formats fraction %s only at the text boundary for windows and models', (fraction, label) => {
-      const window = render({ ...empty(), antigravity_windows: { claude_5h: observation(fraction as number) } })
-      expect(window.get('[data-testid="quota-compact"]').text()).toContain(label)
-      expect(window.get('[data-window="claude_5h"]').text()).toContain(label)
-      expect(Number(window.get('[role="progressbar"]').attributes('aria-valuenow'))).toBeCloseTo((fraction as number) * 100, 10)
-      const model = render({ ...empty(), antigravity_quota: {
-        'claude-sonnet': { utilization: 0, remaining_fraction: fraction as number }
-      } })
-      expect(model.get('[data-testid="quota-compact"]').text()).toContain(label)
-      expect(model.get('details').text()).toContain(label)
-      const bar = model.get('[data-testid="quota-compact"]').getComponent(UsageProgressBar)
-      expect(bar.props('utilization')).toBeCloseTo((fraction as number) * 100, 10)
-      expect(bar.find('.h-full').attributes('style')).toContain(`width: ${(fraction as number) * 100}%`)
-      window.unmount()
-      model.unmount()
-    }
-  )
-  it('selects raw lower windows and keeps distinct near-full models separate', () => {
-    const windows = render({ ...empty(), antigravity_windows: {
-      claude_5h: observation(0.99999), claude_weekly: observation(0.99998)
-    } })
-    expect(windows.get('[data-testid="quota-compact"]').text()).toContain('C 7d')
-    windows.unmount()
-    const models = render({ ...empty(), antigravity_quota_stale: true, antigravity_quota: {
-      'claude-a': { utilization: 0, remaining_fraction: 0.99999 },
-      'claude-b': { utilization: 0, remaining_fraction: 0.99998 },
-      'claude-c': { utilization: 0, remaining_fraction: 0.9968689 }
-    } })
-    expect(models.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.props('labelTitle'))).toEqual(['claude-c', 'claude-b'])
-    expect(models.get('details').findAllComponents(UsageProgressBar)).toHaveLength(3)
-    expect(models.get('summary').text()).toContain('Stale')
-    expect(models.get('[data-testid="quota-compact"]').text()).not.toContain('100%')
-    models.unmount()
-  })
-  it('rejects invalid raw model fractions while preserving old DTO-only balances', () => {
-    for (const fraction of [NaN, Infinity, -0.1, 1.1]) {
-      const wrapper = render({ ...empty(), antigravity_quota: { 'claude-bad': { utilization: 0, remaining_fraction: fraction } } })
-      expect(wrapper.get('[data-testid="quota-compact"]').text()).toBe('Unknown')
-      wrapper.unmount()
-    }
-    const legacy = render({ ...empty(), antigravity_quota: {
-      'claude-full': { utilization: 0 }, 'claude-empty': { utilization: 100, remaining_fraction: null }
-    } })
-    expect(legacy.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.text().match(/\d+%/)?.[0])).toEqual(['0%', '100%'])
-    legacy.unmount()
-  })
-  it('expired exhausted model details use the real remaining-mode child and stay pending', async () => {
-    const wrapper = render({ ...empty(), antigravity_quota: {
-      'claude-sonnet': { utilization: 100, reset_time: '2026-09-04T12:00:00Z' }
-    } })
-    await wrapper.get('summary').trigger('click')
-    const details = wrapper.get('details')
-    expect(details.text()).toContain('0%')
-    expect(details.text()).toContain('usage.resetPending')
-    expect(details.text()).not.toContain('usage.resetNow')
-    wrapper.unmount()
-  })
+describe('fixed Antigravity quota rows', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-05T12:00:00Z')) })
   afterEach(() => { vi.useRealTimers() })
 
-  it('uses compact shared bars and keeps exact windows and typed credits in closed details', () => {
-    const wrapper = render({ ...empty(), antigravity_window_state: 'available', antigravity_windows: {
-      claude_5h: observation(0, '2026-09-05T13:00:00Z'),
-      claude_weekly: observation(0.256),
-      gemini_5h: observation(0.42, '2026-09-07T12:00:00Z'),
-      gemini_weekly: observation(1)
-    }, ai_credits: [{ credit_type: 'GOOGLE_ONE_AI', amount_text: '0' }, { credit_type: 'OTHER', amount_text: '12.340' }] })
-    expect(wrapper.get('[data-testid="quota-windows"]').findAll('[data-window]')).toHaveLength(4)
-    expect(wrapper.get('details').attributes('open')).toBeUndefined()
-    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar).map(bar => bar.props('utilization'))).toEqual([0, 42])
-    expect(wrapper.get('[data-testid="quota-compact"]').text()).not.toContain('GOOGLE_ONE_AI')
-    expect(wrapper.findAll('section').map(node => node.attributes('aria-label'))).toEqual(['Claude', 'Gemini'])
-    expect(wrapper.findAll('[role="progressbar"]').map(node => node.attributes('aria-valuenow'))).toEqual(['0', '25.6', '42', '100'])
-    expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('2d 0h')
-    expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('42%')
-    expect(wrapper.text()).toContain('GOOGLE_ONE_AI0')
-    expect(wrapper.text()).toContain('OTHER12.340')
-    expect(wrapper.text()).not.toContain('12.34%')
-    wrapper.unmount()
-  })
-
-  it('shows real model fallback without fabricating windows', () => {
-    const wrapper = render({ ...empty(), antigravity_quota: {
-      'claude-sonnet-high': { utilization: 20 }, 'claude-sonnet-low': { utilization: 40 }
-    } })
-    expect(wrapper.findAll('[role="progressbar"]')).toHaveLength(0)
-    expect(wrapper.findAll('[data-window]').every(node => node.text().includes('Unknown'))).toBe(true)
-    expect(wrapper.text()).toContain('Window quotas unavailable')
-    expect(wrapper.get('summary').text()).toBe('Model quotas (remaining)')
-    expect(wrapper.get('[data-testid="quota-compact"]').text()).toContain('80%')
-    expect(wrapper.get('[data-testid="quota-compact"]').text()).not.toContain('5h')
-    wrapper.unmount()
-  })
-
-  it('does not spend collapsed rows on missing windows and keeps stale status visible', () => {
-    const wrapper = render({ ...empty(), antigravity_window_state: 'partial', antigravity_windows: {
-      claude_5h: { ...observation(0), stale: true }
-    } })
-    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)).toHaveLength(1)
-    expect(wrapper.get('summary').text()).toContain('Stale')
-    expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('Unknown')
-    expect(wrapper.get('[data-window="claude_5h"]').text()).toContain('Source: 3p-5h')
-    wrapper.unmount()
-  })
-
-  it('bounds default model rows but keeps every full model name in details', () => {
-    const quota = Object.fromEntries(['a', 'b', 'c', 'd'].map(id => [`model-${id}`, { utilization: 30 }]))
-    const wrapper = render({ ...empty(), antigravity_quota: quota })
-    expect(wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)).toHaveLength(2)
-    for (const id of Object.keys(quota)) expect(wrapper.get('details').text()).toContain(id)
-    wrapper.unmount()
-  })
-
-  it('selects the lowest known window per family without inventing missing values or reset times', () => {
+  it('always displays all four windows in the requested order without disclosure controls', () => {
     const wrapper = render({ ...empty(), antigravity_windows: {
-      claude_5h: observation(0.87), claude_weekly: observation(0.25, 'bad'),
-      gemini_5h: observation(NaN), gemini_weekly: observation(0.35)
+      claude_5h: observation(1), gemini_5h: observation(0),
+      claude_weekly: observation(0.256), gemini_weekly: observation(0.9968689)
     } })
-    const bars = wrapper.get('[data-testid="quota-compact"]').findAllComponents(UsageProgressBar)
-    expect(bars.map(bar => [bar.props('label'), bar.props('utilization')])).toEqual([['C 7d', 25], ['G 7d', 35]])
-    expect(bars[0].props('resetsAt')).toBeNull()
-    expect(wrapper.text()).not.toContain('NaN')
-    wrapper.unmount()
-  })
-
-  it('preserves stale exhausted observations after reset and displays their observation time', async () => {
-    const wrapper = render({ ...empty(), error: 'network_error', antigravity_window_state: 'unavailable', antigravity_windows: {
-      claude_5h: { ...observation(0, '2026-09-05T11:00:00Z'), stale: true }
-    } })
-    const window = wrapper.get('[data-window="claude_5h"]')
-    expect(window.text()).toContain('0%')
-    expect(window.text()).toContain('Reset time passed')
-    expect(window.text()).toContain('Observed')
-    expect(window.text()).toContain(accounts.accounts.usageWindow.antigravityStale)
-    await vi.advanceTimersByTimeAsync(3600_000)
-    expect(window.get('[role="progressbar"]').attributes('aria-valuenow')).toBe('0')
-    wrapper.unmount()
-  })
-
-  it('rejects invalid fractions and distinguishes invalid credits from real zero', () => {
-    for (const value of [NaN, Infinity, -0.1, 1.1]) {
-      expect(antigravityWindowPercent({ ...empty(), antigravity_windows: { claude_5h: observation(value) } }, 'claude_5h')).toBeNull()
+    const bars = wrapper.findAllComponents(UsageProgressBar)
+    expect(bars.map(bar => bar.props('label'))).toEqual(['C 5h', 'G 5h', 'C 1w', 'G 1w'])
+    expect(bars.map(bar => bar.text().match(/\d+%/)?.[0])).toEqual(['100%', '0%', '25%', '99%'])
+    for (const [index, expected] of [100, 0, 25.6, 99.68689].entries()) {
+      expect(bars[index].props('utilization')).toBeCloseTo(expected, 10)
     }
-    expect(antigravityCreditAmount({ amount_text: '' })).toBeNull()
-    expect(antigravityCreditAmount({ amount_text: 'bad', amount: 0 })).toBeNull()
-    expect(antigravityCreditAmount({ amount_text: '0' })).toBe('0')
-    expect(antigravityCreditAmount({ amount: 0 })).toBe('0')
-    expect(antigravityCreditAmount({ amount_text: '9007199254740993.123' })).toBe('9007199254740993.123')
+    expect(wrapper.find('details').exists()).toBe(false)
+    expect(wrapper.find('summary').exists()).toBe(false)
+    expect(wrapper.find('button').exists()).toBe(false)
+    wrapper.unmount()
   })
+
+  it('keeps four labelled unknown rows when windows are unavailable, without inventing model-derived windows', () => {
+    const wrapper = render({ ...empty(), antigravity_quota: { 'claude-sonnet': { utilization: 20 } } })
+    const rows = wrapper.findAll('[data-window]')
+    expect(rows.map(row => row.attributes('data-window'))).toEqual(['claude_5h', 'gemini_5h', 'claude_weekly', 'gemini_weekly'])
+    expect(rows.every(row => row.text().includes('common.unknown'))).toBe(true)
+    for (const label of ['C 5h', 'G 5h', 'C 1w', 'G 1w']) expect(wrapper.text()).toContain(label)
+    expect(wrapper.findAllComponents(UsageProgressBar)).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('80%')
+    wrapper.unmount()
+  })
+
+  it('keeps partial and invalid windows visible as unknown without hiding valid zeros', () => {
+    const wrapper = render({ ...empty(), antigravity_window_state: 'partial', antigravity_windows: {
+      claude_5h: observation(0), gemini_5h: observation(NaN), claude_weekly: observation(1.1)
+    } })
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.findAllComponents(UsageProgressBar)).toHaveLength(1)
+    expect(wrapper.get('[data-window="claude_5h"]').text()).toContain('0%')
+    expect(wrapper.get('[data-window="gemini_5h"]').text()).toContain('common.unknown')
+    expect(wrapper.text()).not.toContain('NaN')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaPartialCompact')
+    wrapper.unmount()
+  })
+
+  it('preserves reset countdowns and stale exhausted values after their reset time', async () => {
+    const wrapper = render({ ...empty(), antigravity_windows: {
+      claude_5h: { ...observation(0, '2026-09-05T11:00:00Z'), stale: true },
+      gemini_5h: observation(0.42, '2026-09-05T13:00:00Z'),
+      claude_weekly: observation(0.25, 'bad')
+    } })
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaStaleCompact')
+    expect(wrapper.get('[data-window="claude_5h"]').text()).toContain('usage.resetPending')
+    const bars = wrapper.findAllComponents(UsageProgressBar)
+    expect(bars[1].props('resetsAt')).toBe('2026-09-05T13:00:00Z')
+    expect(bars[2].props('resetsAt')).toBeNull()
+    await vi.advanceTimersByTimeAsync(3600_000)
+    expect(wrapper.get('[data-window="claude_5h"]').text()).toContain('0%')
+    expect(bars[0].props('utilization')).toBe(0)
+    wrapper.unmount()
+  })
+
+  it.each([[0, '0%'], [1, '100%'], [0.99999, '99%'], [0.256, '25%']])(
+    'preserves fraction %s and formats only the percentage label', (fraction, label) => {
+      const wrapper = render({ ...empty(), antigravity_windows: { claude_5h: observation(fraction as number) } })
+      const bar = wrapper.getComponent(UsageProgressBar)
+      expect(bar.text()).toContain(label)
+      expect(bar.props('utilization')).toBeCloseTo((fraction as number) * 100, 10)
+      wrapper.unmount()
+    }
+  )
 })
