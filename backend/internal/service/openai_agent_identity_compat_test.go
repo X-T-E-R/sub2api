@@ -133,11 +133,14 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 	require.Equal(t, "account-agent-passthrough", req.Header.Get("chatgpt-account-id"))
 	require.NotEqual(t, "client-session", req.Header.Get("session_id"))
 	require.NotEqual(t, "client-conversation", req.Header.Get("conversation_id"))
-	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "client-session"), req.Header.Get("session_id"))
-	require.Equal(t, isolateOpenAIUpstreamSessionID(0, account, "client-conversation"), req.Header.Get("conversation_id"))
+	require.NotEmpty(t, req.Header.Get("session_id"))
+	require.NotEmpty(t, req.Header.Get("conversation_id"))
+	require.Equal(t, req.Header.Get("session_id"), req.Header.Get("session-id"))
 	requestBody, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(requestBody), `"prompt_cache_key":"cache-agent"`)
+	var agentBody map[string]any
+	require.NoError(t, json.Unmarshal(requestBody, &agentBody))
+	require.Equal(t, "cache-agent", agentBody["prompt_cache_key"], "the request builder preserves the supplied body")
 
 	// Authentication mode must not affect session isolation or prompt-cache
 	// behavior. Compare the same request with the existing OAuth path instead
@@ -159,6 +162,11 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 	require.NoError(t, err)
 	require.Equal(t, oauthReq.Header.Get("session_id"), req.Header.Get("session_id"))
 	require.Equal(t, oauthReq.Header.Get("conversation_id"), req.Header.Get("conversation_id"))
+	oauthBody, err := io.ReadAll(oauthReq.Body)
+	require.NoError(t, err)
+	var decodedOAuthBody map[string]any
+	require.NoError(t, json.Unmarshal(oauthBody, &decodedOAuthBody))
+	require.Equal(t, agentBody["prompt_cache_key"], decodedOAuthBody["prompt_cache_key"], "equal cache keys share a group across authentication modes")
 }
 
 func TestOpenAIAgentIdentityErrorRedactionDoesNotLeakCredentialValues(t *testing.T) {

@@ -13,6 +13,34 @@ vi.mock('vue-i18n', async () => {
 })
 
 describe('UsageProgressBar', () => {
+  it.each([false, true])('retains default rounding without an Antigravity slot (remaining=%s)', (remainingCapacity) => {
+    const wrapper = mount(UsageProgressBar, { props: {
+      label: '5h', utilization: 99.68689, color: 'emerald', remainingCapacity
+    } })
+    expect(wrapper.text()).toContain('100%')
+    expect(wrapper.find('.h-full').attributes('style')).toContain('99.68689%')
+    wrapper.unmount()
+  })
+  it.each([0, 40, 100])('remaining capacity %s stays pending after reset, including idle-display opt-in', (remaining) => {
+    const wrapper = mount(UsageProgressBar, { props: {
+      label: 'Model', utilization: remaining, remainingCapacity: true, showNowWhenIdle: true,
+      resetsAt: '2026-03-16T22:00:00Z', color: 'emerald'
+    } })
+    expect(wrapper.text()).toContain('usage.resetPending')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
+    expect(wrapper.text()).toContain(`${remaining}%`)
+    wrapper.unmount()
+  })
+
+  it('exhausted remaining capacity counts down rather than claiming idle availability', () => {
+    const wrapper = mount(UsageProgressBar, { props: {
+      label: 'Model', utilization: 0, remainingCapacity: true, showNowWhenIdle: true,
+      resetsAt: '2026-03-17T02:30:00Z', color: 'emerald'
+    } })
+    expect(wrapper.text()).toContain('2h 30m')
+    expect(wrapper.text()).not.toContain('usage.resetNow')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-17T00:00:00Z'))

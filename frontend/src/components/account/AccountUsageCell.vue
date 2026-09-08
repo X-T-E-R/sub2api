@@ -195,8 +195,9 @@
     <!-- Antigravity OAuth accounts: fetch usage from API -->
     <template v-else-if="account.platform === 'antigravity' && account.type === 'oauth'">
       <!-- 账户类型徽章 -->
-      <div v-if="antigravityTierLabel" class="mb-1 flex items-center gap-1">
+      <div v-if="antigravityTierLabel || hasIneligibleTiers" class="mb-1 flex items-center gap-1">
         <span
+          v-if="antigravityTierLabel"
           :class="[
             'inline-block rounded px-1.5 py-0.5 text-[10px] font-medium',
             antigravityTierClass
@@ -204,13 +205,15 @@
         >
           {{ antigravityTierLabel }}
         </span>
-        <!-- 不合格账户警告图标 -->
+        <!-- Tier eligibility information is separate from account access errors. -->
         <span
           v-if="hasIneligibleTiers"
           class="group relative cursor-help"
+          tabindex="0"
+          :aria-label="t('admin.accounts.tierEligibilityInfo')"
         >
           <svg
-            class="h-3.5 w-3.5 text-red-500"
+            class="h-3.5 w-3.5 text-gray-400"
             fill="currentColor"
             viewBox="0 0 20 20"
           >
@@ -221,9 +224,13 @@
             />
           </svg>
           <span
-            class="pointer-events-none absolute left-0 top-full z-50 mt-1 w-80 whitespace-normal break-words rounded bg-gray-900 px-3 py-2 text-xs leading-relaxed text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 dark:bg-gray-700"
+            role="tooltip"
+            class="pointer-events-none absolute left-0 top-full z-50 mt-1 w-80 whitespace-normal break-words rounded bg-gray-900 px-3 py-2 text-xs leading-relaxed text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus:opacity-100 dark:bg-gray-700"
           >
-            {{ t('admin.accounts.ineligibleWarning') }}
+            {{ t('admin.accounts.tierEligibilityInfo') }}
+            <span v-for="(tier, index) in ineligibleTiers" :key="index" class="mt-1 block">
+              {{ [tier.tier_id, tier.reason_code, tier.reason_message].filter(Boolean).join(' · ') }}
+            </span>
           </span>
         </span>
       </div>
@@ -288,40 +295,8 @@
       </div>
 
       <!-- Usage data from API -->
-      <div v-else-if="antigravityQuotaRows.length > 0" class="space-y-1">
-        <UsageProgressBar
-          v-for="row in antigravityQuotaRows"
-          :key="row.key"
-          :label="antigravityQuotaLabel(row)"
-          :label-title="row.title"
-          :utilization="row.utilization"
-          :resets-at="row.resetTime"
-          :color="antigravityQuotaColor(row)"
-        />
-
-        <div v-if="antigravityQuotaIsPartial" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityPartial') }}
-        </div>
-        <div v-if="usageInfo?.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityStale') }}
-        </div>
-
-        <div v-if="aiCreditsDisplay" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
-          💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
-        </div>
-      </div>
-      <div v-else-if="usageInfo" class="space-y-1">
-        <div class="text-[10px] text-gray-500 dark:text-gray-400">
-          {{ t('admin.accounts.usageWindow.antigravityUnavailable') }}
-        </div>
-        <div v-if="usageInfo.antigravity_quota_stale" class="text-[10px] text-amber-600 dark:text-amber-400">
-          {{ t('admin.accounts.usageWindow.antigravityStale') }}
-        </div>
-        <div v-if="aiCreditsDisplay" class="text-[10px] text-gray-500 dark:text-gray-400">
-          💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
-        </div>
-      </div>
-      <div v-else class="text-xs text-gray-400">-</div>
+      <div v-else-if="!usageInfo" class="text-xs text-gray-400">-</div>
+      <AntigravityQuotaPanel v-if="usageInfo && !loading && !error" :usage="usageInfo" />
 
       <button
         type="button"
@@ -655,14 +630,14 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import {
-  buildAntigravityQuotaRows,
   getAntigravityTier,
   hasAntigravityIneligibleTier,
-  type AntigravityQuotaRow
+  getAntigravityIneligibleTiers
 } from '@/utils/antigravityUsage'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
+import AntigravityQuotaPanel from './AntigravityQuotaPanel.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
@@ -801,47 +776,6 @@ const shouldAutoLoadUsageOnMount = computed(() => {
 
 const shouldLazyLoadOnMobile = computed(() => {
   return shouldFetchUsage.value && !isDesktopViewport.value
-})
-
-// ===== Antigravity quota from API (usageInfo.antigravity_quota) =====
-
-const antigravityQuotaRows = computed(() => buildAntigravityQuotaRows(usageInfo.value))
-
-const antigravityQuotaIsPartial = computed(() =>
-  usageInfo.value?.antigravity_quota_state === 'partial'
-)
-
-const antigravityQuotaLabel = (row: AntigravityQuotaRow): string => {
-  if (row.compactLabel) return row.compactLabel
-  switch (row.family) {
-    case 'gemini-pro': return t('admin.accounts.usageWindow.geminiQuotaPro')
-    case 'gemini-flash': return t('admin.accounts.usageWindow.geminiQuotaFlash')
-    case 'gemini-image': return t('admin.accounts.usageWindow.geminiQuotaImage')
-    case 'claude': return t('admin.accounts.usageWindow.claude')
-    default: return row.key
-  }
-}
-
-const antigravityQuotaColor = (row: AntigravityQuotaRow): 'indigo' | 'emerald' | 'purple' | 'amber' => {
-  switch (row.family) {
-    case 'gemini-pro': return 'indigo'
-    case 'gemini-flash': return 'emerald'
-    case 'gemini-image': return 'purple'
-    default: return 'amber'
-  }
-}
-
-const aiCreditsDisplay = computed(() => {
-  const credits = usageInfo.value?.ai_credits
-  if (!credits || credits.length === 0) return null
-
-  const amounts = credits
-    .map((credit) => credit.amount)
-    .filter((amount): amount is number => typeof amount === 'number' && Number.isFinite(amount))
-  if (amounts.length === 0) return t('common.unknown')
-
-  const total = amounts.reduce((sum, amount) => sum + amount, 0)
-  return total.toFixed(0)
 })
 
 // Antigravity 账户类型：实时 usage 结果优先，账号 extra 仅作加载前兼容回退。
@@ -1243,7 +1177,8 @@ const antigravityTierClass = computed(() => {
   }
 })
 
-// 检测账户是否有不合格状态（ineligibleTiers）
+// Tier restrictions retain their upstream scope independently of access errors.
+const ineligibleTiers = computed(() => getAntigravityIneligibleTiers(usageInfo.value, props.account.extra))
 const hasIneligibleTiers = computed(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   return hasAntigravityIneligibleTier(usageInfo.value, extra)

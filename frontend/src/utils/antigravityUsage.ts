@@ -3,6 +3,25 @@ import type {
   AntigravityModelDetail,
   AntigravityModelQuota
 } from '@/types'
+import type { AntigravityWindowKey } from '@/types'
+
+export const antigravityWindowPercent = (usage: AccountUsageInfo, key: AntigravityWindowKey): number | null => {
+  const value = usage.antigravity_windows?.[key]?.remaining_fraction
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value * 100
+    : null
+}
+
+// Format only at the text boundary; sorting and bars retain the observed precision.
+export const antigravityPercentLabel = (percent: number): string => `${Math.floor(percent)}%`
+
+export const antigravityCreditAmount = (credit: NonNullable<AccountUsageInfo['ai_credits']>[number]): string | null => {
+  if (typeof credit.amount_text === 'string') {
+    const value = credit.amount_text.trim()
+    return value !== '' && Number.isFinite(Number(value)) ? value : null
+  }
+  return typeof credit.amount === 'number' && Number.isFinite(credit.amount) ? String(credit.amount) : null
+}
 
 export type AntigravityQuotaFamily = 'gemini-pro' | 'gemini-flash' | 'gemini-image' | 'claude' | 'other'
 
@@ -13,6 +32,7 @@ export interface AntigravityQuotaRow {
   compactLabel: string
   title: string
   utilization: number
+  remainingPercent: number
   resetTime: string | null
 }
 
@@ -24,12 +44,19 @@ const familyOrder: Record<AntigravityQuotaFamily, number> = {
   other: 4
 }
 
+const modelRemainingPercent = (value: AntigravityModelQuota | undefined): number | null => {
+  if (!value) return null
+  if (value.remaining_fraction !== undefined && value.remaining_fraction !== null) {
+    const fraction = value.remaining_fraction
+    return typeof fraction === 'number' && Number.isFinite(fraction) && fraction >= 0 && fraction <= 1
+      ? fraction * 100 : null
+  }
+  return typeof value.utilization === 'number' && Number.isFinite(value.utilization) &&
+    value.utilization >= 0 && value.utilization <= 100 ? 100 - value.utilization : null
+}
+
 const validQuota = (value: AntigravityModelQuota | undefined): value is AntigravityModelQuota =>
-  value != null &&
-  typeof value.utilization === 'number' &&
-  Number.isFinite(value.utilization) &&
-  value.utilization >= 0 &&
-  value.utilization <= 100
+  modelRemainingPercent(value) !== null
 
 const quotaFamily = (modelID: string): AntigravityQuotaFamily => {
   const id = modelID.toLowerCase()
@@ -110,12 +137,13 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
         compactLabel: compactAntigravityModelLabel(entry.modelID),
         title: quotaTitle(entry.modelID, entry.detail),
         utilization: entry.quota.utilization,
+        remainingPercent: modelRemainingPercent(entry.quota)!,
         resetTime: quotaResetTime(entry.quota)
       })
       continue
     }
     const resetTime = quotaResetTime(entry.quota) ?? ''
-    const groupKey = `${entry.family}\u0000${entry.quota.utilization}\u0000${resetTime}`
+    const groupKey = `${entry.family}\u0000${modelRemainingPercent(entry.quota)}\u0000${resetTime}`
     const current = grouped.get(groupKey) ?? []
     current.push(entry)
     grouped.set(groupKey, current)
@@ -136,6 +164,7 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
         .map(({ modelID, detail }) => quotaTitle(modelID, detail))
         .join('; '),
       utilization: familyEntries[0].quota.utilization,
+      remainingPercent: modelRemainingPercent(familyEntries[0].quota)!,
       resetTime: quotaResetTime(familyEntries[0].quota)
     })
   }
@@ -147,11 +176,11 @@ export const buildAntigravityQuotaRows = (usage?: AccountUsageInfo | null): Anti
 }
 
 const legacyAntigravityTier = (extra?: Record<string, unknown>): string | null => {
-  const loadCodeAssist = extra?.load_code_assist as Record<string, unknown> | undefined
-  const paidTier = loadCodeAssist?.paidTier as Record<string, unknown> | undefined
-  if (typeof paidTier?.id === 'string' && paidTier.id.trim()) return paidTier.id.trim()
-  const currentTier = loadCodeAssist?.currentTier as Record<string, unknown> | undefined
-  if (typeof currentTier?.id === 'string' && currentTier.id.trim()) return currentTier.id.trim()
+  const loadCodeAssist = record(extra?.load_code_assist)
+  for (const tier of [loadCodeAssist?.paidTier, loadCodeAssist?.currentTier]) {
+    const id = text(typeof tier === 'string' ? tier : record(tier)?.id)
+    if (id) return id
+  }
   return null
 }
 
@@ -180,11 +209,46 @@ export const getAntigravityTier = (
   return legacyAntigravityTier(extra)
 }
 
+type AntigravityIneligibleTier = NonNullable<AccountUsageInfo['antigravity_ineligible_tiers']>[number]
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+
+const text = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value.trim() || undefined : undefined
+
+export const getAntigravityIneligibleTiers = (
+  usage: AccountUsageInfo | null | undefined,
+  extra?: Record<string, unknown>
+): AntigravityIneligibleTier[] => {
+  const current = ownsAntigravityObservation(usage)
+  const entries = current
+    ? usage.antigravity_ineligible_tiers
+    : record(extra?.load_code_assist)?.ineligibleTiers
+  if (!Array.isArray(entries)) return []
+  return entries.flatMap((value: unknown) => {
+    const entry = record(value)
+    if (!entry) return []
+    const tier = entry.tier
+    const normalized = {
+      tier_id: text(current ? entry.tier_id : typeof tier === 'string' ? tier : record(tier)?.id),
+      reason_code: text(current ? entry.reason_code : entry.reasonCode),
+      reason_message: text(current ? entry.reason_message : entry.reasonMessage)
+    }
+    return Object.values(normalized).some(Boolean) ? [normalized] : []
+  })
+}
+
 export const hasAntigravityIneligibleTier = (
   usage: AccountUsageInfo | null | undefined,
   extra?: Record<string, unknown>
 ): boolean => {
-  if (ownsAntigravityObservation(usage)) return usage.antigravity_ineligible === true
-  const loadCodeAssist = extra?.load_code_assist as Record<string, unknown> | undefined
-  return Array.isArray(loadCodeAssist?.ineligibleTiers) && loadCodeAssist.ineligibleTiers.length > 0
+  // Old cache snapshots have only the presence flag. Keep it informational and
+  // never merge a current observation with unrelated legacy account metadata.
+  if (ownsAntigravityObservation(usage) && usage.antigravity_ineligible_tiers === undefined) {
+    return usage.antigravity_ineligible === true
+  }
+  return getAntigravityIneligibleTiers(usage, extra).length > 0
 }

@@ -34,8 +34,15 @@ const (
 
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
 type AntigravityQuotaFetcher struct {
-	proxyRepo ProxyRepository
-	cfg       *config.Config
+	proxyRepo     ProxyRepository
+	cfg           *config.Config
+	tokenProvider *AntigravityTokenProvider
+}
+
+func ProvideAntigravityQuotaFetcher(proxyRepo ProxyRepository, cfg *config.Config, tokenProvider *AntigravityTokenProvider) *AntigravityQuotaFetcher {
+	fetcher := NewAntigravityQuotaFetcher(proxyRepo, cfg)
+	fetcher.tokenProvider = tokenProvider
+	return fetcher
 }
 
 // NewAntigravityQuotaFetcher 创建 AntigravityQuotaFetcher
@@ -54,13 +61,42 @@ func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
 
 // FetchQuota 获取 Antigravity 账户额度信息
 func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
+	account, err := f.prepareQuotaAccount(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	return f.fetchQuotaWithOrigin(ctx, account, proxyURL, resolveAntigravityForwardBaseURL(account))
+}
+
+// Prepare the credential snapshot before admitting a request to a quota flight.
+// The flight must not reread the account and change its origin after admission.
+func (f *AntigravityQuotaFetcher) prepareQuotaAccount(ctx context.Context, account *Account) (*Account, error) {
+	if f.tokenProvider != nil {
+		_, snapshot, err := f.tokenProvider.GetAccessTokenForQuota(ctx, account)
+		return snapshot, err
+	}
+	return snapshotOAuthRefreshAccount(account), nil
+}
+
+func (f *AntigravityQuotaFetcher) fetchQuotaWithOrigin(ctx context.Context, account *Account, proxyURL, baseURL string) (*QuotaResult, error) {
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
+	scope := antigravityQuotaScopeForOrigin(account, baseURL)
 
-	client, err := antigravity.NewClient(proxyURL)
+	client, err := antigravity.NewQuotaClient(proxyURL, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}
+
+	// Resolve the project before quota reads; discovery never onboards or persists
+	// a project and failure still permits quota reads with the stored hint.
+	tierRaw, tierNormalized, loadResp, subscriptionState := f.fetchSubscriptionTier(ctx, client, accessToken, projectID)
+	if loadResp != nil && strings.TrimSpace(loadResp.CloudAICompanionProject) != "" {
+		projectID = strings.TrimSpace(loadResp.CloudAICompanionProject)
+	}
+	// Keep acquisition provenance even if the model endpoint fails after token
+	// rotation. The stored credential scope and actual query project are distinct.
+	result := &QuotaResult{antigravityScope: scope, antigravityProjectID: projectID}
 
 	// 调用 API 获取配额
 	modelsResp, modelsRaw, err := client.FetchAvailableModels(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
@@ -71,6 +107,8 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 			now := time.Now()
 			fbType := classifyForbiddenType(forbiddenErr.Body)
 			return &QuotaResult{
+				antigravityScope:     scope,
+				antigravityProjectID: projectID,
 				UsageInfo: &UsageInfo{
 					Source:                       "active",
 					UpdatedAt:                    &now,
@@ -86,26 +124,31 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 				},
 			}, nil
 		}
-		return nil, err
+		return result, err
 	}
-
-	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
-	tierRaw, tierNormalized, loadResp, subscriptionState := f.fetchSubscriptionTier(ctx, client, accessToken)
 
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
 	usageInfo.AntigravitySubscriptionState = subscriptionState
+	summary, summaryErr := client.RetrieveUserQuotaSummary(ctx, accessToken, projectID, modelsResp.QuotaBaseURL, resolveModelsListReadLimit(f.cfg))
+	if summaryErr != nil {
+		// Summary is optional; do not expose upstream bodies or discard model data.
+		summary = nil
+	}
+	applyAntigravitySummary(usageInfo, summary, time.Now())
 
-	return &QuotaResult{
-		UsageInfo: usageInfo,
-		Raw:       modelsRaw,
-	}, nil
+	result.UsageInfo = usageInfo
+	result.Raw = modelsRaw
+	return result, nil
 }
 
 // fetchSubscriptionTier 获取账号订阅等级，失败返回空字符串。
 // 同时返回 LoadCodeAssistResponse，以便提取 AI Credits 余额。
-func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse, state AntigravityObservationState) {
-	loadResp, _, err := client.LoadCodeAssist(ctx, accessToken)
+func (f *AntigravityQuotaFetcher) fetchSubscriptionTier(ctx context.Context, client *antigravity.Client, accessToken, projectID string) (raw, normalized string, loadResp *antigravity.LoadCodeAssistResponse, state AntigravityObservationState) {
+	// Discovery is optional and must leave time for the model quota request.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	loadResp, _, err := client.LoadCodeAssistForQuota(ctx, accessToken, projectID)
 	if err != nil {
 		slog.Warn("failed to fetch subscription tier", "error", err)
 		return "", "", nil, antigravityObservationUnavailable
@@ -153,9 +196,8 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		SubscriptionTierRaw:     tierRaw,
 		AntigravityQuotaState:   antigravityObservationUnavailable,
 	}
-	if loadResp != nil {
-		info.AntigravityIneligible = len(loadResp.IneligibleTiers) > 0
-	}
+	info.AntigravityIneligibleTiers = normalizeAntigravityIneligibleTiers(loadResp)
+	info.AntigravityIneligible = len(info.AntigravityIneligibleTiers) > 0
 	if modelsResp == nil {
 		return info
 	}
@@ -181,8 +223,9 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 
 		info.AntigravityQuota[modelName] = &AntigravityModelQuota{
-			Utilization: utilization,
-			ResetTime:   resetTime,
+			RemainingFraction: &remainingFraction,
+			Utilization:       utilization,
+			ResetTime:         resetTime,
 		}
 
 		// 填充模型详细能力信息
@@ -213,33 +256,17 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 	}
 
-	// 同时设置 FiveHour 用于兼容展示（取主要模型）
-	priorityModels := []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"}
-	for _, modelName := range priorityModels {
-		if modelQuota, ok := info.AntigravityQuota[modelName]; ok {
-			progress := &UsageProgress{
-				Utilization: float64(modelQuota.Utilization),
-			}
-			if modelQuota.ResetTime != "" {
-				if resetTime, err := time.Parse(time.RFC3339, modelQuota.ResetTime); err == nil {
-					progress.ResetsAt = &resetTime
-					progress.RemainingSeconds = int(time.Until(resetTime).Seconds())
-				}
-			}
-			info.FiveHour = progress
-			break
-		}
-	}
-
 	if loadResp != nil {
 		for _, credit := range loadResp.GetAvailableCredits() {
-			if credit.CreditType != "GOOGLE_ONE_AI" {
+			if strings.TrimSpace(credit.CreditType) == "" {
 				continue
 			}
 			info.AICredits = append(info.AICredits, AICredit{
-				CreditType:     credit.CreditType,
-				Amount:         parseOptionalCreditAmount(credit.CreditAmount),
-				MinimumBalance: parseOptionalCreditAmount(credit.MinimumCreditAmountForUsage),
+				CreditType:         credit.CreditType,
+				AmountText:         credit.CreditAmount,
+				MinimumBalanceText: credit.MinimumCreditAmountForUsage,
+				Amount:             parseOptionalCreditAmount(credit.CreditAmount),
+				MinimumBalance:     parseOptionalCreditAmount(credit.MinimumCreditAmountForUsage),
 			})
 		}
 	}

@@ -18,6 +18,17 @@ type codexAccountIdentityRepoStub struct {
 	account *Account
 }
 
+func applyCodexAccountIdentityClientMetadataRaw(body []byte, account *Account, apiKeyID int64) ([]byte, bool, error) {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return body, false, err
+	}
+	p := newCodexRequestIdentity(account, account, apiKeyID, nil, decoded)
+	changed := p.applyBody(decoded)
+	raw, err := json.Marshal(decoded)
+	return raw, changed, err
+}
+
 func (s *codexAccountIdentityRepoStub) GetByID(_ context.Context, _ int64) (*Account, error) {
 	return s.account, nil
 }
@@ -123,7 +134,8 @@ func TestCodexAccountIdentitySourceResolvesShadowAndOverwritesFailoverContext(t 
 	resolved, err = service.prepareCodexAccountIdentitySource(context.Background(), c, next)
 	require.NoError(t, err)
 	require.Same(t, next, resolved)
-	require.Same(t, next, codexAccountIdentitySource(c, shadow))
+	require.Same(t, next, codexAccountIdentitySource(c, next))
+	require.Same(t, shadow, codexAccountIdentitySource(c, shadow), "a source staged for another selection is not reusable")
 }
 
 func TestBuildOpenAIWSHeadersNamespacesCodexIdentityByOAuthAccount(t *testing.T) {

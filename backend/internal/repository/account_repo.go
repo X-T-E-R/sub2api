@@ -80,7 +80,7 @@ func codexFingerprintSeedValidSQL(extraExpr string) string {
 }
 
 func ensureCodexFingerprintSeedSQL(extraExpr string) string {
-	return "CASE WHEN platform = 'openai' AND type = 'oauth' THEN " +
+	return "CASE WHEN platform = 'openai' AND type IN ('oauth', 'setup-token') THEN " +
 		"jsonb_set(" + extraExpr + ", '{codex_fingerprint_seed}', " +
 		"CASE WHEN " + codexFingerprintSeedValidSQL("extra") +
 		" THEN to_jsonb(extra ->> 'codex_fingerprint_seed') ELSE to_jsonb(gen_random_uuid()::text) END, true) " +

@@ -20,6 +20,7 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
+      locale: { value: 'en' },
       t: (key: string) => key
     })
   }
@@ -55,6 +56,71 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountUsageCell', () => {
+  it('shows scoped tier restrictions and their reasons without claiming account denial', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active',
+      subscription_tier: 'PRO',
+      antigravity_ineligible: true,
+      antigravity_ineligible_tiers: [{
+        tier_id: 'g1-ultra-tier',
+        reason_code: 'INELIGIBLE_ACCOUNT',
+        reason_message: 'This tier is unavailable'
+      }]
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id: 5101 }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.accounts.tier.pro')
+    expect(wrapper.text()).toContain('g1-ultra-tier')
+    expect(wrapper.text()).toContain('INELIGIBLE_ACCOUNT')
+    expect(wrapper.text()).toContain('This tier is unavailable')
+    expect(wrapper.get('[role="tooltip"]').classes()).toContain('absolute')
+    expect(wrapper.get('[role="tooltip"]').classes()).toContain('opacity-0')
+    expect(wrapper.text()).not.toContain('admin.accounts.ineligibleWarning')
+    expect(wrapper.text()).not.toContain('admin.accounts.forbidden')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { id: 5102, usage: { source: 'active', antigravity_ineligible: true }, extra: {}, reason: '' },
+    { id: 5103, usage: { source: 'passive' }, extra: { load_code_assist: { ineligibleTiers: [{ reasonCode: 'INELIGIBLE_ACCOUNT', reasonMessage: '<img src=x onerror=alert(1)>' }] } }, reason: '<img src=x onerror=alert(1)>' }
+  ])('keeps no-tier and legacy restriction information scoped ($id)', async ({ id, usage, extra, reason }) => {
+    getUsage.mockResolvedValue(usage)
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id, extra }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.get('[role="tooltip"]').text()).toContain('admin.accounts.tierEligibilityInfo')
+    if (reason) expect(wrapper.get('[role="tooltip"]').text()).toContain(reason)
+    expect(wrapper.find('[role="tooltip"] img').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.forbidden')
+    expect(wrapper.text()).not.toContain('admin.accounts.needsReauth')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { id: 5104, signal: { is_forbidden: true, forbidden_type: 'forbidden' }, label: 'forbidden' },
+    { id: 5105, signal: { is_forbidden: true, forbidden_type: 'validation', needs_verify: true, validation_url: 'https://example.test/verify' }, label: 'forbiddenValidation' },
+    { id: 5106, signal: { is_forbidden: true, forbidden_type: 'violation', is_banned: true }, label: 'forbiddenViolation' },
+    { id: 5107, signal: { needs_reauth: true }, label: 'needsReauth' }
+  ])('keeps explicit account access signals visible ($label)', async ({ id, signal, label }) => {
+    getUsage.mockResolvedValue({ source: 'active', subscription_tier: 'FREE', antigravity_ineligible_tiers: [{ tier_id: 'other-tier' }], ...signal })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id }) },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain(`admin.accounts.${label}`)
+    expect(wrapper.text()).toContain('other-tier')
+    if (label === 'forbiddenValidation') {
+      expect(wrapper.get('a[href="https://example.test/verify"]').text()).toBe('admin.accounts.openVerification')
+    }
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     getUsage.mockReset()
     Object.defineProperty(window, 'matchMedia', {
@@ -120,7 +186,7 @@ describe('AccountUsageCell', () => {
     expect(updatedAccount?.ollama_cloud_usage?.auto_refresh_enabled).toBe(false)
   })
 
-  it('Antigravity 图片用量会分别显示新旧 image 模型的真实观测', async () => {
+  it('Antigravity 模型额度不会冒充固定窗口额度', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
         'gemini-2.5-flash-image': {
@@ -160,12 +226,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G2.5I|45|2026-03-01T11:00:00Z')
-    expect(wrapper.text()).toContain('G3.1I|20|2026-03-01T10:00:00Z')
-    expect(wrapper.text()).toContain('G3I|70|2026-03-01T09:00:00Z')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.findAll('.usage-bar')).toHaveLength(0)
+    expect(wrapper.text()).toContain('common.unknown')
   })
 
-  it('Antigravity 会显示 AI Credits 余额信息', async () => {
+  it('Antigravity 固定窗口显示不附加积分详情', async () => {
     getUsage.mockResolvedValue({
       ai_credits: [
         {
@@ -195,11 +261,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
-    expect(wrapper.text()).toContain('25')
+    expect(wrapper.text()).not.toContain('admin.accounts.aiCreditsBalance')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.find('details').exists()).toBe(false)
   })
 
-  it('Antigravity 会显示当前未硬编码的模型额度与实时订阅等级', async () => {
+  it('Antigravity 固定窗口显示保留实时订阅等级', async () => {
     getUsage.mockResolvedValue({
       source: 'active',
       antigravity_quota_state: 'available',
@@ -235,7 +302,8 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('G3.8F|Gemini 3.8 Flash (gemini-3.8-flash)|42')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.text()).not.toContain('G3.8F')
     expect(wrapper.text()).toContain('admin.accounts.tier.pro')
     expect(getUsage).toHaveBeenCalledWith(1003, 'passive', false)
   })
@@ -262,12 +330,12 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityUnavailable')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
     expect(wrapper.text()).toContain('common.unknown')
     expect(wrapper.text()).not.toContain('0')
   })
 
-  it('Antigravity 显式零积分仍显示为零', async () => {
+  it('Antigravity 零积分不冒充窗口剩余额度', async () => {
     getUsage.mockResolvedValueOnce({
       source: 'active',
       antigravity_quota_state: 'unavailable',
@@ -289,8 +357,9 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.aiCreditsBalance')
-    expect(wrapper.text()).toContain('0')
+    expect(wrapper.text()).not.toContain('admin.accounts.aiCreditsBalance')
+    expect(wrapper.text()).not.toContain('0%')
+    expect(wrapper.text()).toContain('common.unknown')
   })
 
   it('Antigravity 查询按钮使用 active force 刷新路径', async () => {
@@ -328,6 +397,9 @@ describe('AccountUsageCell', () => {
     getUsage.mockResolvedValue({
       source: 'active',
       antigravity_quota_state: 'partial',
+      antigravity_windows: {
+        claude_5h: { source_bucket_id: '3p-5h', remaining_fraction: 0.39 }
+      },
       antigravity_quota: {
         'claude-opus-4-8': { utilization: 61, reset_time: null }
       }
@@ -349,8 +421,8 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('O4.8|61')
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityPartial')
+    expect(wrapper.text()).toContain('C 5h|39')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaPartialCompact')
   })
 
   it('Antigravity 非 OAuth 账号不会触发 account usage 请求', async () => {
@@ -394,9 +466,26 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.antigravityStale')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaStaleCompact')
   })
 
+
+  it('Antigravity 刷新失败时仍展示明确标旧的窗口，保留零剩余量', async () => {
+    getUsage.mockResolvedValue({
+      source: 'active', error: 'network_error', error_code: 'network_error',
+      antigravity_window_state: 'unavailable',
+      antigravity_windows: {
+        claude_5h: { source_bucket_id: '3p-5h', remaining_fraction: 0, reset_time: '2026-09-04T00:00:00Z', observed_at: '2026-09-03T12:00:00Z', stale: true }
+      }
+    })
+    const wrapper = mount(AccountUsageCell, { props: { account: makeAccount({ id: 1010, extra: {} }) } })
+    await flushPromises()
+    expect(wrapper.get('[data-window="claude_5h"] [role="progressbar"]').attributes('aria-valuenow')).toBe('0')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaStaleCompact')
+    expect(wrapper.findAll('[data-window]')).toHaveLength(4)
+    expect(wrapper.findAll('[role="progressbar"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
 
   it('OpenAI OAuth 快照已过期时首屏会重新请求 usage', async () => {
     getUsage.mockResolvedValue({

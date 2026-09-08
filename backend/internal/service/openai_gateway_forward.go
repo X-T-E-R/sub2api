@@ -530,27 +530,27 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Account namespace is orthogonal to fingerprint convergence: preserve
 		// each client's identity cardinality, but never reuse it across OAuth
 		// credentials after scheduler failover.
-		if !isCompactRequest && applyCodexAccountIdentityClientMetadataMap(decoded, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c)) {
-			markDecodedModified()
-		}
-		stageCodexFingerprintIDs(c, nil)
-		// 指纹收敛：一次性解析收敛 ID，请求体和出站头共享同一份 IDs（保证 turn_id 等随机字段一致）。
-		// fingerprintIDs 在此处解析，后续 buildUpstreamRequest 中使用同一份。
 		if !isCompactRequest {
-			var clientHeaders http.Header
-			if c != nil && c.Request != nil {
-				clientHeaders = c.Request.Header
+			changed, err := projectCodexRequestBodyWithDailySession(c, account, decoded)
+			if err != nil {
+				return nil, err
 			}
-			fpIDs := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
-			if fpIDs != nil {
-				if applyCodexFingerprintClientMetadata(decoded, fpIDs) {
-					markDecodedModified()
-				}
+			if changed {
+				markDecodedModified()
 			}
-			// 将 fpIDs 存入 gin context，供 buildUpstreamRequest 中头改写使用。
-			// 无条件覆写（含 nil）：failover 从收敛账号切到 off 账号时，上一
-			// 账号的 IDs 不得残留（stageCodexFingerprintIDs 注释）。
-			stageCodexFingerprintIDs(c, fpIDs)
+		}
+		if isCompactRequest {
+			// Legacy compact accepts an explicit cache key, but not the normal
+			// client_metadata shape. Scope only that supported body field.
+			cacheBody := map[string]any{"prompt_cache_key": decoded["prompt_cache_key"]}
+			changed, err := projectCodexRequestBodyWithDailySession(c, account, cacheBody)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				decoded["prompt_cache_key"] = cacheBody["prompt_cache_key"]
+				markDecodedModified()
+			}
 		}
 		if codexResult.NormalizedModel != "" {
 			upstreamModel = codexResult.NormalizedModel
@@ -1416,12 +1416,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Set("user-agent", CodexCanonicalUserAgent())
 	}
 
-	// 账号 namespace 不改变客户端身份基数，但确保 scheduler failover 后不会把
-	// 同一组 Codex IDs 发送给另一份 OAuth 凭据。可选指纹收敛随后仍可覆盖这些值。
-	applyCodexAccountIdentityHeaders(req.Header, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
-
-	// 指纹收敛：使用 Forward() 中预计算的收敛 ID 改写出站头，与请求体使用同一份 IDs。
-	applyStagedCodexFingerprintHeaders(c, account, req.Header)
+	// 与 body 共享本 attempt 的投影，账号隔离和显式收敛只计算一次。
+	applyCodexRequestHeaders(c, account, req.Header)
 
 	// 终态收口：强制统一 OAuth 出站身份（User-Agent / originator / version 同源自洽）。
 	// 客户端自报身份不参与构造，浏览器型 UA 也因此不会再到达上游（原浏览器 UA 兜底已被吸收）。

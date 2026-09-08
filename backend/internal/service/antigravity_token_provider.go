@@ -23,6 +23,35 @@ const (
 // AntigravityTokenCache token cache interface.
 type AntigravityTokenCache = GeminiTokenCache
 
+type antigravityQuotaTokenContextKey struct{}
+
+func isAntigravityQuotaTokenContext(ctx context.Context) bool {
+	quota, _ := ctx.Value(antigravityQuotaTokenContextKey{}).(bool)
+	return quota
+}
+
+// GetAccessTokenForQuota refreshes OAuth credentials without project discovery
+// or onboarding. The returned snapshot binds quota cache entries to the exact
+// credentials used, including refresh-token rotation.
+func (p *AntigravityTokenProvider) GetAccessTokenForQuota(ctx context.Context, account *Account) (string, *Account, error) {
+	ctx = context.WithValue(ctx, antigravityQuotaTokenContextKey{}, true)
+	token, err := p.GetAccessToken(ctx, account)
+	if err != nil {
+		return "", nil, err
+	}
+	current := account
+	if p.accountRepo != nil {
+		current, err = p.accountRepo.GetByID(ctx, account.ID)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	if current == nil || current.ID != account.ID || current.Platform != PlatformAntigravity || current.Type != AccountTypeOAuth || current.GetCredential("access_token") != token {
+		return "", nil, errors.New("antigravity quota credentials changed during token acquisition")
+	}
+	return token, snapshotOAuthRefreshAccount(current), nil
+}
+
 // AntigravityTokenProvider manages access_token for antigravity accounts.
 type AntigravityTokenProvider struct {
 	accountRepo             AccountRepository
@@ -133,7 +162,7 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 	}
 
 	// Backfill project_id online when missing, with cooldown to avoid hammering.
-	if strings.TrimSpace(account.GetCredential("project_id")) == "" && p.antigravityOAuthService != nil {
+	if !isAntigravityQuotaTokenContext(ctx) && strings.TrimSpace(account.GetCredential("project_id")) == "" && p.antigravityOAuthService != nil {
 		if p.shouldAttemptBackfill(account.ID) {
 			p.markBackfillAttempted(account.ID)
 			if projectID, err := p.antigravityOAuthService.FillProjectID(ctx, account, accessToken); err == nil && projectID != "" {
@@ -231,9 +260,7 @@ func (p *AntigravityTokenProvider) markBackfillAttempted(accountID int64) {
 }
 
 func AntigravityTokenCacheKey(account *Account) string {
-	projectID := strings.TrimSpace(account.GetCredential("project_id"))
-	if projectID != "" {
-		return "ag:" + projectID
-	}
-	return "ag:account:" + strconv.FormatInt(account.ID, 10)
+	// Projects can be shared by unrelated OAuth accounts. Keep tokens and refresh
+	// locks account-scoped, with a new namespace that never reads legacy entries.
+	return "ag:v2:account:" + strconv.FormatInt(account.ID, 10)
 }

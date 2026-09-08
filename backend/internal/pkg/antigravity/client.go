@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -78,10 +79,13 @@ type UserInfo struct {
 
 // LoadCodeAssistRequest loadCodeAssist 请求
 type LoadCodeAssistRequest struct {
+	Mode     string `json:"mode,omitempty"`
+	Project  string `json:"cloudaicompanionProject,omitempty"`
 	Metadata struct {
-		IDEType    string `json:"ideType"`
-		IDEVersion string `json:"ideVersion"`
-		IDEName    string `json:"ideName"`
+		DuetProject string `json:"duetProject,omitempty"`
+		IDEType     string `json:"ideType"`
+		IDEVersion  string `json:"ideVersion"`
+		IDEName     string `json:"ideName"`
 	} `json:"metadata"`
 }
 
@@ -129,6 +133,33 @@ type LoadCodeAssistResponse struct {
 	CurrentTier             *TierInfo         `json:"currentTier,omitempty"`
 	PaidTier                *PaidTierInfo     `json:"paidTier,omitempty"`
 	IneligibleTiers         []*IneligibleTier `json:"ineligibleTiers,omitempty"`
+}
+
+// UnmarshalJSON accepts both Cloud Code project representations without losing
+// subscription data when the optional project is absent or unrecognized.
+func (r *LoadCodeAssistResponse) UnmarshalJSON(data []byte) error {
+	type response LoadCodeAssistResponse
+	var decoded struct {
+		*response
+		Project json.RawMessage `json:"cloudaicompanionProject"`
+	}
+	var value response
+	decoded.response = &value
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var project string
+	if json.Unmarshal(decoded.Project, &project) != nil {
+		var object struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(decoded.Project, &object) == nil {
+			project = object.ID
+		}
+	}
+	value.CloudAICompanionProject = strings.TrimSpace(project)
+	*r = LoadCodeAssistResponse(value)
+	return nil
 }
 
 // PaidTierInfo 付费等级信息，包含 AI Credits 余额。
@@ -245,7 +276,30 @@ func TierIDToPlanType(tierID string) string {
 
 // Client Antigravity API 客户端
 type Client struct {
-	httpClient *http.Client
+	httpClient   *http.Client
+	quotaBaseURL string
+}
+
+// NewQuotaClient pins all quota observations to the forwarding origin. Ordinary
+// OAuth and onboarding clients retain their existing fallback behavior.
+func NewQuotaClient(proxyURL, baseURL string) (*Client, error) {
+	if !slices.Contains(BaseURLs, baseURL) || baseURL == "" {
+		return nil, errors.New("unsupported quota base URL")
+	}
+	c, err := NewClient(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	c.quotaBaseURL = baseURL
+	c.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return c, nil
+}
+
+func (c *Client) observationBaseURLs() []string {
+	if c.quotaBaseURL != "" {
+		return []string{c.quotaBaseURL}
+	}
+	return BaseURLs
 }
 
 const (
@@ -438,7 +492,16 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (*UserInfo
 // LoadCodeAssist 获取账户信息，返回解析后的结构体和原始 JSON
 // 支持 URL fallback：sandbox → daily → prod
 func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadCodeAssistResponse, map[string]any, error) {
-	reqBody := LoadCodeAssistRequest{}
+	return c.loadCodeAssist(ctx, accessToken, LoadCodeAssistRequest{})
+}
+
+func (c *Client) LoadCodeAssistForQuota(ctx context.Context, accessToken, projectID string) (*LoadCodeAssistResponse, map[string]any, error) {
+	reqBody := LoadCodeAssistRequest{Mode: "FULL_ELIGIBILITY_CHECK", Project: strings.TrimSpace(projectID)}
+	reqBody.Metadata.DuetProject = reqBody.Project
+	return c.loadCodeAssist(ctx, accessToken, reqBody)
+}
+
+func (c *Client) loadCodeAssist(ctx context.Context, accessToken string, reqBody LoadCodeAssistRequest) (*LoadCodeAssistResponse, map[string]any, error) {
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
 	reqBody.Metadata.IDEVersion = GetUserAgentVersionForContext(ctx)
 	reqBody.Metadata.IDEName = "antigravity"
@@ -449,7 +512,7 @@ func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadC
 	}
 
 	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	availableURLs := c.observationBaseURLs()
 
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
@@ -645,11 +708,12 @@ type DeprecatedModelInfo struct {
 
 // FetchAvailableModelsRequest fetchAvailableModels 请求
 type FetchAvailableModelsRequest struct {
-	Project string `json:"project"`
+	Project string `json:"project,omitempty"`
 }
 
 // FetchAvailableModelsResponse fetchAvailableModels 响应
 type FetchAvailableModelsResponse struct {
+	QuotaBaseURL       string                         `json:"-"`
 	Models             map[string]ModelInfo           `json:"models"`
 	DeprecatedModelIDs map[string]DeprecatedModelInfo `json:"deprecatedModelIds,omitempty"`
 }
@@ -671,7 +735,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 	}
 
 	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	availableURLs := c.observationBaseURLs()
 
 	fetchClient := c.fetchAvailableModelsHTTPClient()
 	var lastErr error
@@ -726,13 +790,20 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 		if err := json.Unmarshal(respBodyBytes, &modelsResp); err != nil {
 			return nil, nil, fmt.Errorf("响应解析失败: %w", err)
 		}
+		if resp.Request == nil {
+			return nil, nil, errors.New("model response request is missing")
+		}
+		modelsResp.QuotaBaseURL, err = allowedModelQuotaBase(resp.Request.URL)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		// 解析原始 JSON 为 map
 		var rawResp map[string]any
 		_ = json.Unmarshal(respBodyBytes, &rawResp)
 
 		// 标记成功的 URL，下次优先使用
-		DefaultURLAvailability.MarkSuccess(baseURL)
+		DefaultURLAvailability.MarkSuccess(modelsResp.QuotaBaseURL)
 		return &modelsResp, rawResp, nil
 	}
 
@@ -741,7 +812,9 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 
 func (c *Client) fetchAvailableModelsHTTPClient() *http.Client {
 	fetchClient := *c.httpClient
-	fetchClient.CheckRedirect = checkFetchAvailableModelsRedirect
+	if c.quotaBaseURL == "" {
+		fetchClient.CheckRedirect = checkFetchAvailableModelsRedirect
+	}
 	return &fetchClient
 }
 
@@ -752,27 +825,24 @@ func checkFetchAvailableModelsRedirect(req *http.Request, via []*http.Request) e
 	if req == nil || req.URL == nil {
 		return errors.New("redirect url is nil")
 	}
-	if !isAllowedFetchAvailableModelsRedirectHost(req.URL.Hostname()) {
-		return fmt.Errorf("redirect to unsupported host: %s", req.URL.Hostname())
-	}
-	return nil
+	_, err := allowedModelQuotaBase(req.URL)
+	return err
 }
 
-func isAllowedFetchAvailableModelsRedirectHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return false
+func allowedModelQuotaBase(target *url.URL) (string, error) {
+	if target == nil || target.User != nil {
+		return "", errors.New("invalid model quota destination")
 	}
 	for _, baseURL := range BaseURLs {
 		parsed, err := url.Parse(baseURL)
 		if err != nil {
 			continue
 		}
-		if strings.EqualFold(host, parsed.Hostname()) {
-			return true
+		if strings.EqualFold(target.Scheme, parsed.Scheme) && strings.EqualFold(target.Host, parsed.Host) {
+			return baseURL, nil
 		}
 	}
-	return false
+	return "", errors.New("unsupported model quota destination")
 }
 
 // ── Privacy API ──────────────────────────────────────────────────────

@@ -132,6 +132,7 @@ func TestAccountUsageServiceAntigravityForceBypassesCache(t *testing.T) {
 	require.EqualValues(t, 2, modelCalls.Load())
 
 	service.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
+		scope:     antigravityQuotaScope(account),
 		usageInfo: refreshed,
 		timestamp: time.Now().Add(-apiCacheTTL - time.Second),
 	})

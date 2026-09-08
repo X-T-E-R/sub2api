@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,28 @@ func TestNormalizeTier(t *testing.T) {
 func aqfBoolPtr(v bool) *bool        { return &v }
 func aqfIntPtr(v int) *int           { return &v }
 func aqfFloatPtr(v float64) *float64 { return &v }
+
+func TestBuildUsageInfo_PreservesModelFractionInJSON(t *testing.T) {
+	for _, fraction := range []float64{0, 1, 0.9968689, 0.99999, 0.256} {
+		fetcher := &AntigravityQuotaFetcher{}
+		info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+			Models: map[string]antigravity.ModelInfo{"claude-model": {
+				QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: &fraction},
+			}},
+		}, "", "", nil)
+		encoded, err := json.Marshal(info)
+		require.NoError(t, err)
+		var decoded UsageInfo
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		quota := decoded.AntigravityQuota["claude-model"]
+		require.NotNil(t, quota.RemainingFraction)
+		require.Equal(t, fraction, *quota.RemainingFraction)
+	}
+	var legacy AntigravityModelQuota
+	require.NoError(t, json.Unmarshal([]byte(`{"utilization":0}`), &legacy))
+	require.Nil(t, legacy.RemainingFraction)
+	require.Zero(t, legacy.Utilization)
+}
 
 func TestAntigravityQuotaFetcherCanFetchOnlyOAuthWithToken(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
@@ -223,11 +246,9 @@ func TestBuildUsageInfo_ModelWithNilQuotaInfo(t *testing.T) {
 	require.Empty(t, info.AntigravityQuotaDetails, "models with nil QuotaInfo should be skipped from details too")
 }
 
-func TestBuildUsageInfo_FiveHourPriorityOrder(t *testing.T) {
+func TestBuildUsageInfo_ModelPriorityDoesNotEstablishWindow(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
 
-	// priorityModels = ["claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"]
-	// When the first priority model exists, it should be used for FiveHour
 	modelsResp := &antigravity.FetchAvailableModelsResponse{
 		Models: map[string]antigravity.ModelInfo{
 			"gemini-2.5-pro": {
@@ -247,14 +268,11 @@ func TestBuildUsageInfo_FiveHourPriorityOrder(t *testing.T) {
 
 	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
 
-	require.NotNil(t, info.FiveHour, "FiveHour should be set when a priority model exists")
-	// claude-sonnet-4-20250514 is first in priority list, so it should be used
-	expectedUtilization := (1.0 - 0.80) * 100 // 20
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
-	require.NotNil(t, info.FiveHour.ResetsAt, "ResetsAt should be parsed from ResetTime")
+	require.Nil(t, info.FiveHour, "model quotas do not establish a five-hour window")
+	require.Equal(t, 20, info.AntigravityQuota["claude-sonnet-4-20250514"].Utilization)
 }
 
-func TestBuildUsageInfo_FiveHourFallbackToClaude4(t *testing.T) {
+func TestBuildUsageInfo_ClaudeModelDoesNotEstablishWindow(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
 
 	// Only claude-sonnet-4 exists (second in priority list), not claude-sonnet-4-20250514
@@ -276,12 +294,11 @@ func TestBuildUsageInfo_FiveHourFallbackToClaude4(t *testing.T) {
 
 	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
 
-	require.NotNil(t, info.FiveHour)
-	expectedUtilization := (1.0 - 0.60) * 100 // 40
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
+	require.Nil(t, info.FiveHour)
+	require.Equal(t, 40, info.AntigravityQuota["claude-sonnet-4"].Utilization)
 }
 
-func TestBuildUsageInfo_FiveHourFallbackToGemini(t *testing.T) {
+func TestBuildUsageInfo_GeminiModelDoesNotEstablishWindow(t *testing.T) {
 	fetcher := &AntigravityQuotaFetcher{}
 
 	// Only gemini-2.5-pro exists (third in priority list)
@@ -302,9 +319,8 @@ func TestBuildUsageInfo_FiveHourFallbackToGemini(t *testing.T) {
 
 	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
 
-	require.NotNil(t, info.FiveHour)
-	expectedUtilization := (1.0 - 0.30) * 100 // 70
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
+	require.Nil(t, info.FiveHour)
+	require.Equal(t, 70, info.AntigravityQuota["gemini-2.5-pro"].Utilization)
 }
 
 func TestBuildUsageInfo_FiveHourNoPriorityModel(t *testing.T) {
@@ -342,9 +358,7 @@ func TestBuildUsageInfo_FiveHourWithEmptyResetTime(t *testing.T) {
 
 	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
 
-	require.NotNil(t, info.FiveHour)
-	require.Nil(t, info.FiveHour.ResetsAt, "ResetsAt should be nil when ResetTime is empty")
-	require.Equal(t, 0, info.FiveHour.RemainingSeconds)
+	require.Nil(t, info.FiveHour)
 }
 
 func TestBuildUsageInfo_FullUtilization(t *testing.T) {
@@ -494,7 +508,9 @@ func TestBuildUsageInfo_AICreditsDoNotFabricateZero(t *testing.T) {
 	info := fetcher.buildUsageInfo(&antigravity.FetchAvailableModelsResponse{}, "g1-pro-tier", "PRO", loadResp)
 
 	require.True(t, info.AntigravityIneligible)
-	require.Len(t, info.AICredits, 1)
+	require.Len(t, info.AICredits, 2)
+	require.Equal(t, "OTHER_CREDIT", info.AICredits[1].CreditType)
+	require.Equal(t, "99", info.AICredits[1].AmountText)
 	require.Equal(t, "GOOGLE_ONE_AI", info.AICredits[0].CreditType)
 	require.Nil(t, info.AICredits[0].Amount)
 	require.Nil(t, info.AICredits[0].MinimumBalance)

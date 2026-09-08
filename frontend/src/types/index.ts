@@ -1294,6 +1294,7 @@ export interface UsageProgress {
 
 // Antigravity 单个模型的配额信息
 export interface AntigravityModelQuota {
+  remaining_fraction?: number | null // 原始剩余比例 0-1；旧缓存可能缺失
   utilization: number // 使用率 0-100
   reset_time?: string | null // 重置时间 ISO8601；缺失表示未知
 }
@@ -1354,6 +1355,16 @@ export interface GrokBillingSummary {
   failed_windows?: string[]
 }
 
+export type AntigravityWindowKey = 'claude_5h' | 'claude_weekly' | 'gemini_5h' | 'gemini_weekly'
+
+export interface AntigravityQuotaWindow {
+  source_bucket_id: string
+  remaining_fraction: number
+  reset_time?: string
+  observed_at: string
+  stale?: boolean
+}
+
 export interface AccountUsageInfo {
   source?: 'passive' | 'active'
   updated_at?: string | null
@@ -1371,6 +1382,9 @@ export interface AccountUsageInfo {
   antigravity_quota?: Record<string, AntigravityModelQuota> | null
   antigravity_quota_state?: AntigravityObservationState
   antigravity_quota_stale?: boolean
+  antigravity_windows?: Partial<Record<AntigravityWindowKey, AntigravityQuotaWindow>> | null
+  antigravity_window_state?: AntigravityObservationState
+  antigravity_window_checked_at?: string | null
   antigravity_quota_details?: Record<string, AntigravityModelDetail> | null
   model_forwarding_rules?: Record<string, string> | null
   grok_request_quota?: GrokQuotaWindow | null
@@ -1390,9 +1404,17 @@ export interface AccountUsageInfo {
   subscription_tier?: string
   subscription_tier_raw?: string
   antigravity_subscription_state?: AntigravityObservationState
+  // Tier restriction presence, not an account-wide access verdict (legacy cache).
   antigravity_ineligible?: boolean
+  antigravity_ineligible_tiers?: Array<{
+    tier_id?: string
+    reason_code?: string
+    reason_message?: string
+  }>
   ai_credits?: Array<{
     credit_type?: string
+    amount_text?: string
+    minimum_balance_text?: string
     amount?: number | null
     minimum_balance?: number | null
   }> | null

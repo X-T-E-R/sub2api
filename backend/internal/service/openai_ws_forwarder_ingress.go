@@ -309,15 +309,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				nil,
 			)
 		}
-		if turnMetadata := strings.TrimSpace(c.GetHeader(openAIWSTurnMetadataHeader)); turnMetadata != "" {
-			next, setErr := applyPayloadMutation(normalized, "client_metadata."+openAIWSTurnMetadataHeader, turnMetadata)
-			if setErr != nil {
-				return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", setErr)
-			}
-			normalized = next
-		}
 		accountIdentitySourceRaw := append([]byte(nil), normalized...)
-		accountScopedPayload, accountScoped, scopeErr := applyCodexAccountIdentityClientMetadataRaw(normalized, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+		accountScopedPayload, accountScoped, scopeErr := projectCodexWSRequestBodyRaw(c, account, normalized)
 		if scopeErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket identity metadata", scopeErr)
 		}

@@ -3213,6 +3213,12 @@
             <Select v-model="codexFingerprintMode" data-testid="create-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
           </div>
         </div>
+        <CodexDailySessionPoolFields
+          v-if="codexFingerprintMode === 'session'"
+          v-model="codexDailySessionPool"
+          id-prefix="create-codex-daily-pool"
+          @update:model-value="codexDailySessionPoolTouched = true"
+        />
       </div>
 
       <!-- OpenAI Compact 能力配置 -->
@@ -3806,6 +3812,8 @@ import Toggle from '@/components/common/Toggle.vue'
 import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
 import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
+import CodexDailySessionPoolFields from '@/components/account/CodexDailySessionPoolFields.vue'
+import { isCodexDailySessionPoolValid, readCodexDailySessionPool, writeCodexDailySessionPool } from '@/components/account/codexDailySessionPool'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import {
   applyAntigravityProjectID,
@@ -4229,6 +4237,16 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
+const codexDailySessionPool = ref(readCodexDailySessionPool())
+const codexDailySessionPoolTouched = ref(false)
+const validateCodexDailySessionPool = () => {
+  if (form.platform === 'openai' && accountCategory.value === 'oauth-based' &&
+    codexFingerprintMode.value === 'session' && !isCodexDailySessionPoolValid(codexDailySessionPool.value)) {
+    appStore.showError(t('admin.accounts.openai.dailySessionPool.invalidRange'))
+    return false
+  }
+  return true
+}
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -5140,6 +5158,8 @@ const resetForm = () => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  codexDailySessionPool.value = readCodexDailySessionPool()
+  codexDailySessionPoolTouched.value = false
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
@@ -5241,10 +5261,13 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   // 收敛是显式 opt-in：off 即默认值，不落键；device/session/full 必须显式写入，
   // 否则管理员的选择会被当成默认而丢失（#5610）。
-  if (codexFingerprintMode.value !== 'off') {
+  if (accountCategory.value === 'oauth-based' && codexFingerprintMode.value !== 'off') {
     extra.codex_fingerprint_mode = codexFingerprintMode.value
   } else {
     delete extra.codex_fingerprint_mode
+  }
+  if (accountCategory.value === 'oauth-based') {
+    writeCodexDailySessionPool(extra, codexDailySessionPool.value, codexFingerprintMode.value, codexDailySessionPoolTouched.value)
   }
   if (openAICompactMode.value !== 'auto') {
     extra.openai_compact_mode = openAICompactMode.value
@@ -5303,6 +5326,7 @@ const buildAnthropicExtra = (base?: Record<string, unknown>): Record<string, unk
 
 // Helper function to create account with mixed channel warning handling
 const doCreateAccount = async (payload: CreateAccountRequest) => {
+  if (!validateCodexDailySessionPool()) return
   const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
     await submitCreateAccount(payload)
   })
@@ -5393,6 +5417,7 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (!validateCodexDailySessionPool()) return
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
     if (!isGrokSSOInputMethod.value && !form.name.trim()) {
@@ -6185,6 +6210,7 @@ const isAgentIdentityImportContent = (content: string) => {
 }
 
 const handleOpenAIImportCodexSession = async (content: string) => {
+  if (!validateCodexDailySessionPool()) return
   const oauthClient = openaiOAuth
   const trimmed = content.trim()
   if (!trimmed) {
@@ -6267,6 +6293,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
 }
 
 const handleOpenAIImportCodexPAT = async (accessToken: string) => {
+  if (!validateCodexDailySessionPool()) return
   const oauthClient = openaiOAuth
   const trimmed = accessToken.trim()
   if (!trimmed) {

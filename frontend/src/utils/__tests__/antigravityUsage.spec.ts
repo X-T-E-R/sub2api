@@ -3,10 +3,55 @@ import { describe, expect, it } from 'vitest'
 import {
   buildAntigravityQuotaRows,
   getAntigravityTier,
+  getAntigravityIneligibleTiers,
   hasAntigravityIneligibleTier
 } from '../antigravityUsage'
 
 describe('antigravity usage projection', () => {
+  it('projects the same scoped evidence from current DTO and legacy cache', () => {
+    const expected = [{ tier_id: 'g1-ultra-tier', reason_code: 'INELIGIBLE_ACCOUNT', reason_message: 'Tier unavailable' }]
+    const usage = {
+      source: 'active' as const, five_hour: null, seven_day: null, seven_day_sonnet: null,
+      subscription_tier: 'FREE', antigravity_ineligible_tiers: expected
+    }
+    const extra = { load_code_assist: {
+      currentTier: { id: 'free-tier' },
+      ineligibleTiers: [null, {}, { tier: { id: ' g1-ultra-tier ' }, reasonCode: ' INELIGIBLE_ACCOUNT ', reasonMessage: ' Tier unavailable ' }]
+    } }
+    expect(getAntigravityIneligibleTiers(usage)).toEqual(expected)
+    expect(getAntigravityIneligibleTiers(null, extra)).toEqual(expected)
+    expect(getAntigravityTier(usage)).toBe('free-tier')
+    expect(getAntigravityTier(null, extra)).toBe('free-tier')
+    expect(getAntigravityTier(null, { load_code_assist: { paidTier: ' g1-pro-tier ', currentTier: 'free-tier' } })).toBe('g1-pro-tier')
+  })
+
+  it('filters malformed entries while retaining tier-only and reason-only evidence', () => {
+    const extra = { load_code_assist: { ineligibleTiers: [
+      null, 42, 'bad', [], {}, { reasonCode: 42, reasonMessage: ' ' },
+      { tier: 'g1-ultra-tier' }, { reasonCode: 'VALIDATION_REQUIRED' }
+    ] } }
+    expect(getAntigravityIneligibleTiers(null, extra)).toEqual([
+      { tier_id: 'g1-ultra-tier' }, { reason_code: 'VALIDATION_REQUIRED' }
+    ])
+    expect(getAntigravityTier(null, extra)).toBeNull()
+    expect(getAntigravityIneligibleTiers(null, { load_code_assist: { ineligibleTiers: {} } })).toEqual([])
+    expect(getAntigravityIneligibleTiers(null, { load_code_assist: null })).toEqual([])
+  })
+
+  it('uses a normalized current list over the legacy boolean and never resurrects old reasons', () => {
+    const usage = {
+      source: 'passive' as const, updated_at: '2026-09-06T00:00:00Z',
+      five_hour: null, seven_day: null, seven_day_sonnet: null,
+      antigravity_ineligible: true, antigravity_ineligible_tiers: []
+    }
+    const extra = { load_code_assist: { ineligibleTiers: [{ reasonCode: 'OLD' }] } }
+    expect(hasAntigravityIneligibleTier(usage, extra)).toBe(false)
+    expect(getAntigravityIneligibleTiers(usage, extra)).toEqual([])
+    const { antigravity_ineligible_tiers: _, ...legacySnapshot } = usage
+    expect(hasAntigravityIneligibleTier(legacySnapshot, extra)).toBe(true)
+    expect(getAntigravityIneligibleTiers(legacySnapshot, extra)).toEqual([])
+  })
+
   it('projects current model versions and preserves explicit zero utilization', () => {
     const rows = buildAntigravityQuotaRows({
       updated_at: null,
@@ -89,7 +134,7 @@ describe('antigravity usage projection', () => {
     expect(getAntigravityTier(usage, extra)).toBe('free-tier')
     expect(hasAntigravityIneligibleTier(usage, extra)).toBe(false)
     expect(getAntigravityTier(null, extra)).toBe('g1-ultra-tier')
-    expect(hasAntigravityIneligibleTier(null, extra)).toBe(true)
+    expect(hasAntigravityIneligibleTier(null, extra)).toBe(false)
   })
 
   it('keeps legacy tier and ineligible fallback for an empty passive cache miss', () => {

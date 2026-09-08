@@ -102,6 +102,8 @@ type windowStatsCache struct {
 type antigravityUsageCache struct {
 	usageInfo *UsageInfo
 	timestamp time.Time
+	scope     string
+	projectID string // Actual query project; discovery need not persist it.
 }
 
 const (
@@ -156,8 +158,9 @@ type UsageProgress struct {
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
 type AntigravityModelQuota struct {
-	Utilization int    `json:"utilization"`          // 使用率 0-100
-	ResetTime   string `json:"reset_time,omitempty"` // 重置时间 ISO8601；缺失表示未知
+	RemainingFraction *float64 `json:"remaining_fraction,omitempty"` // 原始剩余比例；旧缓存可能缺失
+	Utilization       int      `json:"utilization"`                  // 使用率 0-100
+	ResetTime         string   `json:"reset_time,omitempty"`         // 重置时间 ISO8601；缺失表示未知
 }
 
 type AntigravityObservationState string
@@ -176,9 +179,11 @@ type AntigravityModelDetail struct {
 
 // AICredit 表示 Antigravity 账号的 AI Credits 余额信息。
 type AICredit struct {
-	CreditType     string   `json:"credit_type,omitempty"`
-	Amount         *float64 `json:"amount,omitempty"`
-	MinimumBalance *float64 `json:"minimum_balance,omitempty"`
+	CreditType         string   `json:"credit_type,omitempty"`
+	AmountText         string   `json:"amount_text,omitempty"`
+	MinimumBalanceText string   `json:"minimum_balance_text,omitempty"`
+	Amount             *float64 `json:"amount,omitempty"`
+	MinimumBalance     *float64 `json:"minimum_balance,omitempty"`
 }
 
 // UsageInfo 账号使用量信息
@@ -203,7 +208,10 @@ type UsageInfo struct {
 	AntigravityQuotaState AntigravityObservationState `json:"antigravity_quota_state,omitempty"`
 	// AntigravityQuotaStale marks a passive cache snapshot older than its active
 	// refresh TTL. The observation timestamp remains in UpdatedAt.
-	AntigravityQuotaStale bool `json:"antigravity_quota_stale,omitempty"`
+	AntigravityQuotaStale      bool                               `json:"antigravity_quota_stale,omitempty"`
+	AntigravityWindows         map[string]*AntigravityQuotaWindow `json:"antigravity_windows,omitempty"`
+	AntigravityWindowState     AntigravityObservationState        `json:"antigravity_window_state,omitempty"`
+	AntigravityWindowCheckedAt *time.Time                         `json:"antigravity_window_checked_at,omitempty"`
 
 	// Grok / xAI 被动额度快照
 	GrokRequestQuota       *xai.QuotaWindow `json:"grok_request_quota,omitempty"`
@@ -229,7 +237,9 @@ type UsageInfo struct {
 	// AntigravitySubscriptionState is "available" only when loadCodeAssist
 	// returned a concrete tier in this observation.
 	AntigravitySubscriptionState AntigravityObservationState `json:"antigravity_subscription_state,omitempty"`
-	AntigravityIneligible        bool                        `json:"antigravity_ineligible,omitempty"`
+	// Legacy presence flag for tier restrictions; never an account access verdict.
+	AntigravityIneligible      bool                        `json:"antigravity_ineligible,omitempty"`
+	AntigravityIneligibleTiers []AntigravityIneligibleTier `json:"antigravity_ineligible_tiers,omitempty"`
 
 	// Antigravity 模型详细能力信息（与 antigravity_quota 同 key）
 	AntigravityQuotaDetails map[string]*AntigravityModelDetail `json:"antigravity_quota_details,omitempty"`
@@ -653,16 +663,10 @@ func (s *AccountUsageService) getPassiveUsageForAccount(ctx context.Context, acc
 func (s *AccountUsageService) getPassiveAntigravityUsage(account *Account) *UsageInfo {
 	if s != nil && s.cache != nil && account != nil {
 		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok && cache != nil && cache.usageInfo != nil {
-				usage := *cache.usageInfo
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache != nil && cache.usageInfo != nil && cache.scope == antigravityQuotaScope(account) {
+				usage := copyAntigravityUsage(cache.usageInfo, time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo))
 				usage.Source = "passive"
-				usage.AntigravityQuotaStale = time.Since(cache.timestamp) >= antigravityCacheTTL(cache.usageInfo)
-				if usage.FiveHour != nil {
-					fiveHour := *usage.FiveHour
-					usage.FiveHour = &fiveHour
-				}
-				recalcAntigravityRemainingSeconds(&usage)
-				return &usage
+				return usage
 			}
 		}
 	}
@@ -1074,6 +1078,7 @@ func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Accou
 
 // getAntigravityUsage 获取 Antigravity 账户额度
 func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	scope := antigravityQuotaScope(account)
 	if s.antigravityQuotaFetcher == nil || !s.antigravityQuotaFetcher.CanFetch(account) {
 		now := time.Now()
 		return &UsageInfo{
@@ -1087,55 +1092,83 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 	// 1. 检查缓存
 	if !force {
 		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache.scope == scope {
 				ttl := antigravityCacheTTL(cache.usageInfo)
 				if time.Since(cache.timestamp) < ttl {
-					usage := cache.usageInfo
-					recalcAntigravityRemainingSeconds(usage)
+					usage := copyAntigravityUsage(cache.usageInfo, false)
 					return usage, nil
 				}
 			}
 		}
 	}
 
+	// Acquire the snapshot before flight admission: token refresh can replace the
+	// account's plan/project, so the input snapshot is not a valid flight key.
+	// An independent context keeps caller cancellation from aborting shared work.
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer fetchCancel()
+	prepared, err := s.antigravityQuotaFetcher.prepareQuotaAccount(fetchCtx, account)
+	if err != nil {
+		degraded := buildAntigravityDegradedUsage(err)
+		enrichUsageWithAccountError(degraded, account)
+		s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
+			usageInfo: degraded, timestamp: time.Now(), scope: scope,
+		})
+		return degraded, nil
+	}
+	account = prepared
+	baseURL := resolveAntigravityForwardBaseURL(account)
+	scope = antigravityQuotaScopeForOrigin(account, baseURL)
+
 	// 2. singleflight 防止并发击穿
-	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
+	flightKey := "ag-usage:" + scope
 	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
 		// 再次检查缓存（等待期间可能已被填充）
 		if !force {
 			if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-				if cache, ok := cached.(*antigravityUsageCache); ok {
+				if cache, ok := cached.(*antigravityUsageCache); ok && cache.scope == scope {
 					ttl := antigravityCacheTTL(cache.usageInfo)
 					if time.Since(cache.timestamp) < ttl {
-						usage := cache.usageInfo
-						// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
-						recalcAntigravityRemainingSeconds(usage)
+						usage := copyAntigravityUsage(cache.usageInfo, false)
 						return usage, nil
 					}
 				}
 			}
 		}
 
-		// 使用独立 context，避免调用方 cancel 导致所有共享 flight 的请求失败
-		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer fetchCancel()
-
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
-		fetchResult, err := s.antigravityQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
+		fetchResult, err := s.antigravityQuotaFetcher.fetchQuotaWithOrigin(fetchCtx, account, proxyURL, baseURL)
+		var previous *UsageInfo
+		projectID := ""
+		if fetchResult != nil && fetchResult.antigravityScope != "" {
+			scope = fetchResult.antigravityScope
+			projectID = fetchResult.antigravityProjectID
+			if value, ok := s.cache.antigravityCache.Load(account.ID); ok {
+				if cache, ok := value.(*antigravityUsageCache); ok && cache.scope == scope && cache.projectID == projectID {
+					previous = cache.usageInfo
+				}
+			}
+		}
 		if err != nil {
 			degraded := buildAntigravityDegradedUsage(err)
+			retainAntigravityWindows(degraded, previous)
 			enrichUsageWithAccountError(degraded, account)
 			s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 				usageInfo: degraded,
 				timestamp: time.Now(),
+				scope:     scope,
+				projectID: projectID,
 			})
 			return degraded, nil
 		}
 
 		enrichUsageWithAccountError(fetchResult.UsageInfo, account)
+		retainAntigravityWindows(fetchResult.UsageInfo, previous)
 		s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 			usageInfo: fetchResult.UsageInfo,
 			timestamp: time.Now(),
+			scope:     scope,
+			projectID: projectID,
 		})
 		return fetchResult.UsageInfo, nil
 	})
