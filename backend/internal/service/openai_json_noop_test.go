@@ -96,6 +96,82 @@ func TestOpenAIJSONNoOpLargeAllocations(t *testing.T) {
 	}
 }
 
+func TestOpenAIJSONNoOpTopLevelKeys(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{}`, true},
+		{` {"input":"prompt","other":["messages","commands"]} `, true},
+		{`{"tools":[{"parameters":{"properties":{"prompt":{},"messages":{},"commands":{}}}}]}`, true},
+		{`{"nested":{"pr\u006fmpt":1},"input":"\"},\"messages\": ["}`, true},
+		{`{"nested":[{"messages":1},[{},[]]],"last":true}`, true},
+		{`{"nested":{},"prompt":null}`, false},
+		{`{"nested":[{},[]],"messages":[]}`, false},
+		{`{"number":42,"commands":false}`, false},
+		{`{"pr\u006fmpt":{},"prompt":null}`, false},
+		{`{"prompt":null,"pr\u006fmpt":{}}`, false},
+		{`{"\u006dessages":[],"messages":null}`, false},
+		{`{"comm\u0061nds":{}}`, false},
+		{`null`, false},
+		{`[]`, false},
+		{`{"nested":{}`, false},
+		{`{} {}`, false},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			require.Equal(t, tc.want, openAIJSONObjectExcludesTopLevelKeys([]byte(tc.body), "messages", "prompt", "commands"))
+		})
+	}
+}
+
+func TestOpenAIJSONNoOpCatalogAllocations(t *testing.T) {
+	for _, size := range []int{10, 30} {
+		t.Run(fmt.Sprintf("%dMiB", size), func(t *testing.T) {
+			body := openAINativeCatalogBody(size)
+			require.True(t, json.Valid(body))
+			require.False(t, openAIJSONObjectExcludesStrings(body, "messages", "prompt", "commands"))
+			require.True(t, openAIJSONObjectExcludesTopLevelKeys(body, "messages", "prompt", "commands"))
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			out, changed, err := normalizeOpenAIResponsesLegacyIngress(body)
+			runtime.ReadMemStats(&after)
+			require.NoError(t, err)
+			require.False(t, changed)
+			require.True(t, &body[0] == &out[0])
+			require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(1<<20))
+		})
+	}
+}
+
+func FuzzOpenAIJSONNoOpTopLevelGuard(f *testing.F) {
+	for _, seed := range []string{`{}`, `null`, `[]`, `{} {}`, `{"prompt":"hello"}`, `{"prompt":null,"pr\u006fmpt":{}}`, `{"\u006dessages":[]}`, `{"x":[{"commands":1}],"y":"prompt"}`, `{"x":"\\\"prompt"}`, `{"x":"\ud800"}`, `{"nested":[{},[]],"comm\u0061nds":null}`} {
+		f.Add([]byte(seed))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		got := openAIJSONObjectExcludesTopLevelKeys(body, "messages", "prompt", "commands")
+		if !json.Valid(body) || bytes.TrimSpace(body)[0] != '{' {
+			require.False(t, got)
+			return
+		}
+		// Decoder tokens preserve all duplicate top-level keys; decoding each
+		// value as RawMessage independently skips nested structure and values.
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		_, err := decoder.Token()
+		require.NoError(t, err)
+		want := true
+		for decoder.More() {
+			key, err := decoder.Token()
+			require.NoError(t, err)
+			if key == "messages" || key == "prompt" || key == "commands" {
+				want = false
+			}
+			var value json.RawMessage
+			require.NoError(t, decoder.Decode(&value))
+		}
+		require.Equal(t, want, got)
+	})
+}
+
 func FuzzOpenAIJSONNoOpGuard(f *testing.F) {
 	for _, seed := range []string{`{}`, `{"prompt":"hello"}`, `{"\u006dessages":[]}`, `{"input":[{"type":"compaction_\u0074rigger"}]}`, `{"x":"\\\"prompt"}`, `{"x":"\ud800"}`} {
 		f.Add([]byte(seed))

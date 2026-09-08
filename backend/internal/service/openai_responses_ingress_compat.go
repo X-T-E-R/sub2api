@@ -15,7 +15,7 @@ func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
-	if openAIJSONObjectExcludesStrings(body, "messages", "prompt", "commands") {
+	if openAIJSONObjectExcludesTopLevelKeys(body, "messages", "prompt", "commands") {
 		return body, false, nil
 	}
 
