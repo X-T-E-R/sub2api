@@ -28,6 +28,9 @@ func NormalizeCompactionTriggerInputOrder(body []byte) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
+	if openAIJSONObjectExcludesStrings(body, "compaction_trigger") {
+		return body, false, nil
+	}
 	var payload map[string]any
 	if err := decodeOpenAIJSONUseNumber(body, &payload); err != nil {
 		return body, false, err
