@@ -15,11 +15,13 @@ func BenchmarkPostReleaseNativeNoOp(b *testing.B) {
 		body = append(body, []byte(`"}]}],"tools":[{"type":"function","name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}`)...)
 		checks := []struct {
 			name string
-			run func([]byte) ([]byte, bool, error)
+			run  func([]byte) ([]byte, bool, error)
 		}{
 			{"legacy", normalizeOpenAIResponsesLegacyIngress},
 			{"compaction", NormalizeCompactionTriggerInputOrder},
-			{"tool_schema", func(v []byte) ([]byte, bool, error) { return sanitizeOpenAIResponsesToolSchemasForPlatform(v, "openai") }},
+			{"tool_schema", func(v []byte) ([]byte, bool, error) {
+				return sanitizeOpenAIResponsesToolSchemasForPlatform(v, "openai")
+			}},
 		}
 		for _, check := range checks {
 			b.Run(fmt.Sprintf("%dMiB/%s", size, check.name), func(b *testing.B) {
