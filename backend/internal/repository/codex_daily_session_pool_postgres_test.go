@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/migrations"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,6 +58,107 @@ func dailyPoolPostgres(t *testing.T) (*sql.DB, service.CodexDailySessionReposito
 	return db, NewCodexDailySessionRepository(db)
 }
 
+func requireUUIDV7(t *testing.T, value string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(value)
+	require.NoError(t, err)
+	require.Equal(t, uuid.Version(7), id.Version())
+	require.Equal(t, uuid.RFC4122, id.Variant())
+	return id
+}
+
+func TestCodexDailyPoolPostgresLegacyV4BindingIsPreserved(t *testing.T) {
+	db, repo := dailyPoolPostgres(t)
+	ctx := context.Background()
+	_, err := db.Exec(`INSERT INTO accounts VALUES
+ (1,'openai','oauth','{"chatgpt_account_id":"legacy","chatgpt_user_id":"user"}','{"codex_fingerprint_mode":"session","codex_daily_session_pool_enabled":true,"codex_daily_session_pool_min":1,"codex_daily_session_pool_max":1}',NULL,NULL)`)
+	require.NoError(t, err)
+	account := &service.Account{
+		ID:          1,
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "legacy", "chatgpt_user_id": "user"},
+	}
+	scope := service.CodexDailySessionScope(account)
+	binding := "api-key-legacy:root-legacy"
+	legacy := uuid.New().String()
+	require.Equal(t, uuid.Version(4), uuid.MustParse(legacy).Version())
+	_, err = db.Exec(`INSERT INTO codex_daily_session_bindings(account_scope,binding_key,session_id) VALUES($1,$2,$3)`, scope, binding, legacy)
+	require.NoError(t, err)
+
+	got, err := repo.Allocate(ctx, scope, binding, "not-a-date", account.ID, 1, 1)
+	require.NoError(t, err)
+	require.Equal(t, legacy, got, "restoring a historical binding must not project it into UUIDv7")
+
+	var persisted string
+	require.NoError(t, db.QueryRow(`SELECT session_id FROM codex_daily_session_bindings WHERE account_scope=$1 AND binding_key=$2`, scope, binding).Scan(&persisted))
+	require.Equal(t, legacy, persisted)
+	var days int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM codex_daily_session_days`).Scan(&days))
+	require.Zero(t, days, "an existing binding must not create a new daily allocation")
+}
+
+func TestCodexDailyPoolPostgresV7SlotsPreserveBudgetAndIsolateBindings(t *testing.T) {
+	db, repo := dailyPoolPostgres(t)
+	ctx := context.Background()
+	_, err := db.Exec(`INSERT INTO accounts VALUES
+ (1,'openai','oauth','{"chatgpt_account_id":"A","chatgpt_user_id":"user"}','{"codex_fingerprint_mode":"session","codex_daily_session_pool_enabled":true,"codex_daily_session_pool_min":2,"codex_daily_session_pool_max":2}',NULL,NULL),
+ (2,'openai','oauth','{"chatgpt_account_id":"B","chatgpt_user_id":"user"}','{"codex_fingerprint_mode":"session","codex_daily_session_pool_enabled":true,"codex_daily_session_pool_min":2,"codex_daily_session_pool_max":2}',NULL,NULL)`)
+	require.NoError(t, err)
+	accountA := &service.Account{ID: 1, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "A", "chatgpt_user_id": "user"}}
+	accountB := &service.Account{ID: 2, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "B", "chatgpt_user_id": "user"}}
+	scopeA := service.CodexDailySessionScope(accountA)
+	scopeB := service.CodexDailySessionScope(accountB)
+	day := "2026-09-10"
+
+	first, err := repo.Allocate(ctx, scopeA, "api-key-a:root-a", day, accountA.ID, 2, 2)
+	require.NoError(t, err)
+	second, err := repo.Allocate(ctx, scopeA, "api-key-b:root-b", day, accountA.ID, 2, 2)
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "distinct API-key bindings fill distinct slots before the budget is full")
+	requireUUIDV7(t, first)
+	requireUUIDV7(t, second)
+
+	var beforeBudget int
+	var beforeSessions pq.StringArray
+	require.NoError(t, db.QueryRow(`SELECT budget,sessions FROM codex_daily_session_days WHERE account_scope=$1 AND allocation_day=$2`, scopeA, day).Scan(&beforeBudget, &beforeSessions))
+	require.Equal(t, 2, beforeBudget)
+	require.Len(t, beforeSessions, 2)
+
+	reused, err := repo.Allocate(ctx, scopeA, "api-key-c:root-c", day, accountA.ID, 2, 2)
+	require.NoError(t, err)
+	require.Contains(t, []string(beforeSessions), reused, "a full day's budget must reuse an existing slot")
+	var afterBudget int
+	var afterSessions pq.StringArray
+	require.NoError(t, db.QueryRow(`SELECT budget,sessions FROM codex_daily_session_days WHERE account_scope=$1 AND allocation_day=$2`, scopeA, day).Scan(&afterBudget, &afterSessions))
+	require.Equal(t, beforeBudget, afterBudget)
+	require.Equal(t, []string(beforeSessions), []string(afterSessions), "same-day allocation must not reset or replace the persisted slot list")
+
+	var apiKeyBindings int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM codex_daily_session_bindings WHERE account_scope=$1`, scopeA).Scan(&apiKeyBindings))
+	require.Equal(t, 3, apiKeyBindings, "different API keys/roots need independent durable bindings")
+	gotFirst, err := repo.FindBinding(ctx, scopeA, "api-key-a:root-a")
+	require.NoError(t, err)
+	require.Equal(t, first, gotFirst)
+
+	otherAccount, err := repo.Allocate(ctx, scopeB, "api-key-a:root-a", day, accountB.ID, 2, 2)
+	require.NoError(t, err)
+	requireUUIDV7(t, otherAccount)
+	require.NotContains(t, []string(afterSessions), otherAccount, "account scopes must not share daily-session slots")
+	var otherAccountSlots int
+	require.NoError(t, db.QueryRow(`SELECT cardinality(sessions) FROM codex_daily_session_days WHERE account_scope=$1 AND allocation_day=$2`, scopeB, day).Scan(&otherAccountSlots))
+	require.Equal(t, 1, otherAccountSlots)
+
+	nextDay := "2026-09-11"
+	next, err := repo.Allocate(ctx, scopeA, "api-key-a:root-next-day", nextDay, accountA.ID, 2, 2)
+	require.NoError(t, err)
+	requireUUIDV7(t, next)
+	require.NotContains(t, []string(afterSessions), next, "a new day must start with a new v7 slot")
+	var nextDaySlots int
+	require.NoError(t, db.QueryRow(`SELECT cardinality(sessions) FROM codex_daily_session_days WHERE account_scope=$1 AND allocation_day=$2`, scopeA, nextDay).Scan(&nextDaySlots))
+	require.Equal(t, 1, nextDaySlots)
+}
+
 func TestCodexDailyPoolPostgresConcurrencyDurability(t *testing.T) {
 	db, repo := dailyPoolPostgres(t)
 	ctx := context.Background()
@@ -97,6 +199,7 @@ func TestCodexDailyPoolPostgresConcurrencyDurability(t *testing.T) {
 	values = append(values, run(roots, "2026-09-05", 5, 5)...)
 	distinct := make(map[string]bool)
 	for _, value := range values {
+		requireUUIDV7(t, value)
 		distinct[value] = true
 	}
 	require.Len(t, distinct, 5)
@@ -116,6 +219,7 @@ func TestCodexDailyPoolPostgresConcurrencyDurability(t *testing.T) {
 	tomorrow := run([]string{"tomorrow-1", "tomorrow-2", "tomorrow-3"}, "2026-09-06", 2, 2)
 	tomorrowDistinct := make(map[string]bool)
 	for _, value := range tomorrow {
+		requireUUIDV7(t, value)
 		require.False(t, distinct[value])
 		tomorrowDistinct[value] = true
 	}

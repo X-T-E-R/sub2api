@@ -79,10 +79,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		// anchored to the client's stable conversation prefix.
 		grokCacheIdentity = resolveGrokCacheIdentity(c, body, "", upstreamModel)
 	}
-	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
-	// 国产模型默认 effort 补充：需要 mappedModel 判定，推迟到 billingModel 算出之后。
-	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, billingModel)
-
 	// 3. Rewrite model in body (no protocol conversion)
 	upstreamBody := body
 	if upstreamModel != originalModel {
@@ -103,6 +99,8 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		return nil, policyErr
 	}
 	upstreamBody = updatedBody
+	upstreamBody = s.applyModelReasoningFloor(account, upstreamModel, upstreamBody, "reasoning_effort")
+	reasoningEffort := ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(upstreamBody, upstreamModel, billingModel, originalModel), body, billingModel)
 	// 计费兜底 tier = 最终出站 body（policy filter/force 后）里的 tier；
 	// 最终值由 resolvedOpenAIUpstreamServiceTier 决定（上游回显优先）。
 	serviceTier := extractOpenAIServiceTierFromBody(upstreamBody)

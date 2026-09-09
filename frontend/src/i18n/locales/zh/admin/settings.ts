@@ -1132,6 +1132,40 @@ export default {
           force_priority: '强制 priority'
         }
       },
+      modelReasoningFloor: {
+        title: 'OpenAI 模型最低推理强度',
+        description: '按账号与分组模型映射之后最终发给上游的精确 OpenAI 模型 ID 提高最低推理强度；分组推理策略先执行，可能增加延迟与上游费用。',
+        enabled: '启用模型最低推理强度',
+        enabledHint: '关闭后保留现有规则，但不再应用。',
+        priorityHint: '规则匹配账号与分组模型映射之后最终发给上游的模型 ID。先执行分组推理映射与分组推理上限，再执行本面板最低强度：缺省、none 或更低强度会自动提升；更高强度和未知未来档位原样保留。',
+        empty: '尚未配置模型规则，请添加精确模型 ID。',
+        ruleHeader: '规则 #{index}',
+        model: '最终上游模型 ID（精确匹配）',
+        modelPlaceholder: '例如 gpt-5.6-sol',
+        minEffort: '最低推理强度',
+        addRule: '添加模型规则',
+        removeRule: '删除规则',
+        rulesHint: '最多 {max} 条规则。最终上游模型 ID 不得含空白、* 或 ?，且不可重复。',
+        save: '保存模型规则',
+        saved: '模型最低推理强度已保存',
+        loadFailed: '加载模型最低推理强度失败',
+        saveFailed: '保存模型最低推理强度失败',
+        validationFailed: '保存前请修正无效或重复的模型 ID。',
+        validation: {
+          required: '请输入精确模型 ID。',
+          invalid: '请输入不含空白、* 或 ? 的精确模型 ID。',
+          tooLong: '模型 ID 最多 128 个字符。',
+          duplicate: '同一个模型 ID 只能配置一次。'
+        },
+        efforts: {
+          minimal: 'Minimal（最低）',
+          low: 'Low（低）',
+          medium: 'Medium（中）',
+          high: 'High（高）',
+          xhigh: 'XHigh（更高）',
+          max: 'Max（最高）'
+        }
+      },
       wechatConnect: {
         title: '微信登录',
         description: '用于微信开放平台或公众号/小程序的第三方登录配置。',

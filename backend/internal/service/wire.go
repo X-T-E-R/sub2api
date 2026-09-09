@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"time"
 
@@ -760,8 +761,14 @@ func ProvideOpsIngressRejectAggregator(opsRepo OpsRepository, opsService *OpsSer
 }
 
 // ProvideSettingService wires SettingService with group reader and proxy repo.
-func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) *SettingService {
+func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) (*SettingService, error) {
 	svc := NewSettingService(settingRepo, cfg)
+	if err := svc.loadCodexIdentityV7Cutover(context.Background()); err != nil {
+		return nil, fmt.Errorf("load Codex identity cutover: %w", err)
+	}
+	if err := svc.LoadModelReasoningFloorSettings(context.Background()); err != nil {
+		return nil, fmt.Errorf("load model reasoning floors: %w", err)
+	}
 	svc.SetDefaultSubscriptionGroupReader(groupRepo)
 	svc.SetProxyRepository(proxyRepo)
 	if err := svc.LoadForwardedClientIPSettings(context.Background()); err != nil {
@@ -782,7 +789,7 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
 	})
-	return svc
+	return svc, nil
 }
 
 // ProvideBillingCacheService wires BillingCacheService with its RPM dependencies.

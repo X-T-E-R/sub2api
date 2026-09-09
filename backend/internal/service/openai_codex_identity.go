@@ -33,12 +33,15 @@ func NormalizeCodexClientVersion(version string) string {
 }
 
 // buildCodexCLIUserAgent 按版本号拼出规范 Codex TUI User-Agent。
-// UA 形态只在 codexCLIUserAgentSuffix 一处定义，避免多处拼装漂移。
+// 固定兜底 UA 同时包含首段与官方尾部版本，统一通过版本重建器更新，避免两处漂移。
 func buildCodexCLIUserAgent(version string) string {
 	if version = NormalizeCodexClientVersion(version); version == "" {
 		return codexCLIUserAgent
 	}
-	return openai.CodexDefaultOriginator + "/" + version + codexCLIUserAgentSuffix
+	if rebuilt := openai.SetCodexUserAgentVersion(codexCLIUserAgent, version); rebuilt != "" {
+		return rebuilt
+	}
+	return codexCLIUserAgent
 }
 
 // codexIdentityEnforcement 控制 enforceCodexIdentityHeaders 是否强制统一出站身份，

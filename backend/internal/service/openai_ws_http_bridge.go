@@ -418,6 +418,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		actualModel = canonicalOpenAIAccountSchedulingModel(account, originalModel)
 	}
 	SetOpsUpstreamModel(c, actualModel)
+	body = s.applyModelReasoningFloor(account, actualModel, body, "reasoning.effort")
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

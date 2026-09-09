@@ -4916,6 +4916,8 @@
             </div>
           </div>
 
+          <ModelReasoningFloorSettings />
+
           <!-- Upstream Billing Probe Settings -->
           <div class="card" data-testid="upstream-billing-probe-settings">
             <div
@@ -8964,6 +8966,7 @@ import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
+import ModelReasoningFloorSettings from "@/views/admin/settings/ModelReasoningFloorSettings.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {
   useStepUp,

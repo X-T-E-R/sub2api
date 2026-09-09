@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -333,10 +335,10 @@ func TestGetOpenAICodexCanonicalUserAgentBuildsFromVersion(t *testing.T) {
 		SettingKeyOpenAICodexClientVersionSynced: "0.200.1",
 	}}, nil)
 
-	require.Equal(t,
-		"codex-tui/0.200.1"+codexCLIUserAgentSuffix,
-		svc.GetOpenAICodexCanonicalUserAgent(context.Background()),
-	)
+	ua := svc.GetOpenAICodexCanonicalUserAgent(context.Background())
+	require.True(t, strings.HasPrefix(ua, openai.CodexDefaultOriginator+"/0.200.1 "))
+	require.Equal(t, "0.200.1", openai.CodexUserAgentVersion(ua))
+	require.True(t, strings.HasSuffix(ua, " ("+openai.CodexDefaultOriginator+"; 0.200.1)"))
 }
 
 // 回归：面板完整 UA 是唯一能改 OS / 架构 / 终端指纹的地方，必须保留；但它填写于某个

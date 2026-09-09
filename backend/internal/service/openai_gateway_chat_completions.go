@@ -308,6 +308,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		return nil, policyErr
 	}
 	responsesBody = updatedBody
+	responsesBody = s.applyModelReasoningFloor(account, upstreamModel, responsesBody, "reasoning.effort")
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
@@ -392,10 +393,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		if tier := resolvedOpenAIUpstreamServiceTier(c, extractOpenAIServiceTierFromBody(responsesBody)); tier != nil {
 			result.ServiceTier = tier
 		}
-		if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
-			re := responsesReq.Reasoning.Effort
-			result.ReasoningEffort = &re
-		}
+		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(responsesBody, upstreamModel)
 	}
 
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts).

@@ -239,7 +239,7 @@ func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {
 	svc := openAIClientToolsTestService(upstream)
 	account := &Account{ID: 5659, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key"}}
 
-	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, nil, false, time.Now())
+	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, false, time.Now())
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -265,7 +265,7 @@ func TestOpenAIPassthroughAPIKeyPreservesCustomToolOutputContentParts(t *testing
 	svc := openAIClientToolsTestService(upstream)
 	account := &Account{ID: 6240, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key"}}
 
-	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, nil, false, time.Now())
+	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, false, time.Now())
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -295,7 +295,7 @@ func TestOpenAIPassthroughAPIKeyRestoresClientToolsStreaming(t *testing.T) {
 	svc := openAIClientToolsTestService(upstream)
 	account := &Account{ID: 5660, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key"}}
 
-	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, nil, true, time.Now())
+	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, true, time.Now())
 
 	require.NoError(t, err)
 	require.NotNil(t, result)

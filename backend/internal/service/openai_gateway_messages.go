@@ -293,6 +293,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, policyErr
 	}
 	responsesBody = updatedBody
+	responsesBody = s.applyModelReasoningFloor(account, upstreamModel, responsesBody, "reasoning.effort")
 	grokCacheIdentity := ""
 	if account.Platform == PlatformGrok {
 		var patchErr error
@@ -510,10 +511,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if tier := resolvedOpenAIUpstreamServiceTier(c, extractOpenAIServiceTierFromBody(responsesBody)); tier != nil {
 			result.ServiceTier = tier
 		}
-		if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
-			re := responsesReq.Reasoning.Effort
-			result.ReasoningEffort = &re
-		}
+		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(responsesBody, upstreamModel)
 	}
 
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts).

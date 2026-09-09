@@ -134,7 +134,11 @@ func (r *codexDailySessionRepository) Allocate(ctx context.Context, scope, bindi
 		return "", err
 	}
 	if len(sessions) < budget {
-		session = uuid.NewString()
+		id, idErr := uuid.NewV7()
+		if idErr != nil {
+			return "", idErr
+		}
+		session = id.String()
 		sessions = append(sessions, session)
 		if _, err = tx.ExecContext(ctx, `UPDATE codex_daily_session_days SET sessions=$3 WHERE account_scope=$1 AND allocation_day=$2`, scope, day, pq.Array(sessions)); err != nil {
 			return "", err

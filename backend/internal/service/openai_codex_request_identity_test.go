@@ -70,7 +70,7 @@ func TestCodexIdentityProjectionGraphAndLifetimes(t *testing.T) {
 				m := projectedMetadata(t, body)
 				require.Equal(t, m["thread_id"], h.Get("thread-id"))
 				require.Equal(t, m["thread_id"], h.Get("x-client-request-id"))
-				require.Equal(t, m["session_id"], h.Get("session_id"))
+				require.Empty(t, h.Get("session_id"), "canonical body metadata replaces the direct session_id alias")
 				return m, h
 			}
 			rootBody := identityFixture(t, "tree-a", "tree-a", "turn-root", 0, nil)
@@ -127,12 +127,24 @@ func TestCodexIdentityProjectionGraphAndLifetimes(t *testing.T) {
 func TestCodexIdentityProjectionCanonicalCarriersAndBuilders(t *testing.T) {
 	account := newTestOAuthAccount(10, map[string]any{codexFingerprintModeExtraKey: "session"})
 	account.Credentials = map[string]any{"chatgpt_account_id": "credential-a"}
-	body := identityFixture(t, "tree-a", "child-a", "turn-a", 2, nil)
+	body := identityFixture(t, "tree-a", "child-a", "turn-a", 2, map[string]any{
+		"parent_thread_id": "root-parent",
+	})
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	h := http.Header{}
 	h.Set("thread-id", "stale-flat-thread")
 	h.Set("session-id", "stale-flat-session")
+	h.Set("x-codex-parent-thread-id", "stale-parent")
+	for _, name := range []string{
+		"installation_id", "session_id", "thread_id", "turn_id", "turn-id",
+		"parent_thread_id", "parent-thread-id", "root_thread_id", "root-thread-id",
+		"forked_from_thread_id", "forked-from-thread-id", "parent_turn_id", "parent-turn-id",
+		"root_turn_id", "root-turn-id", "window_id", "context_window_id", "context-window-id",
+		"conversation_id",
+	} {
+		h.Set(name, "stale-"+name)
+	}
 	h.Set(openAIWSTurnMetadataHeader, `{"thread_id":"stale-embedded-thread","turn_id":"stale-turn","turn_started_at_unix_ms":1}`)
 	h.Set(openAIWSTurnStateHeader, "opaque-state")
 	c := identityContext(t, h)
@@ -154,15 +166,29 @@ func TestCodexIdentityProjectionCanonicalCarriersAndBuilders(t *testing.T) {
 	for _, headers := range []http.Header{normal.Header, passthrough.Header, ws} {
 		require.Equal(t, want["thread_id"], headers.Get("thread-id"))
 		require.Equal(t, want["thread_id"], headers.Get("x-client-request-id"))
+		require.Equal(t, want["installation_id"], headers.Get("x-codex-installation-id"))
+		require.Equal(t, want["window_id"], headers.Get("x-codex-window-id"))
+		require.Equal(t, want["parent_thread_id"], headers.Get("x-codex-parent-thread-id"))
 		require.Equal(t, want["turn_id"], codexMetadataObject(headers.Get(openAIWSTurnMetadataHeader))["turn_id"])
 		require.Equal(t, want["turn_started_at_unix_ms"], codexMetadataObject(headers.Get(openAIWSTurnMetadataHeader))["turn_started_at_unix_ms"])
 		require.Equal(t, "opaque-state", headers.Get(openAIWSTurnStateHeader))
+		for _, name := range []string{
+			"installation_id", "session_id", "thread_id", "turn_id", "turn-id",
+			"parent_thread_id", "parent-thread-id", "root_thread_id", "root-thread-id",
+			"forked_from_thread_id", "forked-from-thread-id", "parent_turn_id", "parent-turn-id",
+			"root_turn_id", "root-turn-id", "window_id", "context_window_id", "context-window-id",
+			"conversation_id",
+		} {
+			require.Empty(t, headers.Get(name), name+" must not be re-added beside canonical metadata")
+		}
 	}
 	require.Equal(t, normal.Header.Get("conversation_id"), passthrough.Header.Get("conversation_id"), "raw/decoded routing must not double-scope cache keys")
 	require.Empty(t, ws.Get("conversation_id"), "WS does not invent an absent conversation header")
 	require.Equal(t, h, c.Request.Header, "never mutate inbound headers")
 	clean := identityContext(t, nil)
-	cleanBody := identityFixture(t, "tree-a", "child-a", "turn-a", 2, nil)
+	cleanBody := identityFixture(t, "tree-a", "child-a", "turn-a", 2, map[string]any{
+		"parent_thread_id": "root-parent",
+	})
 	projectCodexRequestBody(clean, account, cleanBody)
 	require.Equal(t, want, projectedMetadata(t, cleanBody), "stale compatibility projections cannot change canonical identity")
 }
@@ -341,6 +367,15 @@ func TestCodexIdentityProjectionCanonicalAbsenceAndCacheGrouping(t *testing.T) {
 	}
 	require.Empty(t, h.Get("x-codex-parent-thread-id"))
 	require.Empty(t, h.Get("parent-turn-id"))
+	for _, name := range []string{
+		"installation_id", "session_id", "thread_id", "turn_id", "turn-id",
+		"parent_thread_id", "parent-thread-id", "root_thread_id", "root-thread-id",
+		"forked_from_thread_id", "forked-from-thread-id", "parent_turn_id", "parent-turn-id",
+		"root_turn_id", "root-turn-id", "window_id", "context_window_id", "context-window-id",
+		"conversation_id",
+	} {
+		require.Empty(t, h.Get(name), name+" must be removed for canonical body snapshots")
+	}
 	defaultKey := identityFixture(t, "tree-a", "tree-a", "turn-a", 0, nil)
 	explicitKey := identityFixture(t, "tree-b", "tree-b", "turn-b", 0, nil)
 	explicitKey["prompt_cache_key"] = "tree-a"
@@ -355,6 +390,34 @@ func TestCodexIdentityProjectionCanonicalAbsenceAndCacheGrouping(t *testing.T) {
 		require.NotContains(t, projectedMetadata(t, memory), key)
 	}
 	require.NotEqual(t, "root", codexIdentityMetadata(memory)["thread_id"], "flat compatibility identity remains scoped")
+}
+
+func TestCodexIdentityProjectionLegacyRetainsCompatibilityHeaders(t *testing.T) {
+	account := newTestOAuthAccount(10, map[string]any{codexFingerprintModeExtraKey: "session"})
+	account.Credentials = map[string]any{"chatgpt_account_id": "credential-a"}
+	legacyHeaders := []string{
+		"installation_id", "session_id", "thread_id", "turn_id", "turn-id",
+		"parent_thread_id", "parent-thread-id", "root_thread_id", "root-thread-id",
+		"forked_from_thread_id", "forked-from-thread-id", "parent_turn_id", "parent-turn-id",
+		"root_turn_id", "root-turn-id", "window_id", "context_window_id", "context-window-id",
+	}
+	h := http.Header{}
+	legacyMetadata := map[string]any{}
+	for _, name := range legacyHeaders {
+		value := "legacy-" + name
+		h.Set(name, value)
+		legacyMetadata[name] = value
+	}
+	h.Set("conversation_id", "legacy-conversation")
+	c := identityContext(t, h)
+	body := map[string]any{"client_metadata": legacyMetadata}
+	projectCodexRequestBody(c, account, body)
+	applyCodexRequestHeaders(c, account, h)
+
+	for _, name := range legacyHeaders {
+		require.NotEmpty(t, h.Get(name), name+" remains a compatibility carrier without native metadata")
+	}
+	require.Equal(t, "legacy-conversation", h.Get("conversation_id"))
 }
 
 func TestCodexIdentityProjectionFallbackNoSeedAndCompactBuilders(t *testing.T) {

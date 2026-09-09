@@ -132,11 +132,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	canonicalImageIntentBody []byte,
 	reqModel string,
 	attemptImageIntentInvalidated bool,
-	reasoningEffort *string,
 	reqStream bool,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	requestedModel := reqModel
+	effortSourceBody := body
 	upstreamPassthroughModel := ""
 	if isOpenAIResponsesCompactPath(c) {
 		compactMappedModel := s.resolveOpenAICompactFallbackModel(account, reqModel)
@@ -339,12 +339,15 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	responseID := ""
 	imageCount := 0
 	var imageOutputSizes []string
+	var reasoningEffort *string
 	for {
 		actualModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		if actualModel == "" {
 			actualModel = reqModel
 		}
 		SetOpsUpstreamModel(c, actualModel)
+		body = s.applyModelReasoningFloor(account, actualModel, body, "reasoning.effort")
+		reasoningEffort = ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(body, actualModel, reqModel), effortSourceBody, actualModel)
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
 		releaseUpstreamCtx()

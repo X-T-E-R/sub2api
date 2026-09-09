@@ -395,6 +395,21 @@ func (p *codexRequestIdentity) applyHeaders(headers http.Header) {
 			headers.Set(openAIWSTurnMetadataHeader, value)
 		}
 	}
+	// Native Codex carries the complete identity snapshot in the body blob. Keep
+	// only the small direct-header set that the native transport still emits;
+	// forwarding the remaining compatibility aliases would expose a second,
+	// potentially stale carrier alongside the canonical body snapshot.
+	if p.canonical {
+		for _, f := range codexRequestIdentityFields {
+			switch f.name {
+			case "session-id", "thread-id", "x-client-request-id", "x-codex-installation-id", "x-codex-window-id", "x-codex-parent-thread-id":
+				continue
+			default:
+				deleteHeaderAllForms(headers, f.name)
+			}
+		}
+		deleteHeaderAllForms(headers, "conversation_id")
+	}
 }
 
 // Builders may receive a projected body; routing isolation must start from

@@ -2032,7 +2032,7 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPTransformedHeaderBodyParityAnd
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
-	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))
+	require.Empty(t, upstream.lastReq.Header.Get("session_id"), "canonical body metadata replaces the direct session_id alias")
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("thread-id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("x-client-request-id"))
 	require.Equal(t, wantWindow, upstream.lastReq.Header.Get("x-codex-window-id"))
@@ -2097,7 +2097,7 @@ func TestOpenAIGatewayService_CodexFingerprintHTTPRawPassthroughHeaderBodyParity
 
 	require.Equal(t, wantInstall, upstream.lastReq.Header.Get("x-codex-installation-id"))
 	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session-id"))
-	require.Equal(t, wantSession, upstream.lastReq.Header.Get("session_id"))
+	require.Empty(t, upstream.lastReq.Header.Get("session_id"), "canonical body metadata replaces the direct session_id alias")
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("thread-id"))
 	require.Equal(t, wantThread, upstream.lastReq.Header.Get("x-client-request-id"))
 	require.Equal(t, wantWindow, upstream.lastReq.Header.Get("x-codex-window-id"))

@@ -67,9 +67,6 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 
 	billingModel := resolveOpenAIForwardModel(account, originalModel, "")
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
-	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
-	// 国产模型默认 effort 补充：需要 mappedModel 判定，推迟到 billingModel 算出之后。
-	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, billingModel)
 	chatReq.Model = upstreamModel
 	if clientStream {
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
@@ -90,6 +87,8 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	// 计费兜底 tier = 最终出站 body（policy filter/force 后）里的 tier；最终值由
 	// resolvedOpenAIUpstreamServiceTier 决定（上游回显优先）。filter 删掉字段后
 	// 这里取到 nil，不再按原请求 Fast 计费。
+	chatBody = s.applyModelReasoningFloor(account, upstreamModel, chatBody, "reasoning_effort")
+	reasoningEffort := ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(chatBody, upstreamModel, billingModel, originalModel), body, billingModel)
 	serviceTier := extractOpenAIServiceTierFromBody(chatBody)
 
 	logger.L().Debug("openai responses: forwarding via raw chat completions",

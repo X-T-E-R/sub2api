@@ -2,6 +2,7 @@ package service
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -317,7 +318,10 @@ func TestNormalizeCodexClientVersion(t *testing.T) {
 }
 
 func TestBuildCodexCLIUserAgent(t *testing.T) {
-	require.Equal(t, openai.CodexDefaultOriginator+"/0.200.1"+codexCLIUserAgentSuffix, buildCodexCLIUserAgent("0.200.1"))
+	ua := buildCodexCLIUserAgent("0.200.1")
+	require.Equal(t, "0.200.1", openai.CodexUserAgentVersion(ua))
+	require.True(t, strings.HasPrefix(ua, openai.CodexDefaultOriginator+"/0.200.1 "))
+	require.True(t, strings.HasSuffix(ua, " ("+openai.CodexDefaultOriginator+"; 0.200.1)"))
 	// 非法版本号必须回退到内置 UA，不能拼出畸形身份。
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent("bogus version"))
 	require.Equal(t, codexCLIUserAgent, buildCodexCLIUserAgent(""))
@@ -345,4 +349,5 @@ func TestCodexCanonicalUserAgentFallsBackWithoutResolver(t *testing.T) {
 
 	require.Equal(t, codexCLIUserAgent, CodexCanonicalUserAgent())
 	require.Equal(t, codexCLIVersion, CodexCanonicalClientVersion())
+	require.True(t, strings.HasSuffix(codexCLIUserAgent, " ("+openai.CodexDefaultOriginator+"; "+codexCLIVersion+")"))
 }

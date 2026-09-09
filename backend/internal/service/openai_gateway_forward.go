@@ -20,6 +20,11 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (forwardResult *OpenAIForwardResult, forwardErr error) {
+	if RequestedReasoningEffortFromContext(ctx) == nil {
+		if requested := CanonicalRequestedReasoningEffort(body, gjson.GetBytes(body, "model").String()); requested != nil {
+			ctx = WithRequestedReasoningEffort(ctx, *requested)
+		}
+	}
 	beginUpstreamResponseModelObservation(c)
 	if c != nil {
 		c.Set(codexTelemetryAttemptKey, (*codexTelemetryAttempt)(nil))
@@ -261,11 +266,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Stripped /responses image_generation tool for Codex client by account policy")
 			}
 		}
-		// 透传分支只需要轻量提取字段，避免热路径全量 Unmarshal。
-		mappedModel := account.GetMappedModel(reqModel)
-		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, mappedModel)
-		// 国产模型默认 effort 补充：也要用 mappedModel 判定是否是 passback-required 上游。
-		reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, mappedModel)
 		return s.forwardOpenAIPassthrough(
 			ctx,
 			c,
@@ -274,7 +274,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			canonicalImageIntentBody,
 			reqModel,
 			attemptImageIntentInvalidated,
-			reasoningEffort,
 			reqStream,
 			startTime,
 		)
@@ -710,6 +709,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		requestView = newOpenAIRequestView(body)
 		reqBody = nil
 	}
+	if wsDecision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 {
+		if floored := s.applyModelReasoningFloor(account, upstreamModel, body, "reasoning.effort"); !bytes.Equal(floored, body) {
+			body = floored
+			requestView = newOpenAIRequestView(body)
+			reqBody = nil
+		}
+	}
 	imageBillingModel := ""
 	imageSizeTier := ""
 	imageInputSize := ""
@@ -961,23 +967,27 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, wsErr
 	}
 
-	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
-	// 国产模型默认 effort 补充：此处 reqModel 已被 mapping 重写为 billingModel。
-	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, reqModel)
-	reasoningEffortValue := ""
-	if reasoningEffort != nil {
-		reasoningEffortValue = *reasoningEffort
-	}
-	firstOutputTimeout := time.Duration(0)
-	if reqStream && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
-	}
-
 	httpInvalidEncryptedContentRetryTried := false
 	compactModelFallbackRetried := false
 	agentTaskRecoveryTried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
+		// Fallback can change both model and body. Re-evaluate the floor and
+		// effective usage/timeout for each actual upstream attempt.
+		if floored := s.applyModelReasoningFloor(account, upstreamModel, body, "reasoning.effort"); !bytes.Equal(floored, body) {
+			body = floored
+			requestView = newOpenAIRequestView(body)
+			reqBody = nil
+		}
+		reasoningEffort := ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel), body, reqModel)
+		reasoningEffortValue := ""
+		if reasoningEffort != nil {
+			reasoningEffortValue = *reasoningEffort
+		}
+		firstOutputTimeout := time.Duration(0)
+		if reqStream && account.Platform == PlatformOpenAI {
+			firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
+		}
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		var headerGuard *openAIFirstOutputHeaderGuard

@@ -130,6 +130,8 @@ type SettingService struct {
 	openAICodexUASF             singleflight.Group
 	openAICodexVersionCache     atomic.Value // *cachedOpenAICodexClientVersion
 	openAICodexVersionSF        singleflight.Group
+	modelReasoningFloorCache    atomic.Value // ModelReasoningFloorSettings; no request-path SQL
+	modelReasoningFloorMu       sync.Mutex   // serialize persistent updates and their snapshots
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group
 

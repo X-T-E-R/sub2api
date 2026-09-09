@@ -275,10 +275,13 @@ func TestCodexDailyPoolActualHTTPAndCompatibilityRoutes(t *testing.T) {
 			}
 			require.NotEmpty(t, session)
 			require.Equal(t, session, h.Get("session-id"))
-			if route == "alpha" {
+			switch route {
+			case "alpha":
 				require.Empty(t, h.Get("session_id"), "standalone SearchClient protocol strips Responses-only headers")
 				require.Equal(t, session, codexMetadataObject(h.Get(openAIWSTurnMetadataHeader))["session_id"])
-			} else {
+			case "http", "raw":
+				require.Empty(t, h.Get("session_id"), "native body metadata replaces the direct session_id alias")
+			default:
 				require.Equal(t, session, h.Get("session_id"))
 			}
 			require.Equal(t, thread, h.Get("thread-id"))

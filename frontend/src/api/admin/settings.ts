@@ -10,6 +10,14 @@ import type {
   LoginAgreementDocument,
   NotifyEmailEntry,
 } from "@/types";
+import type {
+  ModelReasoningFloorSettings,
+} from "@/types/modelReasoningFloor";
+
+export type {
+  ModelReasoningFloorRule,
+  ModelReasoningFloorSettings,
+} from "@/types/modelReasoningFloor";
 
 export interface DefaultSubscriptionSetting {
   group_id: number;
@@ -1478,6 +1486,25 @@ export interface OpenAIFastPolicySettings {
   rules: OpenAIFastPolicyRule[];
 }
 
+// ==================== OpenAI Model Reasoning Floor Settings ====================
+
+export async function getModelReasoningFloorSettings(): Promise<ModelReasoningFloorSettings> {
+  const { data } = await apiClient.get<ModelReasoningFloorSettings>(
+    "/admin/settings/model-reasoning-floor",
+  );
+  return data;
+}
+
+export async function updateModelReasoningFloorSettings(
+  settings: ModelReasoningFloorSettings,
+): Promise<ModelReasoningFloorSettings> {
+  const { data } = await apiClient.put<ModelReasoningFloorSettings>(
+    "/admin/settings/model-reasoning-floor",
+    settings,
+  );
+  return data;
+}
+
 // ==================== Beta Policy Settings ====================
 
 /**
@@ -1611,6 +1638,8 @@ export const settingsAPI = {
   updateStreamTimeoutSettings,
   getRectifierSettings,
   updateRectifierSettings,
+  getModelReasoningFloorSettings,
+  updateModelReasoningFloorSettings,
   getBetaPolicySettings,
   updateBetaPolicySettings,
   getWebSearchEmulationConfig,

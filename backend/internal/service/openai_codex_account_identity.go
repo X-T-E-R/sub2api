@@ -100,12 +100,12 @@ func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw 
 	if raw == "" || namespace == "" {
 		return raw
 	}
-	return deriveStableUUIDv4(fmt.Sprintf(
+	return deriveScopedCodexUUID(fmt.Sprintf(
 		"sub2api:codex-account-identity:%s:user:%d:account:%s:kind:%s:value:%s",
 		codexAccountIdentityNamespaceVersion,
 		apiKeyID,
 		namespace,
 		kind,
 		raw,
-	))
+	), kind, raw, codexIdentityV7Cutover.Load())
 }

@@ -1138,6 +1138,40 @@ export default {
           force_priority: 'Force priority'
         }
       },
+      modelReasoningFloor: {
+        title: 'OpenAI model reasoning floors',
+        description: 'Raise reasoning effort for exact OpenAI model IDs finally sent upstream after account and group model mappings. The group reasoning policy runs first; this may increase latency and upstream cost.',
+        enabled: 'Enable model reasoning floors',
+        enabledHint: 'When disabled, existing rules are retained but are not applied.',
+        priorityHint: 'Rules match the final upstream model ID after account and group model mappings. Group reasoning mappings and ceilings run first; this model floor runs afterward: missing, none, or lower efforts are raised, while higher and unknown future efforts are kept as-is.',
+        empty: 'No model rules configured. Add an exact model ID below.',
+        ruleHeader: 'Rule #{index}',
+        model: 'Exact final upstream model ID',
+        modelPlaceholder: 'e.g. gpt-5.6-sol',
+        minEffort: 'Minimum reasoning effort',
+        addRule: 'Add model rule',
+        removeRule: 'Remove rule',
+        rulesHint: 'Up to {max} rules. Final upstream model IDs cannot contain whitespace, * or ? and must be unique.',
+        save: 'Save model floors',
+        saved: 'Model reasoning floors saved',
+        loadFailed: 'Failed to load model reasoning floors',
+        saveFailed: 'Failed to save model reasoning floors',
+        validationFailed: 'Fix invalid or duplicate model IDs before saving.',
+        validation: {
+          required: 'Enter an exact model ID.',
+          invalid: 'Use an exact model ID without whitespace, * or ?.',
+          tooLong: 'Model IDs must be at most 128 characters.',
+          duplicate: 'Each model ID may appear only once.'
+        },
+        efforts: {
+          minimal: 'Minimal',
+          low: 'Low',
+          medium: 'Medium',
+          high: 'High',
+          xhigh: 'XHigh',
+          max: 'Max'
+        }
+      },
       wechatConnect: {
         title: 'WeChat Connect',
         description: 'Third-party login configuration for WeChat Open Platform or Official Account / Mini Program.',
