@@ -1587,66 +1587,88 @@ func (s *OpenAIGatewayService) parentAccountLookup(ctx context.Context) func(int
 }
 
 func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDB(ctx context.Context, account *Account, groupID *int64, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
-	latest := s.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
-	if latest == nil {
-		return nil
-	}
-	if vetoed, _ := openAIProfitControlVetoReason(ctx, latest); vetoed {
-		return nil
-	}
+	latest, _ := s.recheckSelectedOpenAIAccountFromDBWithError(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 	return latest
 }
 
+func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBWithError(ctx context.Context, account *Account, groupID *int64, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) (*Account, error) {
+	latest, err := s.recheckSelectedOpenAIAccountFromDBBeforeProfitWithError(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil {
+		return nil, nil
+	}
+	if vetoed, _ := openAIProfitControlVetoReason(ctx, latest); vetoed {
+		return nil, nil
+	}
+	return latest, nil
+}
+
 func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx context.Context, account *Account, groupID *int64, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
+	latest, _ := s.recheckSelectedOpenAIAccountFromDBBeforeProfitWithError(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
+	return latest
+}
+
+func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBBeforeProfitWithError(ctx context.Context, account *Account, groupID *int64, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) (*Account, error) {
 	if account == nil {
-		return nil
+		return nil, nil
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	var parentErr error
+	parentLookup := func(id int64) *Account {
+		if s.accountRepo == nil {
+			return nil
+		}
+		parent, err := s.accountRepo.GetByID(ctx, id)
+		parentErr = err
+		return parent
+	}
 	if s.schedulerSnapshot == nil || s.accountRepo == nil {
 		if s.openAIGroupRequiresPrivacySet(ctx, groupID) && !account.IsPrivacySet() {
-			return nil
+			return nil, nil
 		}
 		if !isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx, account, platform, requestedModel, requireCompact, requiredCapability) {
-			return nil
+			return nil, nil
 		}
 		if s.isOpenAIAccountBlockedBySchedulingThreshold(ctx, account) {
-			return nil
+			return nil, nil
 		}
-		if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
-			return nil
+		if !parentHealthyForShadow(account, parentLookup) {
+			return nil, parentErr
 		}
 		if s.isOpenAIProxyStreamQuarantined(ctx, account) {
-			return nil
+			return nil, nil
 		}
-		return account
+		return account, nil
 	}
 
 	latest, err := s.accountRepo.GetByID(ctx, account.ID)
 	if err != nil || latest == nil {
-		return nil
+		return nil, err
 	}
 	if !s.openAIAccountMatchesSchedulingGroup(latest, groupID) {
-		return nil
+		return nil, nil
 	}
 	if s.openAIGroupRequiresPrivacySet(ctx, groupID) && !latest.IsPrivacySet() {
-		return nil
+		return nil, nil
 	}
 	if !isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx, latest, platform, requestedModel, requireCompact, requiredCapability) {
-		return nil
+		return nil, nil
 	}
-	if !parentHealthyForShadow(latest, s.parentAccountLookup(ctx)) {
-		return nil
+	if !parentHealthyForShadow(latest, parentLookup) {
+		return nil, parentErr
 	}
 	if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel) {
-		return nil
+		return nil, nil
 	}
 	if s.isOpenAIAccountBlockedBySchedulingThreshold(ctx, latest) {
-		return nil
+		return nil, nil
 	}
 	if s.isOpenAIProxyStreamQuarantined(ctx, latest) {
-		return nil
+		return nil, nil
 	}
-	return latest
+	return latest, nil
 }
 
 func (s *OpenAIGatewayService) openAIAccountMatchesSchedulingGroup(account *Account, groupID *int64) bool {

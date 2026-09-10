@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,13 +21,89 @@ import (
 type sessionAffinityWSConn struct{ *stagedPassthroughConn }
 
 type sessionAffinityWSDialer struct {
-	conn  openAIWSClientConn
-	dials atomic.Int64
+	conn   openAIWSClientConn
+	dials  atomic.Int64
+	status int
+	err    error
 }
 
 func (d *sessionAffinityWSDialer) Dial(context.Context, string, http.Header, string) (openAIWSClientConn, int, http.Header, error) {
 	d.dials.Add(1)
+	if d.err != nil {
+		return nil, d.status, http.Header{}, d.err
+	}
 	return d.conn, http.StatusSwitchingProtocols, http.Header{}, nil
+}
+
+func TestCodexSessionAffinityWebSocketHandshakeRejectAllowsMove(t *testing.T) {
+	for _, mode := range []string{OpenAIWSIngressModeCtxPool, OpenAIWSIngressModePassthrough} {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+			t.Run(mode+"/"+http.StatusText(status), func(t *testing.T) {
+				a, b := sessionAffinityTestAccount(11, "A"), sessionAffinityTestAccount(12, "B")
+				a.Extra["openai_oauth_responses_websockets_v2_mode"] = mode
+				repo := &sessionOwnerFixture{owners: map[string]CodexSessionAccountOwner{
+					codexSessionBindingKey(7, "root"): {AccountScope: CodexDailySessionScope(&a), AccountID: a.ID, Revision: 1},
+				}}
+				svc := sessionAffinityTestService(t, repo, a, b)
+				ctx, _ := sessionAffinityTestContext(t, 7, "root")
+				selected, _, err := sessionAffinitySelect(svc, ctx, 1, "", nil)
+				require.NoError(t, err)
+				defer releaseCodexSessionSelection(selected)
+				svc.cfg = newOpenAIWSV2TestConfig()
+				svc.settingService = nil
+				svc.cfg.Gateway.OpenAIWS.OAuthEnabled = true
+				svc.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+				svc.httpUpstream = &httpUpstreamRecorder{}
+				svc.toolCorrector = NewCodexToolCorrector()
+				dialer := &sessionAffinityWSDialer{status: status, err: errors.New("fixture handshake rejection")}
+				pool := newOpenAIWSConnPool(svc.cfg)
+				pool.setClientDialerForTest(dialer)
+				defer pool.Close()
+				svc.openaiWSPool, svc.openaiWSPassthroughDialer = pool, dialer
+				svc.openaiWSResolver = NewOpenAIWSProtocolResolver(svc.cfg)
+				result := make(chan error, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, acceptErr := coderws.Accept(w, r, nil)
+					if acceptErr != nil {
+						result <- acceptErr
+						return
+					}
+					defer func() { _ = conn.CloseNow() }()
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = r.Clone(ctx)
+					c.Request.Header.Set("session_id", "root")
+					c.Set("api_key", &APIKey{ID: 7})
+					_, first, readErr := conn.Read(ctx)
+					if readErr != nil {
+						result <- readErr
+						return
+					}
+					result <- svc.ProxyResponsesWebSocketFromClient(ctx, c, conn, selected.Account, "synthetic-token", first, nil)
+				}))
+				defer server.Close()
+				clientCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				client, _, err := coderws.Dial(clientCtx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+				require.NoError(t, err)
+				defer func() { _ = client.CloseNow() }()
+				require.NoError(t, client.Write(clientCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.6-luna","input":"hello"}`)))
+				select {
+				case err = <-result:
+				case <-clientCtx.Done():
+					t.Fatal("handshake result missing")
+				}
+				var failover *UpstreamFailoverError
+				require.ErrorAs(t, err, &failover)
+				require.Equal(t, status, failover.StatusCode)
+				require.True(t, CodexSessionMayFailover(ctx, failover))
+				require.Equal(t, 1, dialer.DialCount())
+				next, _, err := sessionAffinitySelect(svc, ctx, 1, "", map[int64]struct{}{a.ID: {}})
+				require.NoError(t, err)
+				require.Equal(t, b.ID, next.Account.ID)
+				releaseCodexSessionSelection(next)
+			})
+		}
+	}
 }
 
 func (d *sessionAffinityWSDialer) DialCount() int { return int(d.dials.Load()) }

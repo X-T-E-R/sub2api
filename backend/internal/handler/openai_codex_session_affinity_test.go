@@ -220,8 +220,21 @@ func (r *codexAffinityHandlerRepo) ClaimSessionOwner(_ context.Context, binding 
 	if owner, ok := r.owners[binding]; ok {
 		return &owner, nil
 	}
+	proposed.Revision = 1
 	r.owners[binding] = proposed
 	return &proposed, nil
+}
+
+func (r *codexAffinityHandlerRepo) MoveSessionOwner(_ context.Context, binding string, expected, proposed service.CodexSessionAccountOwner) (*service.CodexSessionAccountOwner, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	owner := r.owners[binding]
+	if owner == expected {
+		proposed.Revision = owner.Revision + 1
+		r.owners[binding] = proposed
+		owner = proposed
+	}
+	return &owner, nil
 }
 
 func (r *codexAffinityHandlerRepo) FindSessionBindingScopes(_ context.Context, binding string) ([]string, error) {
@@ -254,7 +267,22 @@ func (u *codexAffinityHandlerUpstream) Do(req *http.Request, _ string, accountID
 		headers:   req.Header.Clone(),
 	})
 	mode := u.mode
+	firstAccount := u.attempts[0].accountID
 	u.mu.Unlock()
+	if (mode == "http_401" || mode == "http_429") && accountID == firstAccount {
+		status := http.StatusUnauthorized
+		headers := http.Header{"Content-Type": {"application/json"}}
+		if mode == "http_429" {
+			status = http.StatusTooManyRequests
+			headers.Set("x-codex-primary-used-percent", "100")
+			headers.Set("x-codex-primary-window-minutes", "300")
+			headers.Set("x-codex-primary-reset-after-seconds", "3600")
+		}
+		return &http.Response{
+			StatusCode: status, Header: headers,
+			Body: io.NopCloser(strings.NewReader(`{"error":{"message":"fixture account rejected request"}}`)),
+		}, nil
+	}
 
 	switch mode {
 	case "http_502":
@@ -274,8 +302,9 @@ func (u *codexAffinityHandlerUpstream) Do(req *http.Request, _ string, accountID
 	default:
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": {"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_fixture","object":"response","model":"gpt-5.6-luna","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader("event: response.completed\ndata: " +
+				`{"type":"response.completed","response":{"id":"resp_fixture","object":"response","model":"gpt-5.6-luna","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n")),
 		}, nil
 	}
 }
@@ -315,6 +344,7 @@ type codexAffinityHandlerFixture struct {
 	upstream *codexAffinityHandlerUpstream
 	pool     *service.CodexDailySessionPool
 	billing  *service.BillingCacheService
+	settings *service.SettingService
 }
 
 func newCodexAffinityHandlerFixture(t *testing.T, mode string) *codexAffinityHandlerFixture {
@@ -362,7 +392,7 @@ func newCodexAffinityHandlerFixture(t *testing.T, mode string) *codexAffinityHan
 	router.POST("/openai/v1/messages", h.Messages)
 	router.POST("/openai/v1/chat/completions", h.ChatCompletions)
 
-	fixture := &codexAffinityHandlerFixture{h: h, router: router, repo: repo, upstream: upstream, pool: pool, billing: billingCache}
+	fixture := &codexAffinityHandlerFixture{h: h, router: router, repo: repo, upstream: upstream, pool: pool, billing: billingCache, settings: settingService}
 	t.Cleanup(func() {
 		pool.Close()
 		billingCache.Stop()
@@ -459,6 +489,56 @@ func TestOpenAICodexSessionAffinityHandlerWritesResponsesFailedAfterStreamEOF(t 
 	require.Contains(t, recorder.Body.String(), "response.output_text.delta")
 	require.Contains(t, recorder.Body.String(), "event: response.failed")
 	require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: response.failed"))
+}
+
+func TestOpenAICodexSessionAffinityHandlerReplayProtectionWithoutEnrollment(t *testing.T) {
+	for _, route := range []string{"responses", "messages", "chat"} {
+		t.Run(route, func(t *testing.T) {
+			fixture := newCodexAffinityHandlerFixture(t, "transport_eof")
+			require.NoError(t, fixture.settings.SetCodexSessionAffinitySettings(context.Background(), service.CodexSessionAffinitySettings{}))
+			recorder := httptest.NewRecorder()
+			fixture.router.ServeHTTP(recorder, codexAffinityHandlerRequest(t, route, false))
+			require.Equal(t, http.StatusBadGateway, recorder.Code)
+			require.Len(t, fixture.upstream.snapshotAttempts(), 1)
+			require.Empty(t, fixture.repo.owners)
+		})
+	}
+}
+
+func TestOpenAICodexSessionAffinityHandlerMovesRejectedAccount(t *testing.T) {
+	for _, route := range []string{"responses", "messages", "chat"} {
+		for _, mode := range []string{"http_401", "http_429", "missing_token"} {
+			t.Run(route+"/"+mode, func(t *testing.T) {
+				fixture := newCodexAffinityHandlerFixture(t, mode)
+				if mode == "missing_token" {
+					delete(fixture.repo.accounts[0].Credentials, "access_token")
+				}
+				for range 2 {
+					recorder := httptest.NewRecorder()
+					fixture.router.ServeHTTP(recorder, codexAffinityHandlerRequest(t, route, false))
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					require.Contains(t, recorder.Body.String(), "hello")
+				}
+				attempts := fixture.upstream.snapshotAttempts()
+				if mode == "missing_token" {
+					require.Len(t, attempts, 2, "missing credential must fail over before upstream send")
+					require.Equal(t, fixture.repo.accounts[1].ID, attempts[0].accountID)
+					require.Equal(t, attempts[0].accountID, attempts[1].accountID)
+					return
+				}
+				require.Len(t, attempts, 3, "reject A, succeed B, next request stays B")
+				require.NotEqual(t, attempts[0].accountID, attempts[1].accountID)
+				require.Equal(t, attempts[1].accountID, attempts[2].accountID)
+				require.NotEqual(t, attempts[0].headers.Get("session-id"), attempts[1].headers.Get("session-id"))
+				require.Equal(t, attempts[1].headers.Get("session-id"), attempts[2].headers.Get("session-id"))
+				for _, owner := range fixture.repo.owners {
+					require.Equal(t, attempts[1].accountID, owner.AccountID)
+					require.Equal(t, int64(2), owner.Revision)
+				}
+				require.Len(t, fixture.repo.bindings, 2, "keep old account allocation; allocate once on replacement")
+			})
+		}
+	}
 }
 
 var _ service.HTTPUpstream = (*codexAffinityHandlerUpstream)(nil)

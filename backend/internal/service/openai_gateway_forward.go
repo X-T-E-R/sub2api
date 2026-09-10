@@ -875,7 +875,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if reason == "invalid_encrypted_content" && recoverInvalidEncryptedContent(attempt) {
 				continue
 			}
-			if CodexSessionAffinityActive(ctx) {
+			if codexSessionReplayProtected(ctx) {
 				break
 			}
 			if retryable && attempt < maxAttempts {
@@ -965,6 +965,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				wsResult.BillingModel = imageBillingModel
 			}
 			return wsResult, nil
+		}
+		if failoverErr := s.codexSessionWSDialFailover(ctx, account, wsErr); failoverErr != nil {
+			return nil, failoverErr
 		}
 		s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)
 		return nil, wsErr

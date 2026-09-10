@@ -26,6 +26,7 @@ type sessionOwnerFixture struct {
 	ownerReads, claims int
 	ownerErr           error
 	claimBarrier       func()
+	moveBarrier        func()
 }
 
 func (r *sessionOwnerFixture) FindSessionOwner(_ context.Context, key string) (*CodexSessionAccountOwner, error) {
@@ -57,7 +58,25 @@ func (r *sessionOwnerFixture) ClaimSessionOwner(_ context.Context, key string, o
 	if existing, ok := r.owners[key]; ok {
 		return &existing, nil
 	}
+	owner.Revision = 1
 	r.owners[key] = owner
+	return &owner, nil
+}
+func (r *sessionOwnerFixture) MoveSessionOwner(_ context.Context, key string, expected, next CodexSessionAccountOwner) (*CodexSessionAccountOwner, error) {
+	if r.moveBarrier != nil {
+		r.moveBarrier()
+	}
+	r.ownerMu.Lock()
+	defer r.ownerMu.Unlock()
+	if r.ownerErr != nil {
+		return nil, r.ownerErr
+	}
+	owner := r.owners[key]
+	if owner == expected {
+		next.Revision = owner.Revision + 1
+		r.owners[key] = next
+		owner = next
+	}
 	return &owner, nil
 }
 func (r *sessionOwnerFixture) FindSessionBindingScopes(_ context.Context, key string) ([]string, error) {
@@ -149,8 +168,8 @@ func TestCodexSessionAffinityMixedCandidatesAndPersistentOwner(t *testing.T) {
 	require.True(t, CodexSessionAffinityActive(ctx))
 	require.Equal(t, 1, repo.claims)
 
-	// Existing trees remain fixed with enrollment disabled and the legacy
-	// scheduler enabled. Warm owner reads do not issue claim writes or SQL.
+	// Removing enrollment preserves existing preferences. Mutable ownership is
+	// read on every request, without re-claim writes or a stale local cache.
 	svc.settingService.codexSessionAffinityCache.Store(CodexSessionAffinitySettings{})
 	svc.codexDailySessionPool.cache.Wait()
 	reads := repo.ownerReads
@@ -159,7 +178,7 @@ func TestCodexSessionAffinityMixedCandidatesAndPersistentOwner(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, pooled.ID, selection.Account.ID)
 	require.Equal(t, "codex_session_owner", decision.Layer)
-	require.Equal(t, reads, repo.ownerReads)
+	require.Equal(t, reads+1, repo.ownerReads)
 	require.Equal(t, 1, repo.claims)
 	releaseCodexSessionSelection(selection)
 
@@ -439,9 +458,18 @@ func TestCodexSessionAffinityUnknownPreviousAndUnavailableOwner(t *testing.T) {
 				circuit.mu.Unlock()
 			}
 			ctx, _ := sessionAffinityTestContext(t, 7, "root")
-			selected, _, err := sessionAffinitySelect(svc, ctx, 1, "", nil)
-			require.ErrorIs(t, err, ErrCodexSessionAffinity)
-			require.Nil(t, selected)
+			selected, decision, err := sessionAffinitySelect(svc, ctx, 1, "", nil)
+			require.NoError(t, err)
+			require.Equal(t, b.ID, selected.Account.ID)
+			require.Equal(t, "codex_session_failover", decision.Layer)
+			releaseCodexSessionSelection(selected)
+			require.Equal(t, b.ID, repo.owners[codexSessionBindingKey(7, "root")].AccountID)
+			ctx, _ = sessionAffinityTestContext(t, 7, "root")
+			selected, decision, err = sessionAffinitySelect(svc, ctx, 1, "", nil)
+			require.NoError(t, err)
+			require.Equal(t, b.ID, selected.Account.ID)
+			require.Equal(t, "codex_session_owner", decision.Layer)
+			releaseCodexSessionSelection(selected)
 			require.Zero(t, repo.claims)
 		})
 	}
@@ -460,4 +488,122 @@ func TestCodexSessionAffinityCompactRetryRequiresExplicitRejection(t *testing.T)
 	require.False(t, retry, "an empty failed shell does not establish nonexecution")
 	_, _, retry = svc.prepareOpenAICompactFallbackRetry(c, nil, "gpt-6-astra", body, 404, "model not found", []byte(`{"error":{"code":"model_not_found"}}`), false)
 	require.True(t, retry, "an explicit pre-execution rejection retains same-account compatibility repair")
+}
+
+func TestCodexSessionAffinityConcurrentMoveUsesCurrentOwner(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+	a, b, c := sessionAffinityTestAccount(11, "A"), sessionAffinityTestAccount(12, "B"), sessionAffinityTestAccount(13, "C")
+	a.Schedulable = false
+	b.Priority, c.Priority = 1, 100
+	var arrivals sync.WaitGroup
+	arrivals.Add(2)
+	key := codexSessionBindingKey(7, "root")
+	repo := &sessionOwnerFixture{
+		owners:      map[string]CodexSessionAccountOwner{key: {AccountScope: CodexDailySessionScope(&a), AccountID: a.ID, Revision: 1}},
+		moveBarrier: func() { arrivals.Done(); arrivals.Wait() },
+	}
+	first := sessionAffinityTestService(t, repo, a, b, c)
+	b.Priority, c.Priority = 100, 1
+	second := sessionAffinityTestService(t, repo, a, b, c)
+	type outcome struct {
+		id    int64
+		err   error
+		reset bool
+	}
+	results := make(chan outcome, 2)
+	for _, svc := range []*OpenAIGatewayService{first, second} {
+		ctx, _ := sessionAffinityTestContext(t, 7, "root")
+		go func() {
+			selected, _, err := sessionAffinitySelect(svc, ctx, 1, "resp_mapping_expired", nil)
+			result := outcome{err: err, reset: CodexSessionMayResetPreviousResponse(ctx)}
+			if selected != nil {
+				result.id = selected.Account.ID
+			}
+			releaseCodexSessionSelection(selected)
+			results <- result
+		}()
+	}
+	left, right := <-results, <-results
+	require.NoError(t, left.err)
+	require.NoError(t, right.err)
+	require.Equal(t, left.id, right.id, "CAS loser must select winner, not its own candidate")
+	require.True(t, left.reset)
+	require.True(t, right.reset, "both requests know the unavailable original owner was replaced")
+	require.Equal(t, left.id, repo.owners[key].AccountID)
+	require.Equal(t, int64(2), repo.owners[key].Revision)
+}
+
+func TestCodexSessionAffinityPreviousOwnershipMigration(t *testing.T) {
+	a, b := sessionAffinityTestAccount(11, "A"), sessionAffinityTestAccount(12, "B")
+	for _, tc := range []struct {
+		name                                       string
+		previousOwner                              int64
+		canMove, unavailable, wantError, wantReset bool
+	}{
+		{"same owner unknown mapping", 0, true, false, false, false},
+		{"old previous replayable", b.ID, true, false, false, true},
+		{"old previous incremental", b.ID, false, false, true, false},
+		{"quota replayable", a.ID, true, true, false, true},
+		{"quota incremental", a.ID, false, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bound := a
+			bound.Schedulable = !tc.unavailable
+			repo := &sessionOwnerFixture{owners: map[string]CodexSessionAccountOwner{
+				codexSessionBindingKey(7, "root"): {AccountScope: CodexDailySessionScope(&a), AccountID: a.ID, Revision: 1},
+			}}
+			svc := sessionAffinityTestService(t, repo, bound, b)
+			if tc.previousOwner > 0 {
+				require.NoError(t, svc.getOpenAIWSStateStore().BindResponseAccount(context.Background(), 1, "resp_previous", tc.previousOwner, time.Hour))
+			}
+			ctx, _ := sessionAffinityTestContext(t, 7, "root")
+			group := int64(1)
+			selected, _, err := svc.SelectAccountWithSchedulerForCapability(ctx, &group, "resp_previous", "legacy", "gpt-5.6-luna", nil,
+				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses, false, tc.canMove, false, PlatformOpenAI)
+			if tc.wantError {
+				require.ErrorIs(t, err, ErrCodexSessionAffinity)
+				require.Nil(t, selected)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantReset, CodexSessionMayResetPreviousResponse(ctx))
+			want := a.ID
+			if tc.unavailable {
+				want = b.ID
+			}
+			require.Equal(t, want, selected.Account.ID)
+			releaseCodexSessionSelection(selected)
+		})
+	}
+}
+
+func TestCodexSessionAffinityReplayClassification(t *testing.T) {
+	for _, enrolled := range []bool{false, true} {
+		ctx, _ := sessionAffinityTestContext(t, 7, "root")
+		state, ok := ctx.Value(codexSessionAffinityContextKey{}).(*codexSessionAffinityState)
+		require.True(t, ok)
+		state.openAI.Store(true)
+		state.strict.Store(enrolled)
+		for _, tc := range []struct {
+			name        string
+			err         *UpstreamFailoverError
+			retry, move bool
+		}{
+			{"auth rejected", &UpstreamFailoverError{StatusCode: 401}, true, true},
+			{"quota rejected", &UpstreamFailoverError{StatusCode: 429}, true, true},
+			{"credential invalid", &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount}, true, true},
+			{"provider auth", &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeProvider}, false, false},
+			{"request limited", &UpstreamFailoverError{StatusCode: 429, RequestScopedTransient: true}, true, false},
+			{"HTTP 502", &UpstreamFailoverError{StatusCode: 502}, false, false},
+			{"EOF", &UpstreamFailoverError{StatusCode: 502, TransportError: "EOF"}, false, false},
+			{"TTFT timeout", &UpstreamFailoverError{StatusCode: 504, SafeToFailoverAfterWrite: true}, false, false},
+			{"policy stop", &UpstreamFailoverError{StatusCode: 403, NextAccountAction: NextAccountStop}, true, false},
+		} {
+			t.Run(fmt.Sprintf("enrolled=%t/%s", enrolled, tc.name), func(t *testing.T) {
+				require.Equal(t, tc.retry, CodexSessionMayRetry(ctx, tc.err))
+				require.Equal(t, tc.move, CodexSessionMayFailover(ctx, tc.err))
+			})
+		}
+	}
 }

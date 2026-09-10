@@ -170,7 +170,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			// 永久故障：缺失 refresh_token 时账号无法自愈，必须立即从调度池剔除，
 			// 否则会被反复选中、每次都在 token 阶段直接返回错误，对用户呈现持续 502。
 			p.disableAccountMissingRefreshToken(account, reason)
-			return "", errors.New(reason)
+			return "", codexSessionCredentialUnavailable(ctx, reason)
 		}
 		needsRefresh = false
 	}
@@ -239,7 +239,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	}
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
-		return "", errors.New("access_token not found in credentials")
+		return "", codexSessionCredentialUnavailable(ctx, "access_token not found in credentials")
 	}
 	if strictAffinity && !needsRefresh {
 		return accessToken, nil

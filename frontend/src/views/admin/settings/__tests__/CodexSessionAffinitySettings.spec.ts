@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import type { AdminGroup } from "@/types";
 import type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
+import enSettings from "@/i18n/locales/en/admin/settings";
+import zhSettings from "@/i18n/locales/zh/admin/settings";
 
 const apiMocks = vi.hoisted(() => ({
   getCodexSessionAffinitySettings: vi.fn(),
@@ -89,6 +91,29 @@ describe("CodexSessionAffinitySettings", () => {
     expect(toastMocks.showSuccess).toHaveBeenCalledWith(
       "admin.settings.codexSessionAffinity.saved",
     );
+  });
+
+  it("describes durable preference, bounded waits, and eligible failover in both locales", () => {
+    const enCopy = enSettings.settings.codexSessionAffinity;
+    const zhCopy = zhSettings.settings.codexSessionAffinity;
+
+    expect(enCopy.description).toContain("preferred current account");
+    expect(enCopy.behaviorEnrollment).toContain("durable current-account preference");
+    expect(enCopy.behaviorCandidates).toContain("wait for a bounded time");
+    expect(enCopy.behaviorCandidates).toContain("genuine quota");
+    expect(enCopy.behaviorCandidates).toContain("Daily session allocation rules are unchanged");
+    expect(enCopy.behaviorRemoval).toContain("existing preferences remain eligible to move");
+    expect(enCopy.groupsHint).toContain("does not clear existing session preferences");
+    expect(enCopy.behaviorCandidates).not.toContain("does not switch accounts automatically");
+
+    expect(zhCopy.description).toContain("当前账号偏好");
+    expect(zhCopy.behaviorEnrollment).toContain("持久化的当前账号偏好");
+    expect(zhCopy.behaviorCandidates).toContain("有界时间内等待");
+    expect(zhCopy.behaviorCandidates).toContain("真实配额、认证、账号禁用或不兼容失败");
+    expect(zhCopy.behaviorCandidates).toContain("每日会话分配规则不变");
+    expect(zhCopy.behaviorRemoval).toContain("已有偏好仍可");
+    expect(zhCopy.groupsHint).toContain("不会清除已有会话偏好");
+    expect(zhCopy.behaviorCandidates).not.toContain("不会自动切换账号");
   });
 
   it("keeps existing binding IDs visible when the group list no longer includes them", async () => {

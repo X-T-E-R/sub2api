@@ -504,7 +504,13 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if accountID <= 0 {
 		var err error
 		accountID, err = s.service.getStickySessionAccountID(ctx, req.GroupID, sessionHash)
-		if err != nil || accountID <= 0 {
+		if err != nil {
+			if req.StrictSessionAffinity && !errors.Is(err, ErrStickySessionNotFound) {
+				return nil, false, err
+			}
+			return nil, false, nil
+		}
+		if accountID <= 0 {
 			return nil, false, nil
 		}
 	}
@@ -518,7 +524,14 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	}
 
 	account, err := s.service.getSchedulableAccount(ctx, accountID)
-	if err != nil || account == nil {
+	if err != nil {
+		if req.StrictSessionAffinity && !errors.Is(err, ErrAccountNotFound) {
+			return nil, false, err
+		}
+		clearBinding()
+		return nil, false, nil
+	}
+	if account == nil {
 		clearBinding()
 		return nil, false, nil
 	}
@@ -533,7 +546,18 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
-	account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
+	if req.StrictSessionAffinity {
+		account, err = s.service.recheckSelectedOpenAIAccountFromDBWithError(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
+		if err != nil {
+			if errors.Is(err, ErrAccountNotFound) {
+				clearBinding()
+				return nil, false, nil
+			}
+			return nil, false, err
+		}
+	} else {
+		account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
+	}
 	if account == nil || !s.service.openAIAccountMatchesSchedulingGroup(account, req.GroupID) || !s.isAccountRequestCompatible(ctx, account, req) || !s.isAccountTransportCompatible(account, req.RequiredTransport) {
 		clearBinding()
 		return nil, false, nil
@@ -556,7 +580,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if req.StrictSessionAffinity {
+	if req.StrictSessionAffinity || !openAIAdaptiveSchedulerStatsEnabled(req.Platform) {
 		escapeCfg.enabled = false
 	}
 	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape {
@@ -648,6 +672,21 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 		return "error_rate", errorRate, ttft, true
 	}
 	return "", errorRate, ttft, false
+}
+
+// OpenAI requests keep runtime observations for diagnostics, but do not let
+// the observations move a session or change candidate ranking. Other
+// OpenAI-compatible platforms, including Grok, retain the adaptive behavior.
+func openAIAdaptiveSchedulerStatsEnabled(platform string) bool {
+	return NormalizeOpenAICompatiblePlatform(platform) != PlatformOpenAI
+}
+
+func openAIStatsScoringWeights(platform string, weights GatewayOpenAIWSSchedulerScoreWeightsView) GatewayOpenAIWSSchedulerScoreWeightsView {
+	if !openAIAdaptiveSchedulerStatsEnabled(platform) {
+		weights.ErrorRate = 0
+		weights.TTFT = 0
+	}
+	return weights
 }
 
 type openAIAccountCandidateScore struct {
@@ -941,7 +980,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	}
 	plan.loadSkew = calcLoadSkewByMoments(loadRateSum, loadRateSumSquares, len(candidates))
 
-	weights := s.service.openAIWSSchedulerWeightsForRequest(ctx)
+	weights := openAIStatsScoringWeights(req.Platform, s.service.openAIWSSchedulerWeightsForRequest(ctx))
 	now := time.Now()
 	upstreamCostFactors := map[int64]float64(nil)
 	if req.UseUpstreamTokenCost && weights.UpstreamCost > 0 {
@@ -2250,7 +2289,8 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	if selection, decision, handled, err := s.selectCodexSessionAccount(ctx, OpenAIAccountScheduleRequest{
 		GroupID: groupID, Platform: platform, SessionHash: sessionHash,
 		PreviousResponseID: previousResponseID, RequestedModel: requestedModel,
-		RequiredTransport: requiredTransport, RequiredCapability: requiredCapability,
+		PreviousResponseCanMove: previousResponseCanMove,
+		RequiredTransport:       requiredTransport, RequiredCapability: requiredCapability,
 		RequiredImageCapability: requiredImageCapability, RequireCompact: requireCompact,
 		ExcludedIDs: excludedIDs, RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
 		UseUpstreamTokenCost: useUpstreamTokenCost,
@@ -2788,14 +2828,15 @@ func buildOpenAIAccountSchedulerScoreSnapshot(
 		if factor, ok := upstreamCostFactors[candidate.account.ID]; ok {
 			upstreamCostFactor = factor
 		}
-		baseScore := weights.Priority*priorityFactor +
-			weights.Load*loadFactor +
-			weights.Queue*queueFactor +
-			weights.ErrorRate*errorFactor +
-			weights.TTFT*ttftFactor +
-			weights.Reset*resetFactor +
-			weights.QuotaHeadroom*quotaHeadroomFactor +
-			weights.UpstreamCost*(upstreamCostFactor-openAIUpstreamCostNeutralFactor)
+		candidateWeights := openAIStatsScoringWeights(candidate.account.Platform, weights)
+		baseScore := candidateWeights.Priority*priorityFactor +
+			candidateWeights.Load*loadFactor +
+			candidateWeights.Queue*queueFactor +
+			candidateWeights.ErrorRate*errorFactor +
+			candidateWeights.TTFT*ttftFactor +
+			candidateWeights.Reset*resetFactor +
+			candidateWeights.QuotaHeadroom*quotaHeadroomFactor +
+			candidateWeights.UpstreamCost*(upstreamCostFactor-openAIUpstreamCostNeutralFactor)
 		score := OpenAIAccountSchedulerScoreSnapshot{
 			BaseScore:             baseScore,
 			StickyWeightedEnabled: stickyWeightedEnabled,

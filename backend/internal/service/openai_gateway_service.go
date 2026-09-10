@@ -1227,7 +1227,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		// 降级：TokenProvider 未配置时直接从账号读取
 		accessToken := account.GetOpenAIAccessToken()
 		if accessToken == "" {
-			return "", "", errors.New("access_token not found in credentials")
+			return "", "", codexSessionCredentialUnavailable(ctx, "access_token not found in credentials")
 		}
 		return accessToken, "oauth", nil
 	case AccountTypeSetupToken:
@@ -1238,7 +1238,7 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		// Codex OAuth forwarding protocol but have no refresh-token lifecycle.
 		accessToken := account.GetOpenAIAccessToken()
 		if accessToken == "" {
-			return "", "", errors.New("access_token not found in credentials")
+			return "", "", codexSessionCredentialUnavailable(ctx, "access_token not found in credentials")
 		}
 		return accessToken, "oauth", nil
 	case AccountTypeAPIKey:

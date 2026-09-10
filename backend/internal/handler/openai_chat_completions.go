@@ -332,7 +332,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward || (service.CodexSessionAffinityActive(c.Request.Context()) && !codexSessionSameAccountRetryAllowed(failoverErr)) {
+					if c.Writer.Size() != writerSizeBeforeForward || !service.CodexSessionMayRetry(c.Request.Context(), failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, streamStarted || c.Writer.Written())
 						return
@@ -366,7 +366,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							continue
 						}
 					}
-					if service.CodexSessionAffinityActive(c.Request.Context()) {
+					if !service.CodexSessionMayFailover(c.Request.Context(), failoverErr) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

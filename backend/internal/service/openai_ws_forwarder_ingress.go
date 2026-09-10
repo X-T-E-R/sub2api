@@ -876,6 +876,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(acquireErr.Error()), canonicalModel)
 				return nil, s.newOpenAIWSRateLimitFailoverError(account, dialErr.ResponseHeaders, nil, acquireErr.Error())
 			}
+			if failoverErr := s.codexSessionWSDialFailover(ctx, account, acquireErr); failoverErr != nil {
+				return nil, failoverErr
+			}
 			if errors.Is(acquireErr, errOpenAIWSPreferredConnUnavailable) {
 				return nil, NewOpenAIWSClientCloseError(
 					coderws.StatusPolicyViolation,
@@ -1384,7 +1387,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return true
 	}
 	retryIngressTurn := func(relayErr error, turn int, connID string) bool {
-		if CodexSessionAffinityActive(ctx) || !isOpenAIWSIngressTurnRetryable(relayErr) || turnRetry >= 1 {
+		if codexSessionReplayProtected(ctx) || !isOpenAIWSIngressTurnRetryable(relayErr) || turnRetry >= 1 {
 			return false
 		}
 		if isStrictAffinityTurn(currentPayload) {

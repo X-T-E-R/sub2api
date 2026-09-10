@@ -226,14 +226,14 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.openaiExperimentalScheduler.subscriptionPriorityTitle": "订阅优先",
     "admin.settings.openaiExperimentalScheduler.subscriptionPriorityDescription": "开启后先在 ChatGPT 订阅账号池中按权值选取；订阅池拿不到席位时再回退到非订阅账号池。",
     "admin.settings.openaiExperimentalScheduler.weightsTitle": "调度权值覆盖",
-    "admin.settings.openaiExperimentalScheduler.weightsDescription": "留空时使用配置/环境变量值；配置未设置时使用内置默认值。页面非空设置优先。",
+    "admin.settings.openaiExperimentalScheduler.weightsDescription": "留空时使用配置/环境变量值；配置未设置时使用内置默认值。页面非空设置优先。OpenAI 始终不将 TTFT 或历史错误率用于调度评分或账号逃逸，即使启用实验调度；这些指标仍适用于 Grok。",
     "admin.settings.openaiExperimentalScheduler.defaultPlaceholder": "配置/默认：{value}",
     "admin.settings.openaiExperimentalScheduler.topKLabel": "TopK",
     "admin.settings.openaiExperimentalScheduler.priorityWeight": "优先级",
     "admin.settings.openaiExperimentalScheduler.loadWeight": "负载",
     "admin.settings.openaiExperimentalScheduler.queueWeight": "排队",
-    "admin.settings.openaiExperimentalScheduler.errorRateWeight": "错误率",
-    "admin.settings.openaiExperimentalScheduler.ttftWeight": "首包延迟",
+    "admin.settings.openaiExperimentalScheduler.errorRateWeight": "历史错误率（Grok）",
+    "admin.settings.openaiExperimentalScheduler.ttftWeight": "首包延迟（Grok）",
     "admin.settings.openaiExperimentalScheduler.resetWeight": "重置窗口",
     "admin.settings.openaiExperimentalScheduler.quotaHeadroomWeight": "额度余量",
     "admin.settings.openaiExperimentalScheduler.upstreamCostWeight": "计费倍率",
@@ -1680,6 +1680,25 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(wrapper.text()).not.toContain("OpenAI 高级调度器");
   });
 
+  it("keeps TTFT and historical error-rate scope explicit in both locales", () => {
+    const enCopy = enSettings.settings.openaiExperimentalScheduler;
+    const zhCopy = zhSettings.settings.openaiExperimentalScheduler;
+
+    expect(enCopy.weightsDescription).toContain(
+      "OpenAI always ignores TTFT and historical error rate for scheduler scoring and account escape",
+    );
+    expect(enCopy.weightsDescription).toContain("these metrics still apply to Grok");
+    expect(enCopy.errorRateWeight).toBe("Historical error rate (Grok)");
+    expect(enCopy.ttftWeight).toBe("TTFT (Grok)");
+
+    expect(zhCopy.weightsDescription).toContain(
+      "OpenAI 始终不将 TTFT 或历史错误率用于调度评分或账号逃逸",
+    );
+    expect(zhCopy.weightsDescription).toContain("这些指标仍适用于 Grok");
+    expect(zhCopy.errorRateWeight).toBe("历史错误率（Grok）");
+    expect(zhCopy.ttftWeight).toBe("首包延迟（Grok）");
+  });
+
   it("summarizes target and other-model actions, then switches to all models", async () => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
@@ -1862,6 +1881,15 @@ describe("admin SettingsView payment visible method controls", () => {
       weightedModeText.indexOf("调度权值覆盖"),
     );
     expect(weightedModeText).toContain("计费倍率");
+    expect(weightedModeText).toContain(
+      "OpenAI 始终不将 TTFT 或历史错误率用于调度评分或账号逃逸，即使启用实验调度；这些指标仍适用于 Grok。",
+    );
+    expect(weightedModeText).toContain(
+      "历史错误率（Grok）",
+    );
+    expect(weightedModeText).toContain(
+      "首包延迟（Grok）",
+    );
   });
 
   it("passes translated upload and remove labels to the payment help image uploader", async () => {

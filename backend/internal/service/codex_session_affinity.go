@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,11 +17,13 @@ import (
 type CodexSessionAccountOwner struct {
 	AccountScope string
 	AccountID    int64
+	Revision     int64
 }
 
 type CodexSessionAffinityRepository interface {
 	FindSessionOwner(context.Context, string) (*CodexSessionAccountOwner, error)
 	ClaimSessionOwner(context.Context, string, CodexSessionAccountOwner) (*CodexSessionAccountOwner, error)
+	MoveSessionOwner(context.Context, string, CodexSessionAccountOwner, CodexSessionAccountOwner) (*CodexSessionAccountOwner, error)
 	FindSessionBindingScopes(context.Context, string) ([]string, error)
 }
 
@@ -30,10 +32,12 @@ var ErrCodexSessionAffinity = errors.New("codex session account affinity")
 type codexSessionAffinityContextKey struct{}
 
 type codexSessionAffinityState struct {
-	binding string
-	root    string
-	strict  atomic.Bool
-	owner   atomic.Pointer[CodexSessionAccountOwner]
+	binding       string
+	root          string
+	strict        atomic.Bool
+	owner         atomic.Pointer[CodexSessionAccountOwner]
+	openAI        atomic.Bool
+	resetPrevious atomic.Bool
 }
 
 func codexOriginalSessionID(headers http.Header, body map[string]any) string {
@@ -84,42 +88,91 @@ func CodexSessionAffinityActive(ctx context.Context) bool {
 	return state != nil && state.strict.Load()
 }
 
-func (s *CodexDailySessionPool) findSessionOwner(ctx context.Context, repo CodexSessionAffinityRepository, binding string) (*CodexSessionAccountOwner, error) {
-	if s.cache != nil {
-		if value, ok := s.cache.Get("owner:" + binding); ok {
-			if owner, ok := value.(CodexSessionAccountOwner); ok {
-				return &owner, nil
-			}
-		}
+func codexSessionReplayProtected(ctx context.Context) bool {
+	if ctx == nil {
+		return false
 	}
-	owner, err := repo.FindSessionOwner(ctx, binding)
-	if err == nil && owner != nil {
-		s.cacheSessionOwner(binding, *owner)
-	}
-	return owner, err
+	state, _ := ctx.Value(codexSessionAffinityContextKey{}).(*codexSessionAffinityState)
+	return state != nil && (state.openAI.Load() || state.strict.Load())
 }
 
-func (s *CodexDailySessionPool) cacheSessionOwner(binding string, owner CodexSessionAccountOwner) {
-	if s.cache != nil {
-		s.cache.SetWithTTL("owner:"+binding, owner, 1, 15*time.Minute)
+// CodexSessionMayRetry requires a definite rejection, not merely the absence
+// of downstream text. An EOF or a first-output timeout can still be billable.
+func CodexSessionMayRetry(ctx context.Context, err *UpstreamFailoverError) bool {
+	if !codexSessionReplayProtected(ctx) {
+		return true
 	}
+	if err == nil || err.TransportError != "" || err.SafeToFailoverAfterWrite {
+		return false
+	}
+	if err.IsCredentialFailure() {
+		return err.Scope == GatewayFailureScopeAccount && err.ShouldRetryNextAccount()
+	}
+	switch err.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func CodexSessionMayFailover(ctx context.Context, err *UpstreamFailoverError) bool {
+	if !codexSessionReplayProtected(ctx) {
+		return true
+	}
+	return CodexSessionMayRetry(ctx, err) && !err.RequestScopedTransient && err.ShouldRetryNextAccount()
+}
+
+func codexSessionCredentialUnavailable(ctx context.Context, message string) error {
+	if !codexSessionReplayProtected(ctx) {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, &UpstreamFailoverError{
+		StatusCode: http.StatusBadGateway,
+		Stage:      GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount,
+		Reason: "openai_credential_unavailable", NextAccountAction: NextAccountRetry,
+		ClientStatusCode: http.StatusBadGateway, ClientMessage: "Upstream account credentials are unavailable",
+	})
+}
+
+func (s *OpenAIGatewayService) codexSessionWSDialFailover(ctx context.Context, account *Account, err error) *UpstreamFailoverError {
+	if !codexSessionReplayProtected(ctx) {
+		return nil
+	}
+	var dialErr *openAIWSDialError
+	if !errors.As(err, &dialErr) || dialErr == nil {
+		return nil
+	}
+	switch dialErr.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		message := extractUpstreamErrorMessage(dialErr.ResponseBody)
+		if s.shouldFailoverOpenAIUpstreamResponse(dialErr.StatusCode, message, dialErr.ResponseBody) {
+			return s.newOpenAIAccountFailoverError(account, dialErr.StatusCode, dialErr.ResponseHeaders, dialErr.ResponseBody, message, false, false)
+		}
+	}
+	return nil
 }
 
 func (s *OpenAIGatewayService) codexSessionAccountScope(ctx context.Context, account *Account, enroll bool) string {
+	scope, _ := s.codexSessionAccountScopeWithError(ctx, account, enroll)
+	return scope
+}
+
+func (s *OpenAIGatewayService) codexSessionAccountScopeWithError(ctx context.Context, account *Account, enroll bool) (string, error) {
 	if account == nil || !account.IsOpenAIOAuthLike() || account.GetCodexFingerprintMode() != codexFingerprintSession {
-		return ""
+		return "", nil
 	}
 	source, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil || source == nil {
-		return ""
+		return "", err
 	}
 	if enroll {
 		enabled, _, _, err := CodexDailySessionPolicy(source)
 		if err != nil || !enabled {
-			return ""
+			return "", err
 		}
 	}
-	return CodexDailySessionScope(source)
+	return CodexDailySessionScope(source), nil
 }
 
 func codexAffinityError(message string) error {
@@ -132,6 +185,8 @@ func (s *OpenAIGatewayService) selectCodexSessionAccount(ctx context.Context, re
 	if state == nil || NormalizeOpenAICompatiblePlatform(req.Platform) != PlatformOpenAI || req.RequiredImageCapability != "" {
 		return nil, decision, false, nil
 	}
+	state.openAI.Store(true)
+	state.resetPrevious.Store(false)
 	enroll := s.settingService != nil && s.settingService.IsCodexSessionAffinityEnabled(req.GroupID)
 	pool := s.codexDailySessionPool
 	if pool == nil {
@@ -147,7 +202,9 @@ func (s *OpenAIGatewayService) selectCodexSessionAccount(ctx context.Context, re
 		}
 		return nil, decision, false, nil
 	}
-	owner, err := pool.findSessionOwner(ctx, repo, state.binding)
+	// Mutable ownership must be read across replicas; the immutable daily slot
+	// cache remains independent and unchanged.
+	owner, err := repo.FindSessionOwner(ctx, state.binding)
 	if err != nil {
 		return nil, decision, true, fmt.Errorf("%w: read session owner: %w", ErrCodexSessionAffinity, err)
 	}
@@ -191,52 +248,10 @@ func (s *OpenAIGatewayService) selectCodexSessionAccount(ctx context.Context, re
 			return nil, decision, true, err
 		}
 	}
-	if owner != nil && previousScope != "" && previousScope != owner.AccountScope {
-		return nil, decision, true, codexAffinityError("previous response belongs to a different credential")
-	}
 	if owner == nil && req.PreviousResponseID != "" {
 		return nil, decision, true, codexAffinityError("continuation credential is unknown; no new account was selected")
 	}
-	if owner == nil {
-		// A new root uses the existing load balancer, restricted before scoring
-		// and again after fresh-account validation. No sticky/previous escape.
-		newCtx := context.WithValue(ctx, codexSessionEnrollmentContextKey{}, true)
-		scheduler := s.getOpenAIAccountScheduler(ctx)
-		if scheduler == nil {
-			scheduler = &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
-		}
-		newReq := req
-		newReq.PreviousResponseID = ""
-		newReq.SessionHash = ""
-		newReq.PreserveStickyBinding = true
-		selection, selectedDecision, selectErr := scheduler.Select(newCtx, newReq)
-		if selectErr != nil || selection == nil || selection.Account == nil {
-			return selection, selectedDecision, true, selectErr
-		}
-		scope := s.codexSessionAccountScope(ctx, selection.Account, true)
-		if scope == "" {
-			releaseCodexSessionSelection(selection)
-			return nil, decision, true, codexAffinityError("selected credential no longer has daily session pooling enabled")
-		}
-		proposed := CodexSessionAccountOwner{AccountScope: scope, AccountID: selection.Account.ID}
-		owner, err = repo.ClaimSessionOwner(ctx, state.binding, proposed)
-		if err != nil || owner == nil {
-			releaseCodexSessionSelection(selection)
-			if err != nil {
-				return nil, decision, true, fmt.Errorf("%w: claim session owner: %w", ErrCodexSessionAffinity, err)
-			}
-			return nil, decision, true, codexAffinityError("claim returned no session owner")
-		}
-		pool.cacheSessionOwner(state.binding, *owner)
-		state.owner.Store(owner)
-		if *owner == proposed {
-			selectedDecision.Layer = "codex_session_new"
-			return selection, selectedDecision, true, nil
-		}
-		// Only the DB winner may forward, including concurrent first requests
-		// handled by different gateway instances.
-		releaseCodexSessionSelection(selection)
-	} else if recovered {
+	if owner != nil && recovered {
 		// Recovered history must also participate in the first-claim race.
 		claimed, claimErr := repo.ClaimSessionOwner(ctx, state.binding, *owner)
 		if claimErr != nil || claimed == nil {
@@ -249,18 +264,98 @@ func (s *OpenAIGatewayService) selectCodexSessionAccount(ctx context.Context, re
 			return nil, decision, true, codexAffinityError("session history conflicts with the established credential")
 		}
 		owner = claimed
-		pool.cacheSessionOwner(state.binding, *owner)
 	}
+	if owner != nil {
+		selection, ownerDecision, selectErr := s.selectCodexSessionOwner(ctx, state, req, owner, previousID, previousScope)
+		if selectErr != nil || selection != nil {
+			return selection, ownerDecision, true, selectErr
+		}
+		if req.PreviousResponseID != "" && !req.PreviousResponseCanMove {
+			return nil, decision, true, codexAffinityError("continuation credential is unavailable; full replayable input is required to change accounts")
+		}
+	}
+
+	// Only a failed admission (quota, disabled or incompatible account) reaches
+	// balancing. Concurrency returns a bounded wait above; metrics never escape.
+	newCtx := context.WithValue(ctx, codexSessionEnrollmentContextKey{}, true)
+	scheduler := s.getOpenAIAccountScheduler(ctx)
+	if scheduler == nil {
+		scheduler = &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
+	}
+	newReq := req
+	newReq.PreviousResponseID, newReq.SessionHash = "", ""
+	newReq.StickyAccountID = 0
+	newReq.PreserveStickyBinding = true
+	if owner != nil {
+		newReq.ExcludedIDs = maps.Clone(req.ExcludedIDs)
+		if newReq.ExcludedIDs == nil {
+			newReq.ExcludedIDs = make(map[int64]struct{})
+		}
+		newReq.ExcludedIDs[owner.AccountID] = struct{}{}
+	}
+	selection, selectedDecision, err := scheduler.Select(newCtx, newReq)
+	if err != nil {
+		return nil, decision, true, fmt.Errorf("%w: select replacement: %w", ErrCodexSessionAffinity, err)
+	}
+	if selection == nil || selection.Account == nil {
+		return nil, decision, true, codexAffinityError("no eligible session account")
+	}
+	scope := s.codexSessionAccountScope(ctx, selection.Account, true)
+	if scope == "" {
+		releaseCodexSessionSelection(selection)
+		return nil, decision, true, codexAffinityError("selected credential no longer has daily session pooling enabled")
+	}
+	proposed := CodexSessionAccountOwner{AccountScope: scope, AccountID: selection.Account.ID}
+	var claimed *CodexSessionAccountOwner
+	if owner == nil {
+		claimed, err = repo.ClaimSessionOwner(ctx, state.binding, proposed)
+		selectedDecision.Layer = "codex_session_new"
+	} else {
+		claimed, err = repo.MoveSessionOwner(ctx, state.binding, *owner, proposed)
+		selectedDecision.Layer = "codex_session_failover"
+	}
+	if err != nil || claimed == nil {
+		releaseCodexSessionSelection(selection)
+		if err != nil {
+			return nil, decision, true, fmt.Errorf("%w: update session owner: %w", ErrCodexSessionAffinity, err)
+		}
+		return nil, decision, true, codexAffinityError("update returned no session owner")
+	}
+	if claimed.AccountID == proposed.AccountID && claimed.AccountScope == proposed.AccountScope {
+		state.owner.Store(claimed)
+		state.resetPrevious.Store(req.PreviousResponseID != "" && owner != nil)
+		return selection, selectedDecision, true, nil
+	}
+	// A concurrent request already moved ownership. Release this candidate and
+	// admit the actual winner once; a stale request must never move it back.
+	releaseCodexSessionSelection(selection)
+	if req.PreviousResponseID != "" && owner != nil &&
+		(owner.AccountID != claimed.AccountID || owner.AccountScope != claimed.AccountScope) {
+		state.resetPrevious.Store(true)
+	}
+	selection, decision, err = s.selectCodexSessionOwner(ctx, state, req, claimed, previousID, previousScope)
+	if err == nil && selection == nil {
+		err = codexAffinityError("current session account is unavailable; retry this session later")
+	}
+	return selection, decision, true, err
+}
+
+func (s *OpenAIGatewayService) selectCodexSessionOwner(ctx context.Context, state *codexSessionAffinityState, req OpenAIAccountScheduleRequest, owner *CodexSessionAccountOwner, previousID int64, previousScope string) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	decision := OpenAIAccountScheduleDecision{Layer: "codex_session_owner"}
 	if previousScope != "" && previousScope != owner.AccountScope {
-		return nil, decision, true, codexAffinityError("previous response belongs to a different credential")
+		if !req.PreviousResponseCanMove {
+			return nil, decision, codexAffinityError("previous response belongs to a different credential")
+		}
+		state.resetPrevious.Store(true)
 	}
 	state.owner.Store(owner)
 	accountID := owner.AccountID
-	if previousID > 0 {
+	if previousID > 0 && previousScope == owner.AccountScope {
 		accountID = previousID
 	}
-	// Use existing sticky admission and bounded waiting, but never escape or
-	// delete the durable binding when the account is temporarily unavailable.
+	if accountID <= 0 {
+		return nil, decision, nil
+	}
 	strictReq := req
 	strictReq.SessionHash = state.binding
 	strictReq.StickyAccountID = accountID
@@ -269,20 +364,32 @@ func (s *OpenAIGatewayService) selectCodexSessionAccount(ctx context.Context, re
 	scheduler := &defaultOpenAIAccountScheduler{service: s}
 	selection, _, err := scheduler.selectBySessionHash(ctx, strictReq)
 	if err != nil {
-		return nil, decision, true, fmt.Errorf("%w: bound account admission: %w", ErrCodexSessionAffinity, err)
+		return nil, decision, fmt.Errorf("%w: bound account admission: %w", ErrCodexSessionAffinity, err)
 	}
 	if selection == nil || selection.Account == nil {
-		return nil, decision, true, codexAffinityError("bound account is temporarily unavailable; retry this session later")
+		return nil, decision, nil
 	}
-	if s.codexSessionAccountScope(ctx, selection.Account, false) != owner.AccountScope {
+	scope, err := s.codexSessionAccountScopeWithError(ctx, selection.Account, false)
+	if err != nil {
 		releaseCodexSessionSelection(selection)
-		return nil, decision, true, codexAffinityError("bound credential changed during selection")
+		return nil, decision, fmt.Errorf("%w: read credential scope: %w", ErrCodexSessionAffinity, err)
+	}
+	if scope != owner.AccountScope {
+		releaseCodexSessionSelection(selection)
+		return nil, decision, nil
 	}
 	decision.SelectedAccountID = selection.Account.ID
 	decision.SelectedAccountType = selection.Account.Type
 	decision.StickySessionHit = true
 	decision.StickyPreviousHit = previousID > 0 && selection.Account.ID == previousID
-	return selection, decision, true, nil
+	return selection, decision, nil
+}
+
+// CodexSessionMayResetPreviousResponse distinguishes known ownership changes
+// from an expired response cache entry on an otherwise unchanged account.
+func CodexSessionMayResetPreviousResponse(ctx context.Context) bool {
+	state, _ := ctx.Value(codexSessionAffinityContextKey{}).(*codexSessionAffinityState)
+	return state != nil && state.resetPrevious.Load()
 }
 
 func validateCodexSessionProjection(ctx context.Context, source *Account, root string) error {
