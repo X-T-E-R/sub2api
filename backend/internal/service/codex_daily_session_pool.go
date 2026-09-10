@@ -73,12 +73,17 @@ func resolveCodexDailySessionProjection(c *gin.Context, account *Account, p *cod
 	if resolver.ctx == nil {
 		return errors.New("codex daily session resolution requires request context")
 	}
+	if err := validateCodexSessionProjection(resolver.ctx, source, p.originalSession); err != nil {
+		return err
+	}
 	session, err := gateway.codexDailySessionPool.resolve(resolver.ctx, namespace, getAPIKeyIDFromContext(c), p.originalSession, source)
 	if err != nil {
 		return fmt.Errorf("resolve Codex daily session: %w", err)
 	}
 	if session != "" {
 		p.values["session"] = session
+	} else if CodexSessionAffinityActive(resolver.ctx) {
+		return codexAffinityError("bound session has no daily allocation and pooling is disabled")
 	}
 	return nil
 }
@@ -117,7 +122,7 @@ func codexPoolDigest(value string) string {
 
 func (s *CodexDailySessionPool) resolve(ctx context.Context, namespace string, apiKeyID int64, root string, account *Account) (string, error) {
 	scope := codexPoolDigest("codex-daily-account:v1:" + namespace)
-	binding := codexPoolDigest(fmt.Sprintf("codex-daily-root:v1:%d:%s", apiKeyID, root))
+	binding := codexSessionBindingKey(apiKeyID, root)
 	key := scope + ":" + binding
 	if s.cache != nil {
 		if value, ok := s.cache.Get(key); ok {

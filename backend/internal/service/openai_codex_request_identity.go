@@ -169,7 +169,7 @@ func resolveCodexRequestIdentity(account, source *Account, apiKeyID int64, heade
 		return scopeCodexAccountIdentityValue(source, apiKeyID, kind, raw)
 	}
 	p := &codexRequestIdentity{accountID: account.ID, values: make(map[string]string), lifecycle: make(map[string]any), scoped: codexAccountIdentityNamespace(source) != "", omitted: omitted, canonical: bodyMetadata != nil}
-	p.originalSession = original["session"]
+	p.originalSession = codexOriginalSessionID(headers, body)
 	if bodyMetadata != nil {
 		p.memoryRequest = bodyMetadata["request_kind"] == "memory"
 	} else {

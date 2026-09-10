@@ -25,11 +25,14 @@ const {
   getStreamTimeoutSettings,
   getRectifierSettings,
   getBetaPolicySettings,
+  getCodexSessionAffinitySettings,
+  updateCodexSessionAffinitySettings,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,
   getOllamaCloudUsageSettings,
   updateOllamaCloudUsageSettings,
   getGroups,
+  getAllIncludingInactiveGroups,
   listProxies,
   getProviders,
   updateProvider,
@@ -62,6 +65,8 @@ const {
   getStreamTimeoutSettings: vi.fn(),
   getRectifierSettings: vi.fn(),
   getBetaPolicySettings: vi.fn(),
+  getCodexSessionAffinitySettings: vi.fn().mockResolvedValue({ group_ids: [] }),
+  updateCodexSessionAffinitySettings: vi.fn().mockImplementation(async (payload) => payload),
   getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({
     enabled: true,
     interval_minutes: 30,
@@ -74,6 +79,7 @@ const {
   }),
   updateOllamaCloudUsageSettings: vi.fn().mockImplementation(async (payload) => payload),
   getGroups: vi.fn(),
+  getAllIncludingInactiveGroups: vi.fn().mockResolvedValue([]),
   listProxies: vi.fn(),
   getProviders: vi.fn(),
   updateProvider: vi.fn(),
@@ -106,6 +112,8 @@ vi.mock("@/api", () => ({
       getStreamTimeoutSettings,
       getRectifierSettings,
       getBetaPolicySettings,
+      getCodexSessionAffinitySettings,
+      updateCodexSessionAffinitySettings,
     },
     accounts: {
       getUpstreamBillingProbeSettings,
@@ -115,6 +123,7 @@ vi.mock("@/api", () => ({
     },
     groups: {
       getAll: getGroups,
+      getAllIncludingInactive: getAllIncludingInactiveGroups,
     },
     proxies: {
       list: listProxies,

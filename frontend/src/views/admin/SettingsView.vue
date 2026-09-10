@@ -4917,6 +4917,7 @@
           </div>
 
           <ModelReasoningFloorSettings />
+          <CodexSessionAffinitySettings />
 
           <!-- Upstream Billing Probe Settings -->
           <div class="card" data-testid="upstream-billing-probe-settings">
@@ -8967,6 +8968,7 @@ import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
 import ModelReasoningFloorSettings from "@/views/admin/settings/ModelReasoningFloorSettings.vue";
+import CodexSessionAffinitySettings from "@/views/admin/settings/CodexSessionAffinitySettings.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {
   useStepUp,

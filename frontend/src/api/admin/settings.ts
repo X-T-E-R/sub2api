@@ -13,11 +13,13 @@ import type {
 import type {
   ModelReasoningFloorSettings,
 } from "@/types/modelReasoningFloor";
+import type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
 
 export type {
   ModelReasoningFloorRule,
   ModelReasoningFloorSettings,
 } from "@/types/modelReasoningFloor";
+export type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
 
 export interface DefaultSubscriptionSetting {
   group_id: number;
@@ -1505,6 +1507,25 @@ export async function updateModelReasoningFloorSettings(
   return data;
 }
 
+// ==================== Codex Session Affinity Settings ====================
+
+export async function getCodexSessionAffinitySettings(): Promise<CodexSessionAffinitySettings> {
+  const { data } = await apiClient.get<CodexSessionAffinitySettings>(
+    "/admin/settings/codex-session-affinity",
+  );
+  return data;
+}
+
+export async function updateCodexSessionAffinitySettings(
+  settings: CodexSessionAffinitySettings,
+): Promise<CodexSessionAffinitySettings> {
+  const { data } = await apiClient.put<CodexSessionAffinitySettings>(
+    "/admin/settings/codex-session-affinity",
+    settings,
+  );
+  return data;
+}
+
 // ==================== Beta Policy Settings ====================
 
 /**
@@ -1640,6 +1661,8 @@ export const settingsAPI = {
   updateRectifierSettings,
   getModelReasoningFloorSettings,
   updateModelReasoningFloorSettings,
+  getCodexSessionAffinitySettings,
+  updateCodexSessionAffinitySettings,
   getBetaPolicySettings,
   updateBetaPolicySettings,
   getWebSearchEmulationConfig,

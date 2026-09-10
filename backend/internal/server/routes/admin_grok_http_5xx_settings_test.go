@@ -26,11 +26,16 @@ func TestGrokOAuthHTTP5xxCooldownSettingsRoutesUseAdminAuth(t *testing.T) {
 
 	registerSettingsRoutes(admin, handlers)
 
-	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(method, "/api/v1/admin/settings/grok-oauth-http-5xx-cooldown", nil)
-		router.ServeHTTP(recorder, request)
-		require.Equal(t, http.StatusUnauthorized, recorder.Code, method)
+	for _, path := range []string{
+		"/api/v1/admin/settings/grok-oauth-http-5xx-cooldown",
+		"/api/v1/admin/settings/codex-session-affinity",
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodPut} {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(method, path, nil)
+			router.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusUnauthorized, recorder.Code, "%s %s", method, path)
+		}
 	}
-	require.Equal(t, 2, authCalls)
+	require.Equal(t, 4, authCalls)
 }

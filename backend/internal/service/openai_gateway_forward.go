@@ -875,6 +875,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if reason == "invalid_encrypted_content" && recoverInvalidEncryptedContent(attempt) {
 				continue
 			}
+			if CodexSessionAffinityActive(ctx) {
+				break
+			}
 			if retryable && attempt < maxAttempts {
 				backoff := s.openAIWSRetryBackoff(attempt)
 				if retryBudget > 0 && time.Since(retryStartedAt)+backoff > retryBudget {

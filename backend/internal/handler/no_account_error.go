@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -41,6 +42,12 @@ var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited
 func classifySelectionFailureError(err error, fallback noAccountErrorClassification) noAccountErrorClassification {
 	if err == nil {
 		return fallback
+	}
+	if errors.Is(err, service.ErrCodexSessionAffinity) {
+		return noAccountErrorClassification{
+			Status: http.StatusServiceUnavailable, ErrType: "codex_session_unavailable",
+			Message: "The credential bound to this Codex session is unavailable or conflicts with its continuation. No other account was used.",
+		}
 	}
 	match := selectionModelRateLimitedPattern.FindStringSubmatch(strings.ToLower(err.Error()))
 	if len(match) != 2 {

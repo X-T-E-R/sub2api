@@ -26,6 +26,14 @@ func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Con
 		}
 		source = resolved
 	}
+	if CodexSessionAffinityActive(ctx) {
+		if account == nil || account.GetCodexFingerprintMode() != codexFingerprintSession {
+			return nil, codexAffinityError("bound account identity mode changed")
+		}
+		if err := validateCodexSessionCredential(ctx, source); err != nil {
+			return nil, err
+		}
+	}
 	if c != nil {
 		c.Set(codexDailySessionResolverContextKey, codexDailySessionResolver{gateway: s, ctx: ctx})
 		c.Set(codexAccountIdentitySourceContextKey, source)

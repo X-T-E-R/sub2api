@@ -1194,6 +1194,9 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		}
 		account = credAccount
 	}
+	if err := validateCodexSessionCredential(ctx, account); err != nil {
+		return "", "", err
+	}
 	switch account.Type {
 	case AccountTypeOAuth:
 		if account.IsOpenAIAgentIdentity() {

@@ -1172,6 +1172,22 @@ export default {
           max: 'Max'
         }
       },
+      codexSessionAffinity: {
+        title: 'Codex session affinity',
+        description: 'Choose the groups where new explicit Codex root sessions can stay on one credential for the session lifetime.',
+        behaviorEnrollment: 'Selected groups enroll new explicit Codex root sessions into fixed credential affinity.',
+        behaviorCandidates: 'Only daily-session-pool-enabled OAuth/setup-token candidates are eligible. Busy requests wait for a bounded time; an unavailable credential returns an error and does not switch accounts automatically.',
+        behaviorRemoval: 'Removing a group stops new enrollment; existing bindings remain. Requests without an explicit original session use legacy routing.',
+        groups: 'Eligible groups',
+        groupsHint: 'Only OpenAI and composite groups can enroll new Codex sessions. Selected groups that become ineligible remain listed so you can remove them; existing session bindings are not changed.',
+        ineligible: 'not eligible for new enrollment',
+        selectedCount: '{count} selected',
+        noGroups: 'No groups available.',
+        save: 'Save affinity groups',
+        saved: 'Codex session affinity saved',
+        loadFailed: 'Failed to load Codex session affinity settings',
+        saveFailed: 'Failed to save Codex session affinity settings'
+      },
       wechatConnect: {
         title: 'WeChat Connect',
         description: 'Third-party login configuration for WeChat Open Platform or Official Account / Mini Program.',

@@ -139,11 +139,18 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
 		return "", errors.New("not an openai oauth account")
 	}
+	if err := validateCodexSessionCredential(ctx, account); err != nil {
+		return "", err
+	}
+	strictAffinity := CodexSessionAffinityActive(ctx)
 
 	cacheKey := OpenAITokenCacheKey(account)
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	// The shared cache is keyed by row ID, not credential identity. A strict
+	// session uses its validated account snapshot, so replacing a row cannot
+	// pair the old session projection with a new credential's cached token.
+	if p.tokenCache != nil && !strictAffinity {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
@@ -189,7 +196,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 				if waitErr != nil {
 					return "", waitErr
 				}
-				if strings.TrimSpace(token) != "" {
+				if strings.TrimSpace(token) != "" && !strictAffinity {
 					slog.Debug("openai_token_cache_hit_after_wait", "account_id", account.ID)
 					return token, nil
 				}
@@ -220,21 +227,35 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			if waitErr != nil {
 				return "", waitErr
 			}
-			if strings.TrimSpace(token) != "" {
+			if strings.TrimSpace(token) != "" && !strictAffinity {
 				slog.Debug("openai_token_cache_hit_after_wait", "account_id", account.ID)
 				return token, nil
 			}
 		}
 	}
 
+	if err := validateCodexSessionCredential(ctx, account); err != nil {
+		return "", err
+	}
 	accessToken := account.GetCredential("access_token")
 	if strings.TrimSpace(accessToken) == "" {
 		return "", errors.New("access_token not found in credentials")
+	}
+	if strictAffinity && !needsRefresh {
+		return accessToken, nil
 	}
 
 	// 3) Populate cache with TTL.
 	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
+		if strictAffinity {
+			if latestAccount == nil {
+				return "", codexAffinityError("refreshed credential snapshot is unavailable")
+			}
+			if err := validateCodexSessionCredential(ctx, latestAccount); err != nil {
+				return "", err
+			}
+		}
 		if isStale && latestAccount != nil {
 			slog.Debug("openai_token_version_stale_use_latest", "account_id", account.ID)
 			accessToken = latestAccount.GetOpenAIAccessToken()

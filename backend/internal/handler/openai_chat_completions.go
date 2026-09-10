@@ -144,6 +144,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
+	c.Request = c.Request.WithContext(service.WithCodexSessionAffinity(c.Request.Context(), c, body))
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
 
 	maxAccountSwitches := h.maxAccountSwitches
@@ -331,9 +332,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if c.Writer.Size() != writerSizeBeforeForward || (service.CodexSessionAffinityActive(c.Request.Context()) && !codexSessionSameAccountRetryAllowed(failoverErr)) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
-						h.handleFailoverExhausted(c, failoverErr, true)
+						h.handleFailoverExhausted(c, failoverErr, streamStarted || c.Writer.Written())
 						return
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
@@ -364,6 +365,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							}
 							continue
 						}
+					}
+					if service.CodexSessionAffinityActive(c.Request.Context()) {
+						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						return
 					}
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}

@@ -1166,6 +1166,22 @@ export default {
           max: 'Max（最高）'
         }
       },
+      codexSessionAffinity: {
+        title: 'Codex 会话凭据粘性',
+        description: '选择新建的显式 Codex 根会话固定到同一凭据的分组。',
+        behaviorEnrollment: '选中的分组会将新建的显式 Codex 根会话加入固定凭据粘性。',
+        behaviorCandidates: '仅每日会话池已启用的 OAuth/setup-token 候选凭据参与。忙碌请求会在有界时间内等待；凭据不可用时返回错误，不会自动切换账号。',
+        behaviorRemoval: '移除分组后停止新会话加入，已有绑定保持不变。缺少显式原始会话的请求继续使用旧路由。',
+        groups: '可加入的分组',
+        groupsHint: '只有 OpenAI 和 composite 分组可以加入新的 Codex 会话。已选但后来变为不适用的分组仍会保留在列表中，便于移除；移除不会改变已有会话绑定。',
+        ineligible: '不适用于新加入',
+        selectedCount: '已选择 {count} 个',
+        noGroups: '暂无可用分组。',
+        save: '保存粘性分组',
+        saved: 'Codex 会话凭据粘性已保存',
+        loadFailed: '加载 Codex 会话凭据粘性设置失败',
+        saveFailed: '保存 Codex 会话凭据粘性设置失败'
+      },
       wechatConnect: {
         title: '微信登录',
         description: '用于微信开放平台或公众号/小程序的第三方登录配置。',

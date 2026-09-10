@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -211,6 +212,10 @@ func cleanupExpiredHTTPResponseOwnerBindings(bindings map[string]openAIHTTPRespo
 }
 
 func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, groupID int64, responseID string) (int64, error) {
+	return s.getResponseAccount(ctx, groupID, responseID, false)
+}
+
+func (s *defaultOpenAIWSStateStore) getResponseAccount(ctx context.Context, groupID int64, responseID string, strict bool) (int64, error) {
 	id := normalizeOpenAIWSResponseID(responseID)
 	if id == "" {
 		return 0, nil
@@ -237,6 +242,9 @@ func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, grou
 	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
 	defer cancel()
 	accountID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, cacheKey)
+	if strict && err != nil && !errors.Is(err, ErrStickySessionNotFound) {
+		return 0, err
+	}
 	if err != nil || accountID <= 0 {
 		// 缓存读取失败不阻断主流程，按未命中降级。
 		return 0, nil

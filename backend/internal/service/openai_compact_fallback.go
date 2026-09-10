@@ -243,6 +243,14 @@ func (s *OpenAIGatewayService) prepareOpenAICompactFallbackRetry(
 	upstreamBody []byte,
 	alreadyRetried bool,
 ) ([]byte, string, bool) {
+	if c != nil && c.Request != nil && CodexSessionAffinityActive(c.Request.Context()) {
+		// A bare failed shell does not establish that generation was rejected.
+		if (statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound) ||
+			(strings.TrimSpace(upstreamMsg) == "" && extractUpstreamErrorCode(upstreamBody) == "" &&
+				gjson.GetBytes(upstreamBody, "response.error.code").String() == "") {
+			return currentBody, "", false
+		}
+	}
 	if alreadyRetried || !isExplicitOpenAICompactRequest(c, currentBody) ||
 		!isOpenAICompactModelFailure(statusCode, upstreamMsg, upstreamBody) {
 		return currentBody, "", false

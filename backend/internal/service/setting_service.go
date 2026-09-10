@@ -132,6 +132,8 @@ type SettingService struct {
 	openAICodexVersionSF        singleflight.Group
 	modelReasoningFloorCache    atomic.Value // ModelReasoningFloorSettings; no request-path SQL
 	modelReasoningFloorMu       sync.Mutex   // serialize persistent updates and their snapshots
+	codexSessionAffinityCache   atomic.Value // CodexSessionAffinitySettings; no request-path SQL
+	codexSessionAffinityMu      sync.Mutex   // serialize persistent updates and their snapshots
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group
 
@@ -285,10 +287,14 @@ const (
 
 // NewSettingService 创建系统设置服务实例
 func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *SettingService {
-	return &SettingService{
+	svc := &SettingService{
 		settingRepo: settingRepo,
 		cfg:         cfg,
 	}
+	// Keep the request-path getter deterministic before the startup warm-up has
+	// completed. Persistent settings are loaded by ProvideSettingService.
+	svc.codexSessionAffinityCache.Store(CodexSessionAffinitySettings{GroupIDs: []int64{}})
+	return svc
 }
 
 // SetDefaultSubscriptionGroupReader injects an optional group reader for default subscription validation.
