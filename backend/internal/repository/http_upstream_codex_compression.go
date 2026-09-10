@@ -37,7 +37,7 @@ func (t *codexRequestCompressionTransport) RoundTrip(req *http.Request) (*http.R
 	}
 	// RoundTripper owns the input body even when preparation fails. Keep the
 	// caller's JSON headers/GetBody intact for protocol repair and HTTP retries.
-	defer req.Body.Close()
+	defer func() { _ = req.Body.Close() }()
 	if err := req.Context().Err(); err != nil {
 		return nil, err
 	}

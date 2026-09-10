@@ -65,7 +65,7 @@ func TestCodexRequestCompressionRoundTrip(t *testing.T) {
 	require.Equal(t, int64(len(body)), req.ContentLength)
 	original, err := req.GetBody()
 	require.NoError(t, err)
-	defer original.Close()
+	defer func() { _ = original.Close() }()
 	originalBody, err := io.ReadAll(original)
 	require.NoError(t, err)
 	require.Equal(t, body, originalBody)
@@ -222,7 +222,8 @@ func TestHTTPUpstreamDoCompressesCodexRequestsOnWire(t *testing.T) {
 	localURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	localTransport := server.Client().Transport
-	svc := NewHTTPUpstream(nil).(*httpUpstreamService)
+	svc, ok := NewHTTPUpstream(nil).(*httpUpstreamService)
+	require.True(t, ok)
 	const accountID int64 = 4001
 	profile := service.HTTPUpstreamProfileOpenAI
 	mode := svc.resolveProtocolMode(profile, directProxyKey, nil)
