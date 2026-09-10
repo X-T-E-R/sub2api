@@ -150,7 +150,11 @@ const controlsDisabled = computed(
   () => loading.value || saving.value || loadError.value || !loaded.value,
 );
 
-const groupOptions = computed<AdminGroup[]>(() => {
+type GroupOption = Pick<AdminGroup, "id" | "name" | "status"> & {
+  platform: AdminGroup["platform"] | "unknown";
+};
+
+const groupOptions = computed<GroupOption[]>(() => {
   const eligible = groups.value.filter(isEligibleGroup);
   const eligibleIDs = new Set(eligible.map((group) => group.id));
   const selectedIneligible = groups.value.filter(
@@ -159,19 +163,16 @@ const groupOptions = computed<AdminGroup[]>(() => {
   const known = new Set(groups.value.map((group) => group.id));
   const missing = form.group_ids
     .filter((id) => !known.has(id))
-    .map(
-      (id) =>
-        ({
-          id,
-          name: `#${id}`,
-          platform: "unknown",
-          status: "inactive",
-        }) as AdminGroup,
-    );
+    .map<GroupOption>((id) => ({
+      id,
+      name: `#${id}`,
+      platform: "unknown",
+      status: "inactive",
+    }));
   return [...eligible, ...selectedIneligible, ...missing];
 });
 
-function isEligibleGroup(group: AdminGroup): boolean {
+function isEligibleGroup(group: GroupOption): boolean {
   return group.platform === "openai" || group.platform === "composite";
 }
 
