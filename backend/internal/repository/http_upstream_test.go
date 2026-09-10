@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1021,6 +1022,74 @@ func (s *HTTPUpstreamSuite) TestIdleTTLDoesNotEvictActive() {
 	_, _ = svc.getOrCreateClient("", 2, 1)
 
 	require.True(s.T(), hasEntry(svc, entry1), "有活跃请求时不应回收")
+}
+
+func (s *HTTPUpstreamSuite) TestResetIdleConnectionPoolIsResponseTokenBound() {
+	server := newLocalTestServer(s.T(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	s.T().Cleanup(server.Close)
+
+	svc := s.newService()
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(s.T(), err)
+	resp, err := svc.Do(req, "", 101, 1)
+	require.NoError(s.T(), err)
+	token, ok := service.HTTPUpstreamPoolEntryTokenFromResponse(resp)
+	require.True(s.T(), ok)
+
+	var resetter service.HTTPUpstreamPoolReset = svc
+	require.True(s.T(), resetter.ResetIdleConnectionPool(token, time.Millisecond), "reset should remove the entry while preserving the active response")
+	require.Empty(s.T(), svc.clients)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), "ok", string(body), "reset must not interrupt the active response body")
+	require.NoError(s.T(), resp.Body.Close())
+	require.False(s.T(), resetter.ResetIdleConnectionPool(token, time.Millisecond), "the old token must not reset a replacement")
+}
+
+func (s *HTTPUpstreamSuite) TestResetIdleConnectionPoolRejectsStaleGeneration() {
+	svc := s.newService()
+	entry1 := mustGetOrCreateClient(s.T(), svc, "", 102, 1)
+	token := service.HTTPUpstreamPoolEntryToken{CacheKey: entry1.cacheKey, Generation: entry1.generation}
+
+	svc.mu.Lock()
+	svc.removeClientLocked(entry1.cacheKey, entry1)
+	svc.mu.Unlock()
+	entry2 := mustGetOrCreateClient(s.T(), svc, "", 102, 1)
+	require.NotEqual(s.T(), entry1.generation, entry2.generation)
+
+	var resetter service.HTTPUpstreamPoolReset = svc
+	require.False(s.T(), resetter.ResetIdleConnectionPool(token, time.Millisecond))
+	require.True(s.T(), hasEntry(svc, entry2), "stale reset must not remove replacement entry")
+}
+
+func (s *HTTPUpstreamSuite) TestResetIdleConnectionPoolSingleFlightAndCooldown() {
+	svc := s.newService()
+	entry := mustGetOrCreateClient(s.T(), svc, "", 103, 1)
+	token := service.HTTPUpstreamPoolEntryToken{CacheKey: entry.cacheKey, Generation: entry.generation}
+	var resetter service.HTTPUpstreamPoolReset = svc
+
+	const callers = 16
+	results := make(chan bool, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			results <- resetter.ResetIdleConnectionPool(token, time.Minute)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var resetCount int
+	for result := range results {
+		if result {
+			resetCount++
+		}
+	}
+	require.Equal(s.T(), 1, resetCount)
+	require.Empty(s.T(), svc.clients)
 }
 
 // TestHTTPUpstreamSuite 运行测试套件

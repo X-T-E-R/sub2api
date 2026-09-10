@@ -245,6 +245,30 @@ export interface OpsOpenAITokenStatsParams {
   top_n?: number
 }
 
+export interface OpsPoolResetAccountSummary {
+  account_id: number
+  triggered: number
+  suppressed: number
+  last_reset_at?: string | null
+}
+
+export interface OpsPoolResetProtocolSummary {
+  protocol: string
+  triggered: number
+  suppressed: number
+  last_reset_at?: string | null
+}
+
+export interface OpsPoolResetStatsResponse {
+  triggered: number
+  suppressed: number
+  last_reset_at?: string | null
+  by_account: OpsPoolResetAccountSummary[]
+  by_protocol: OpsPoolResetProtocolSummary[]
+  persistence: string
+  reset_on_restart: boolean
+}
+
 export interface OpsSystemMetricsSnapshot {
   id: number
   created_at: string
@@ -1081,6 +1105,15 @@ export async function getOpenAITokenStats(
   return data
 }
 
+export async function getPoolResetStats(
+  options: OpsRequestOptions = {}
+): Promise<OpsPoolResetStatsResponse> {
+  const { data } = await apiClient.get<OpsPoolResetStatsResponse>('/admin/ops/dashboard/pool-reset-stats', {
+    signal: options.signal
+  })
+  return data
+}
+
 export type OpsErrorListView = 'errors' | 'excluded' | 'all'
 
 export type OpsErrorListQueryParams = {
@@ -1315,6 +1348,7 @@ export const opsAPI = {
   getErrorTrend,
   getErrorDistribution,
   getOpenAITokenStats,
+  getPoolResetStats,
   getConcurrencyStats,
   getUserConcurrencyStats,
   getAccountAvailabilityStats,

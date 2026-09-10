@@ -253,6 +253,9 @@ gateway:
   # - account_proxy: Isolate by account+proxy combination (default, finest granularity)
   # - account_proxy: 按账户+代理组合隔离（默认，最细粒度）
   connection_pool_isolation: "account_proxy"
+  # Reset only idle OpenAI OAuth connections after a pre-output capacity shed.
+  reset_openai_pool_on_capacity_shed: true
+  openai_pool_reset_cooldown_seconds: 10
   # Force Codex CLI mode: treat all /openai/v1/responses requests as Codex CLI.
   # 强制按 Codex CLI 处理 /openai/v1/responses 请求（用于网关未透传/改写 User-Agent 的兜底）。
   #

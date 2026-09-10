@@ -571,6 +571,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						}
 					}
 					if shouldFailover {
+						s.resetOpenAIUpstreamPoolOnCapacityShed(c, account, resp, dataBytes)
 						sawFailedEvent = true
 						streamEarlyErr = s.newOpenAIStreamFailoverErrorWithModel(c, account, false, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
 						return

@@ -173,6 +173,22 @@ export default {
           requestsWithFirstToken: 'Requests With First Token'
         }
       },
+      poolResetStats: {
+        title: 'OpenAI Connection Pool Resets',
+        description: 'Capacity-shed reset decisions from the current process.',
+        triggered: 'Triggered',
+        suppressed: 'Suppressed',
+        lastReset: 'Last reset',
+        never: 'No reset yet',
+        byAccount: 'By account',
+        byProtocol: 'By protocol',
+        account: 'Account',
+        triggeredShort: 'triggered',
+        suppressedShort: 'suppressed',
+        empty: 'No reset attempts recorded.',
+        failedToLoad: 'Failed to load connection pool reset stats',
+        persistence: 'Storage: {storage}; counters return to zero on restart.'
+      },
       fullscreen: {
         enter: 'Enter Fullscreen'
       },

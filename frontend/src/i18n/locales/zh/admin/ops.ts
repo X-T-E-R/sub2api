@@ -169,6 +169,22 @@ export default {
           requestsWithFirstToken: '首 Token 样本数'
         }
       },
+      poolResetStats: {
+        title: 'OpenAI 连接池重置',
+        description: '当前进程内的容量降载重置决策。',
+        triggered: '已触发',
+        suppressed: '已抑制',
+        lastReset: '最近重置',
+        never: '尚未重置',
+        byAccount: '按账号',
+        byProtocol: '按协议',
+        account: '账号',
+        triggeredShort: '触发',
+        suppressedShort: '抑制',
+        empty: '暂无重置记录。',
+        failedToLoad: '加载连接池重置统计失败',
+        persistence: '存储：{storage}；进程重启后计数归零。'
+      },
       customTimeRange: {
         startTime: '开始时间',
         endTime: '结束时间'

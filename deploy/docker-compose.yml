@@ -158,6 +158,16 @@ services:
       # =======================================================================
       # Gateway Upstream, Scheduling & Image Configuration
       # =======================================================================
+      - GATEWAY_RESET_OPENAI_POOL_ON_CAPACITY_SHED=${GATEWAY_RESET_OPENAI_POOL_ON_CAPACITY_SHED:-true}
+      - GATEWAY_OPENAI_POOL_RESET_COOLDOWN_SECONDS=${GATEWAY_OPENAI_POOL_RESET_COOLDOWN_SECONDS:-10}
+      - GATEWAY_CONNECTION_POOL_ISOLATION=${GATEWAY_CONNECTION_POOL_ISOLATION:-account_proxy}
+      - GATEWAY_LOG_UPSTREAM_ERROR_BODY=${GATEWAY_LOG_UPSTREAM_ERROR_BODY:-true}
+      - GATEWAY_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES=${GATEWAY_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES:-4096}
+      - OPS_CLEANUP_ERROR_LOG_RETENTION_DAYS=${OPS_CLEANUP_ERROR_LOG_RETENTION_DAYS:-7}
+      - LOG_ROTATION_MAX_SIZE_MB=${LOG_ROTATION_MAX_SIZE_MB:-50}
+      - LOG_ROTATION_MAX_BACKUPS=${LOG_ROTATION_MAX_BACKUPS:-5}
+      - LOG_ROTATION_MAX_AGE_DAYS=${LOG_ROTATION_MAX_AGE_DAYS:-7}
+      - LOG_ROTATION_COMPRESS=${LOG_ROTATION_COMPRESS:-true}
       # Gateway values come from Compose .env or the shell.
       # Fallbacks mirror Sub2API backend defaults so omitted values preserve behavior.
       - GATEWAY_FORCE_CODEX_CLI=${GATEWAY_FORCE_CODEX_CLI:-false}

@@ -126,6 +126,8 @@ type openAIHTTP2Settings struct {
 // 记录客户端实例及其元数据，用于连接池管理和淘汰策略
 type upstreamClientEntry struct {
 	client       *http.Client // HTTP 客户端实例
+	cacheKey     string       // exact map key used for generation-safe resets
+	generation   uint64       // monotonically increasing entry generation
 	proxyKey     string       // 代理标识（用于检测代理变更）
 	poolKey      string       // 连接池配置标识（用于检测配置变更）
 	protocolMode string       // 协议模式（default/openai_h1/openai_h2/openai_h1_fallback）
@@ -163,7 +165,17 @@ type httpUpstreamService struct {
 	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
+	poolGeneration       atomic.Uint64
+	poolResetMu          sync.Mutex
+	poolResets           map[string]poolResetState
 }
+
+type poolResetState struct {
+	inFlight    bool
+	cooldownEnd time.Time
+}
+
+const defaultPoolResetCooldown = time.Second
 
 // NewHTTPUpstream 创建通用 HTTP 上游服务
 // 使用配置中的连接池参数构建 Transport
@@ -175,8 +187,9 @@ type httpUpstreamService struct {
 //   - service.HTTPUpstream 接口实现
 func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
 	return &httpUpstreamService{
-		cfg:     cfg,
-		clients: make(map[string]*upstreamClientEntry),
+		cfg:        cfg,
+		clients:    make(map[string]*upstreamClientEntry),
+		poolResets: make(map[string]poolResetState),
 	}
 }
 
@@ -212,10 +225,20 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		return nil, err
 	}
 
+	// Attach the exact entry token to the request carried by the response. The
+	// token lets a later reset prove that this response still belongs to the
+	// same generation instead of deleting a replacement entry.
+	request := req
+	if req != nil {
+		request = req.WithContext(service.WithHTTPUpstreamPoolEntryToken(req.Context(), service.HTTPUpstreamPoolEntryToken{
+			CacheKey: entry.cacheKey, Generation: entry.generation,
+		}))
+	}
+
 	// 执行请求
-	client := httpClientForUpstreamRequest(entry.client, req)
+	client := httpClientForUpstreamRequest(entry.client, request)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := servertiming.Do(client, req)
+	resp, err := servertiming.Do(client, request)
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -318,9 +341,15 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 		return nil, err
 	}
 
-	client := httpClientForUpstreamRequest(entry.client, req)
+	request := req
+	if req != nil {
+		request = req.WithContext(service.WithHTTPUpstreamPoolEntryToken(req.Context(), service.HTTPUpstreamPoolEntryToken{
+			CacheKey: entry.cacheKey, Generation: entry.generation,
+		}))
+	}
+	client := httpClientForUpstreamRequest(entry.client, request)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := servertiming.Do(client, req)
+	resp, err := servertiming.Do(client, request)
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
@@ -339,12 +368,26 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 }
 
 func httpClientForUpstreamRequest(client *http.Client, req *http.Request) *http.Client {
-	if client == nil || req == nil || !service.HTTPUpstreamRedirectsDisabled(req.Context()) {
+	if client == nil || req == nil {
+		return client
+	}
+	disableRedirects := service.HTTPUpstreamRedirectsDisabled(req.Context())
+	compressRequest := isCodexRequestCompressionCandidate(req)
+	if !disableRedirects && !compressRequest {
 		return client
 	}
 	clone := *client
-	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	if disableRedirects {
+		clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	if compressRequest {
+		base := clone.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		clone.Transport = &codexRequestCompressionTransport{base: base}
 	}
 	return &clone
 }
@@ -611,9 +654,11 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	entry := &upstreamClientEntry{
-		client:   client,
-		proxyKey: proxyKey,
-		poolKey:  poolKey,
+		client:     client,
+		cacheKey:   cacheKey,
+		generation: s.poolGeneration.Add(1),
+		proxyKey:   proxyKey,
+		poolKey:    poolKey,
 	}
 	atomic.StoreInt64(&entry.lastUsed, nowUnix)
 	if markInFlight {
@@ -763,6 +808,8 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	}
 	entry := &upstreamClientEntry{
 		client:       client,
+		cacheKey:     cacheKey,
+		generation:   s.poolGeneration.Add(1),
 		proxyKey:     proxyKey,
 		poolKey:      poolKey,
 		protocolMode: protocolMode,
@@ -808,6 +855,54 @@ func (s *httpUpstreamService) removeClientLocked(key string, entry *upstreamClie
 		// 注意：这不会中断活跃连接
 		entry.client.CloseIdleConnections()
 	}
+}
+
+// ResetIdleConnectionPool removes the exact cached entry identified by token
+// and closes its idle transport connections. Active responses retain their
+// entry pointer and continue normally; CloseIdleConnections does not interrupt
+// those streams. The generation check makes a late reset harmless after the
+// same cache key has already been rebuilt. Calls for the same key are
+// single-flight and successful resets are cooldown protected.
+func (s *httpUpstreamService) ResetIdleConnectionPool(token service.HTTPUpstreamPoolEntryToken, cooldown time.Duration) bool {
+	if s == nil || token.CacheKey == "" || token.Generation == 0 {
+		return false
+	}
+	if cooldown <= 0 {
+		cooldown = defaultPoolResetCooldown
+	}
+
+	now := time.Now()
+	s.poolResetMu.Lock()
+	if s.poolResets == nil {
+		s.poolResets = make(map[string]poolResetState)
+	}
+	state := s.poolResets[token.CacheKey]
+	if state.inFlight || now.Before(state.cooldownEnd) {
+		s.poolResetMu.Unlock()
+		return false
+	}
+	state.inFlight = true
+	s.poolResets[token.CacheKey] = state
+	s.poolResetMu.Unlock()
+
+	reset := false
+	s.mu.Lock()
+	entry := s.clients[token.CacheKey]
+	if entry != nil && entry.generation == token.Generation {
+		s.removeClientLocked(token.CacheKey, entry)
+		reset = true
+	}
+	s.mu.Unlock()
+
+	s.poolResetMu.Lock()
+	state = s.poolResets[token.CacheKey]
+	state.inFlight = false
+	if reset {
+		state.cooldownEnd = now.Add(cooldown)
+	}
+	s.poolResets[token.CacheKey] = state
+	s.poolResetMu.Unlock()
+	return reset
 }
 
 // evictIdleLocked 淘汰空闲超时的客户端（需持有锁）

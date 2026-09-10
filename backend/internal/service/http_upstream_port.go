@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
@@ -29,4 +31,50 @@ type HTTPUpstream interface {
 // stronger connection contract.
 type HTTPUpstreamFreshConnection interface {
 	DoFresh(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error)
+}
+
+// HTTPUpstreamPoolEntryToken identifies the exact cached client entry used by
+// an upstream response. Callers should treat the fields as opaque and pass the
+// token back unchanged to HTTPUpstreamPoolReset.
+//
+// The cache key and generation are both required: a cache key can be reused
+// after an entry is evicted, so the generation prevents a late reset from
+// deleting a replacement entry.
+type HTTPUpstreamPoolEntryToken struct {
+	CacheKey   string
+	Generation uint64
+}
+
+type httpUpstreamPoolEntryTokenContextKey struct{}
+
+// WithHTTPUpstreamPoolEntryToken attaches a pool token to a request context.
+// Repository implementations use this when they return a cached-client
+// response; service callers can retrieve it from the response's Request.
+func WithHTTPUpstreamPoolEntryToken(ctx context.Context, token HTTPUpstreamPoolEntryToken) context.Context {
+	return context.WithValue(ctx, httpUpstreamPoolEntryTokenContextKey{}, token)
+}
+
+// HTTPUpstreamPoolEntryTokenFromRequest returns the token attached to req.
+func HTTPUpstreamPoolEntryTokenFromRequest(req *http.Request) (HTTPUpstreamPoolEntryToken, bool) {
+	if req == nil {
+		return HTTPUpstreamPoolEntryToken{}, false
+	}
+	token, ok := req.Context().Value(httpUpstreamPoolEntryTokenContextKey{}).(HTTPUpstreamPoolEntryToken)
+	return token, ok && token.CacheKey != "" && token.Generation != 0
+}
+
+// HTTPUpstreamPoolEntryTokenFromResponse returns the cached-entry token for a
+// response produced by Do or DoWithTLS. Fresh one-shot requests have no token.
+func HTTPUpstreamPoolEntryTokenFromResponse(resp *http.Response) (HTTPUpstreamPoolEntryToken, bool) {
+	if resp == nil {
+		return HTTPUpstreamPoolEntryToken{}, false
+	}
+	return HTTPUpstreamPoolEntryTokenFromRequest(resp.Request)
+}
+
+// HTTPUpstreamPoolReset is an optional capability for resetting one exact
+// cached pool entry. Implementations close idle transport connections; active
+// response streams remain untouched while their old entry drains.
+type HTTPUpstreamPoolReset interface {
+	ResetIdleConnectionPool(token HTTPUpstreamPoolEntryToken, cooldown time.Duration) bool
 }
