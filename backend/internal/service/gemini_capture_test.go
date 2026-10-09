@@ -22,6 +22,25 @@ type captureChunkReader struct {
 	size int
 }
 
+type captureEOFReader struct {
+	data []byte
+	off  int
+}
+
+func (r *captureEOFReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	if r.off == len(r.data) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r *captureEOFReader) Close() error { return nil }
+
 func (r *captureChunkReader) Read(p []byte) (int, error) {
 	if r.off >= len(r.data) {
 		return 0, io.EOF
@@ -186,6 +205,18 @@ func TestGeminiCapture_RedactsCredentialFieldsButRetainsThoughtSignature(t *test
 	if !capture.Activate(&Account{ID: 1, Platform: PlatformAntigravity, Type: "oauth"}, GeminiCaptureTargetModel, []byte(`{"thoughtSignature":"keep-me"}`)) {
 		t.Fatal("expected activation")
 	}
+	attempt := capture.BeginUpstreamAttempt(1, 1, []byte(`{"accessToken":"request-secret","thoughtSignature":"keep-me"}`))
+	if attempt == nil {
+		t.Fatal("expected upstream attempt")
+	}
+	raw := []byte("data: {\"accessToken\":\"upstream-secret\",\"thoughtSignature\":\"keep-me\"}\r\n")
+	resp := attempt.AttachResponse(&http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(raw)))})
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	converted := []byte("data: {\"refreshToken\":\"converted-secret\",\"thoughtSignature\":\"keep-me\"}\r\n")
+	capture.RecordConvertedWrite(converted, len(converted), nil)
 	capture.Finish(503)
 	entries, err := os.ReadDir(outputDir)
 	if err != nil || len(entries) != 1 {
@@ -198,6 +229,34 @@ func TestGeminiCapture_RedactsCredentialFieldsButRetainsThoughtSignature(t *test
 	}
 	if strings.Contains(string(stored), "do-not-store") || !strings.Contains(string(stored), "keep-me") || !strings.Contains(string(stored), "[REDACTED]") {
 		t.Fatalf("credential redaction/signature retention failed: %s", stored)
+	}
+	upstream, err := os.ReadFile(filepath.Join(artifactDir, "attempts", "001", "upstream.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	convertedStored, err := os.ReadFile(filepath.Join(artifactDir, "converted.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestStored, err := os.ReadFile(filepath.Join(artifactDir, "attempts", "001", "request.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"request": requestStored, "upstream": upstream, "converted": convertedStored} {
+		if strings.Contains(string(data), "upstream-secret") || strings.Contains(string(data), "converted-secret") || strings.Contains(string(data), "request-secret") || !strings.Contains(string(data), "[REDACTED]") || !strings.Contains(string(data), "keep-me") {
+			t.Fatalf("%s credential redaction/signature retention failed: %s", name, data)
+		}
+	}
+	manifestBody, err := os.ReadFile(filepath.Join(artifactDir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest geminiCaptureManifest
+	if err := json.Unmarshal(manifestBody, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Incomplete || len(manifest.RedactedFields) == 0 {
+		t.Fatalf("redaction must be explicit and incomplete: %+v", manifest)
 	}
 }
 

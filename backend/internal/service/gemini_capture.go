@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -25,13 +27,17 @@ const (
 	// incident tool, not a general body logging switch.
 	GeminiCaptureTargetModel = "gemini-3.8-flash"
 
-	geminiCaptureSchemaVersion = 1
-	geminiCaptureLeaseEnv      = "GATEWAY_GEMINI_CAPTURE_LEASE_FILE"
-	geminiCaptureLeaseMaxBytes = 64 * 1024
-	geminiCaptureMaxBytes      = 64 << 20
-	geminiCaptureQueueBytes    = 4 << 20
-	geminiCaptureQueueDepth    = 256
-	geminiCaptureLeasePoll     = 250 * time.Millisecond
+	geminiCaptureSchemaVersion   = 1
+	geminiCaptureLeaseEnv        = "GATEWAY_GEMINI_CAPTURE_LEASE_FILE"
+	geminiCaptureLeaseMaxBytes   = 64 * 1024
+	geminiCaptureMaxBytes        = 64 << 20
+	geminiCaptureQueueBytes      = 4 << 20
+	geminiCaptureDiskBytes       = 128 << 20
+	geminiCaptureParserMaxBytes  = 1 << 20
+	geminiCaptureQueueDepth      = 256
+	geminiCaptureLeasePoll       = 250 * time.Millisecond
+	geminiCaptureCloseTimeout    = 500 * time.Millisecond
+	geminiCaptureManifestTimeout = 500 * time.Millisecond
 )
 
 // GeminiCaptureLease is the only runtime control surface for the temporary
@@ -78,8 +84,8 @@ type GeminiCaptureRequest struct {
 	clientRequestID   string
 	startedAtTime     time.Time
 
-	inboundBody          []byte
 	inboundRedacted      []byte
+	inboundRedactionOK   bool
 	redactedFields       []string
 	inboundTruncated     bool
 	artifactDir          string
@@ -89,11 +95,13 @@ type GeminiCaptureRequest struct {
 	leaseRefreshInFlight bool
 
 	queue             *geminiCaptureQueue
+	sanitizers        map[string]*geminiCaptureStreamSanitizer
 	attempts          []*GeminiCaptureAttempt
 	nextSeq           int
 	terminals         map[string]struct{}
 	usage             map[string]any
 	parseBuffer       string
+	parserDisabled    bool
 	clientDisconnect  bool
 	ctxCanceled       bool
 	timeout           bool
@@ -138,6 +146,14 @@ type geminiCaptureChunk struct {
 	data   []byte
 }
 
+type geminiCaptureStreamSanitizer struct {
+	trace    *GeminiCaptureRequest
+	target   string
+	mu       sync.Mutex
+	pending  []byte
+	disabled bool
+}
+
 // geminiCaptureQueue makes all body/file writes asynchronous and bounded. A
 // full queue fails capture open rather than delaying a provider stream.
 type geminiCaptureQueue struct {
@@ -146,6 +162,7 @@ type geminiCaptureQueue struct {
 	closed       bool
 	drop         bool
 	pendingBytes int64
+	totalBytes   int64
 	incomplete   map[string]struct{}
 	files        map[string]*geminiCaptureFile
 	wg           sync.WaitGroup
@@ -164,6 +181,7 @@ func newGeminiCaptureQueue() *geminiCaptureQueue {
 
 func (q *geminiCaptureQueue) run() {
 	defer q.wg.Done()
+	defer q.finishFiles()
 	for item := range q.items {
 		q.mu.Lock()
 		q.pendingBytes -= int64(len(item.data))
@@ -185,6 +203,30 @@ func (q *geminiCaptureQueue) run() {
 	}
 }
 
+func (q *geminiCaptureQueue) finishFiles() {
+	q.mu.Lock()
+	type fileEntry struct {
+		target string
+		file   *geminiCaptureFile
+	}
+	files := make([]fileEntry, 0, len(q.files))
+	for target, file := range q.files {
+		files = append(files, fileEntry{target: target, file: file})
+	}
+	q.mu.Unlock()
+	for _, entry := range files {
+		if entry.file.file == nil {
+			continue
+		}
+		if err := entry.file.file.Sync(); err != nil {
+			q.markFileIncomplete(entry.target, "file_sync_failed")
+		}
+		if err := entry.file.file.Close(); err != nil {
+			q.markFileIncomplete(entry.target, "file_close_failed")
+		}
+	}
+}
+
 func (q *geminiCaptureQueue) addFile(target, path string, f *os.File) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -194,17 +236,34 @@ func (q *geminiCaptureQueue) addFile(target, path string, f *os.File) {
 func (q *geminiCaptureQueue) markIncomplete(reason string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.incomplete == nil {
+		q.incomplete = make(map[string]struct{})
+	}
 	q.incomplete[reason] = struct{}{}
 	q.drop = true
+}
+
+func (q *geminiCaptureQueue) markFileIncomplete(target, reason string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.incomplete == nil {
+		q.incomplete = make(map[string]struct{})
+	}
+	if file := q.files[target]; file != nil {
+		file.complete = false
+	}
+	q.incomplete[reason] = struct{}{}
 }
 
 func (q *geminiCaptureQueue) enqueue(target string, p []byte, expected int) bool {
 	if len(p) == 0 && expected == 0 {
 		return true
 	}
-	copyBytes := append([]byte(nil), p...)
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.incomplete == nil {
+		q.incomplete = make(map[string]struct{})
+	}
 	if q.closed || q.drop {
 		if expected > 0 {
 			q.incomplete["capture_disabled_or_overflow"] = struct{}{}
@@ -214,17 +273,25 @@ func (q *geminiCaptureQueue) enqueue(target string, p []byte, expected int) bool
 	if expected < 0 {
 		expected = 0
 	}
-	if q.pendingBytes+int64(len(copyBytes)) > geminiCaptureQueueBytes {
-		q.incomplete["queue_quota"] = struct{}{}
-		q.drop = true
-		return false
-	}
 	file := q.files[target]
 	if file == nil {
 		q.incomplete["unknown_file"] = struct{}{}
 		q.drop = true
 		return false
 	}
+	dataLen := int64(len(p))
+	if q.pendingBytes+dataLen > geminiCaptureQueueBytes {
+		q.incomplete["queue_quota"] = struct{}{}
+		q.drop = true
+		return false
+	}
+	if q.totalBytes+dataLen > geminiCaptureDiskBytes {
+		q.incomplete["disk_quota"] = struct{}{}
+		q.drop = true
+		file.complete = false
+		return false
+	}
+	copyBytes := append([]byte(nil), p...)
 	file.expected += int64(expected)
 	if expected > len(copyBytes) {
 		file.complete = false
@@ -234,7 +301,8 @@ func (q *geminiCaptureQueue) enqueue(target string, p []byte, expected int) bool
 	}
 	select {
 	case q.items <- geminiCaptureChunk{target: target, data: copyBytes}:
-		q.pendingBytes += int64(len(copyBytes))
+		q.pendingBytes += dataLen
+		q.totalBytes += dataLen
 		return true
 	default:
 		q.incomplete["queue_full"] = struct{}{}
@@ -253,15 +321,33 @@ func (q *geminiCaptureQueue) close() {
 	q.closed = true
 	close(q.items)
 	q.mu.Unlock()
-	q.wg.Wait()
 
+	done := make(chan struct{})
+	go func() {
+		q.wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(geminiCaptureCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		q.markIncomplete("close_timeout")
+		q.abortFiles()
+	}
+}
+
+func (q *geminiCaptureQueue) abortFiles() {
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	files := make([]*os.File, 0, len(q.files))
 	for _, file := range q.files {
 		if file.file != nil {
-			_ = file.file.Sync()
-			_ = file.file.Close()
+			files = append(files, file.file)
 		}
+	}
+	q.mu.Unlock()
+	for _, file := range files {
+		_ = file.Close()
 	}
 }
 
@@ -371,34 +457,36 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 	}
 	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
 	clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
-	capturedBody := append([]byte(nil), inboundBody...)
+	captureLen := len(inboundBody)
 	truncated := false
-	if len(capturedBody) > geminiCaptureMaxBytes {
-		capturedBody = capturedBody[:geminiCaptureMaxBytes]
+	if captureLen > geminiCaptureMaxBytes {
+		captureLen = geminiCaptureMaxBytes
 		truncated = true
 	}
-	redacted, fields := redactGeminiCaptureJSON(capturedBody)
+	capturedBody := make([]byte, captureLen)
+	copy(capturedBody, inboundBody[:captureLen])
+	redacted, fields, redactionOK := redactGeminiCaptureJSON(capturedBody)
 	return &GeminiCaptureRequest{
-		controller:       g,
-		ctx:              ctx,
-		candidate:        true,
-		captureEnabled:   true,
-		incompleteReason: make(map[string]struct{}),
-		terminals:        make(map[string]struct{}),
-		metadataUserID:   metadataUserID,
-		requestModel:     requestModel,
-		stream:           stream,
-		userID:           userID,
-		requestID:        strings.TrimSpace(requestID),
-		clientRequestID:  strings.TrimSpace(clientRequestID),
-		startedAtTime:    time.Now().UTC(),
-		inboundBody:      capturedBody,
-		inboundRedacted:  redacted,
-		redactedFields:   fields,
-		inboundTruncated: truncated,
-		lease:            lease,
-		leaseExpiresAt:   expiresAt,
-		lastLeaseCheck:   time.Now(),
+		controller:         g,
+		ctx:                ctx,
+		candidate:          true,
+		captureEnabled:     true,
+		incompleteReason:   make(map[string]struct{}),
+		terminals:          make(map[string]struct{}),
+		metadataUserID:     metadataUserID,
+		requestModel:       requestModel,
+		stream:             stream,
+		userID:             userID,
+		requestID:          strings.TrimSpace(requestID),
+		clientRequestID:    strings.TrimSpace(clientRequestID),
+		startedAtTime:      time.Now().UTC(),
+		inboundRedacted:    redacted,
+		inboundRedactionOK: redactionOK,
+		redactedFields:     fields,
+		inboundTruncated:   truncated,
+		lease:              lease,
+		leaseExpiresAt:     expiresAt,
+		lastLeaseCheck:     time.Now(),
 	}
 }
 
@@ -535,15 +623,36 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	if r.inboundTruncated {
 		r.addIncomplete("inbound_quota")
 	}
-	if !q.enqueue("inbound", r.inboundRedacted, len(r.inboundRedacted)) {
-		r.addIncomplete("inbound_write_failed")
+	if !r.inboundRedactionOK {
+		r.addIncomplete("inbound_redaction_parse_failed")
+		q.markIncomplete("inbound_redaction_parse_failed")
+	} else {
+		r.mu.Lock()
+		inboundRedacted := len(r.redactedFields) > 0
+		r.mu.Unlock()
+		if inboundRedacted {
+			r.addIncomplete("credential_redaction_applied")
+			q.markFileIncomplete("inbound", "credential_redaction_applied")
+		}
+		if !q.enqueue("inbound", r.inboundRedacted, len(r.inboundRedacted)) {
+			r.addIncomplete("inbound_write_failed")
+		}
 	}
-	redactedGemini, fields := redactGeminiCaptureJSON(geminiBody)
+	redactedGemini, fields, redactionOK := redactGeminiCaptureJSON(geminiBody)
 	r.mu.Lock()
 	r.redactedFields = appendUniqueStrings(r.redactedFields, fields...)
 	r.mu.Unlock()
-	if !q.enqueue("gemini_request", redactedGemini, len(redactedGemini)) {
-		r.addIncomplete("gemini_request_write_failed")
+	if !redactionOK {
+		r.addIncomplete("gemini_request_redaction_parse_failed")
+		q.markIncomplete("gemini_request_redaction_parse_failed")
+	} else {
+		if len(fields) > 0 {
+			r.addIncomplete("credential_redaction_applied")
+			q.markFileIncomplete("gemini_request", "credential_redaction_applied")
+		}
+		if !q.enqueue("gemini_request", redactedGemini, len(redactedGemini)) {
+			r.addIncomplete("gemini_request_write_failed")
+		}
 	}
 	return true
 }
@@ -600,13 +709,22 @@ func (r *GeminiCaptureRequest) BeginUpstreamAttempt(accountID, groupID int64, bo
 		trace: r, sequence: seq, accountID: accountID, groupID: groupID,
 		requestFile: requestTarget, responseFile: responseTarget,
 	}
-	redacted, fields := redactGeminiCaptureJSON(body)
+	redacted, fields, redactionOK := redactGeminiCaptureJSON(body)
 	r.mu.Lock()
 	r.redactedFields = appendUniqueStrings(r.redactedFields, fields...)
 	r.attempts = append(r.attempts, attempt)
 	r.mu.Unlock()
-	if !q.enqueue(requestTarget, redacted, len(redacted)) {
-		r.addIncomplete("attempt_request_write_failed")
+	if !redactionOK {
+		r.addIncomplete("attempt_request_redaction_parse_failed")
+		q.markFileIncomplete(requestTarget, "attempt_request_redaction_parse_failed")
+	} else {
+		if len(fields) > 0 {
+			r.addIncomplete("credential_redaction_applied")
+			q.markFileIncomplete(requestTarget, "credential_redaction_applied")
+		}
+		if !q.enqueue(requestTarget, redacted, len(redacted)) {
+			r.addIncomplete("attempt_request_write_failed")
+		}
 	}
 	return attempt
 }
@@ -645,7 +763,6 @@ func (a *GeminiCaptureAttempt) markRead(n int, err error, p []byte) {
 		a.trace.appendAttemptBytes(a, p[:n])
 	}
 	if err == io.EOF {
-		a.trace.flushCaptureParser()
 		a.mu.Lock()
 		a.responseEOF = true
 		a.mu.Unlock()
@@ -734,18 +851,210 @@ func (r *GeminiCaptureRequest) appendAttemptBytes(a *GeminiCaptureAttempt, p []b
 	if !r.leaseStillValid() {
 		return
 	}
+	if !r.appendSanitizedFile(a.responseFile, p) {
+		r.addIncomplete("upstream_response_write_failed")
+	}
+}
+
+func (r *GeminiCaptureRequest) appendSanitizedFile(target string, p []byte) bool {
+	if r == nil || len(p) == 0 {
+		return true
+	}
+	r.mu.Lock()
+	if r.sanitizers == nil {
+		r.sanitizers = make(map[string]*geminiCaptureStreamSanitizer)
+	}
+	sanitizer := r.sanitizers[target]
+	if sanitizer == nil {
+		sanitizer = &geminiCaptureStreamSanitizer{trace: r, target: target}
+		r.sanitizers[target] = sanitizer
+	}
+	r.mu.Unlock()
+	return sanitizer.append(p)
+}
+
+func (r *GeminiCaptureRequest) flushCaptureFile(target string) {
+	r.mu.Lock()
+	sanitizer := r.sanitizers[target]
+	r.mu.Unlock()
+	if sanitizer != nil {
+		sanitizer.flush()
+	}
+}
+
+func (r *GeminiCaptureRequest) flushAllCaptureFiles() {
+	r.mu.Lock()
+	sanitizers := make([]*geminiCaptureStreamSanitizer, 0, len(r.sanitizers))
+	for _, sanitizer := range r.sanitizers {
+		sanitizers = append(sanitizers, sanitizer)
+	}
+	r.mu.Unlock()
+	for _, sanitizer := range sanitizers {
+		sanitizer.flush()
+	}
+}
+
+func (s *geminiCaptureStreamSanitizer) append(p []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.disabled {
+		return false
+	}
+	if len(s.pending)+len(p) > geminiCaptureParserMaxBytes {
+		s.disabled = true
+		s.pending = nil
+		s.trace.markCaptureFileIncomplete(s.target, "parser_quota")
+		return false
+	}
+	s.pending = append(s.pending, p...)
+	for {
+		idx := bytes.IndexByte(s.pending, '\n')
+		if idx < 0 {
+			break
+		}
+		line := append([]byte(nil), s.pending[:idx+1]...)
+		s.pending = s.pending[idx+1:]
+		if !s.emit(line) {
+			s.disabled = true
+			s.pending = nil
+			return false
+		}
+	}
+	return true
+}
+
+func (s *geminiCaptureStreamSanitizer) flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.disabled || len(s.pending) == 0 {
+		return
+	}
+	line := append([]byte(nil), s.pending...)
+	s.pending = nil
+	if !s.emit(line) {
+		s.disabled = true
+	}
+}
+
+func (s *geminiCaptureStreamSanitizer) emit(line []byte) bool {
+	redacted, fields, changed, safe := redactGeminiCaptureLine(line)
+	if !safe {
+		s.trace.markCaptureFileIncomplete(s.target, "credential_redaction_parse_failed")
+		return false
+	}
+	if changed {
+		s.trace.addRedactedFields(fields...)
+		reason := "credential_redaction_applied"
+		parseFailed := false
+		for _, field := range fields {
+			if field == "[redaction_parse_failed]" {
+				reason = "credential_redaction_parse_failed"
+				parseFailed = true
+				break
+			}
+		}
+		s.trace.markCaptureFileIncomplete(s.target, reason)
+		if parseFailed {
+			s.disabled = true
+		}
+	}
+	s.trace.mu.Lock()
+	q := s.trace.queue
+	s.trace.mu.Unlock()
+	return q != nil && q.enqueue(s.target, redacted, len(redacted))
+}
+
+func (r *GeminiCaptureRequest) addRedactedFields(fields ...string) {
+	if len(fields) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.redactedFields = appendUniqueStrings(r.redactedFields, fields...)
+	r.mu.Unlock()
+}
+
+func (r *GeminiCaptureRequest) markCaptureFileIncomplete(target, reason string) {
+	r.addIncomplete(reason)
 	r.mu.Lock()
 	q := r.queue
 	r.mu.Unlock()
-	if q == nil || !q.enqueue(a.responseFile, p, len(p)) {
-		r.addIncomplete("upstream_response_write_failed")
+	if q != nil {
+		q.markFileIncomplete(target, reason)
 	}
+}
+
+func redactGeminiCaptureLine(line []byte) ([]byte, []string, bool, bool) {
+	ending := []byte{}
+	body := line
+	if bytes.HasSuffix(body, []byte("\r\n")) {
+		ending = []byte("\r\n")
+		body = body[:len(body)-2]
+	} else if len(body) > 0 && (body[len(body)-1] == '\n' || body[len(body)-1] == '\r') {
+		ending = body[len(body)-1:]
+		body = body[:len(body)-1]
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" || strings.HasPrefix(trimmed, ":") || trimmed == "[DONE]" || strings.HasPrefix(trimmed, "event:") || strings.HasPrefix(trimmed, "id:") || strings.HasPrefix(trimmed, "retry:") {
+		return append([]byte(nil), line...), nil, false, true
+	}
+	if strings.HasPrefix(trimmed, "data:") {
+		leading := len(body) - len(strings.TrimLeftFunc(string(body), unicode.IsSpace))
+		dataStart := leading + len("data:")
+		rawPayload := body[dataStart:]
+		left := len(rawPayload) - len(strings.TrimLeftFunc(string(rawPayload), unicode.IsSpace))
+		trailing := len(rawPayload) - len(strings.TrimRightFunc(string(rawPayload), unicode.IsSpace))
+		payloadEnd := len(rawPayload) - trailing
+		payload := rawPayload[left:payloadEnd]
+		redacted, fields, ok := redactGeminiCaptureJSON(payload)
+		if !ok {
+			if captureBytesLookCredentialLike(payload) {
+				return line, nil, false, false
+			}
+			return append([]byte(nil), line...), []string{"[redaction_parse_failed]"}, true, true
+		}
+		if len(fields) == 0 {
+			return append([]byte(nil), line...), nil, false, true
+		}
+		out := make([]byte, 0, len(body)+len(redacted)-len(payload)+len(ending))
+		out = append(out, body[:dataStart+left]...)
+		out = append(out, redacted...)
+		out = append(out, rawPayload[payloadEnd:]...)
+		out = append(out, ending...)
+		return out, fields, true, true
+	}
+	redacted, fields, ok := redactGeminiCaptureJSON(body)
+	if !ok {
+		if captureBytesLookCredentialLike(body) {
+			return line, nil, false, false
+		}
+		return append([]byte(nil), line...), []string{"[redaction_parse_failed]"}, true, true
+	}
+	if len(fields) == 0 {
+		return append([]byte(nil), line...), nil, false, true
+	}
+	return append(redacted, ending...), fields, true, true
+}
+
+func captureBytesLookCredentialLike(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, key := range []string{"\"authorization\"", "\"accesstoken\"", "\"access_token\"", "\"refreshtoken\"", "\"refresh_token\"", "\"token\"", "\"apikey\"", "\"api_key\"", "\"clientsecret\"", "\"client_secret\"", "\"password\"", "\"cookie\"", "\"credential\"", "\"privatekey\"", "\"private_key\"", "\"secret\""} {
+		if strings.Contains(lower, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // RecordConvertedWrite records the exact bytes actually handed to the client
 // writer, including a partial prefix when the writer reports an error.
 func (r *GeminiCaptureRequest) RecordConvertedWrite(p []byte, n int, err error) {
-	if r == nil || len(p) == 0 {
+	if r == nil {
+		return
+	}
+	if len(p) == 0 {
+		if err != nil || n != 0 {
+			r.addIncomplete("client_write_partial_or_failed")
+		}
 		return
 	}
 	if n < 0 {
@@ -758,10 +1067,9 @@ func (r *GeminiCaptureRequest) RecordConvertedWrite(p []byte, n int, err error) 
 		return
 	}
 	r.mu.Lock()
-	q := r.queue
 	r.convertedWritten = r.convertedWritten || n > 0
 	r.mu.Unlock()
-	if q == nil || !q.enqueue("converted", p[:n], len(p)) {
+	if !r.appendSanitizedFile("converted", p[:n]) {
 		r.addIncomplete("converted_write_failed")
 	}
 	if err != nil || n != len(p) {
@@ -945,6 +1253,7 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 	}
 
 	if activated {
+		r.flushAllCaptureFiles()
 		r.refreshLeaseNow()
 	}
 	r.mu.Lock()
@@ -973,18 +1282,37 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 		return
 	}
 	manifestPath := filepath.Join(artifactDir, "manifest.json")
-	manifestTmpPath := manifestPath + ".tmp"
-	if err := os.WriteFile(manifestTmpPath, append(manifestBytes, '\n'), 0600); err != nil {
+	if err := writeGeminiCaptureManifestBounded(manifestPath, append(manifestBytes, '\n')); err != nil {
 		r.addIncomplete("manifest_write_failed")
 		return
 	}
-	_ = os.Chmod(manifestTmpPath, 0600)
-	if err := os.Rename(manifestTmpPath, manifestPath); err != nil {
-		_ = os.Remove(manifestTmpPath)
-		r.addIncomplete("manifest_rename_failed")
-		return
+}
+
+func writeGeminiCaptureManifestBounded(path string, body []byte) error {
+	done := make(chan error, 1)
+	go func() {
+		tmpPath := path + ".tmp"
+		if err := os.WriteFile(tmpPath, body, 0600); err != nil {
+			done <- err
+			return
+		}
+		_ = os.Chmod(tmpPath, 0600)
+		if err := os.Rename(tmpPath, path); err != nil {
+			_ = os.Remove(tmpPath)
+			done <- err
+			return
+		}
+		_ = os.Chmod(path, 0600)
+		done <- nil
+	}()
+	timer := time.NewTimer(geminiCaptureManifestTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errors.New("manifest write timeout")
 	}
-	_ = os.Chmod(manifestPath, 0600)
 }
 
 func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
@@ -1160,6 +1488,17 @@ func (r *GeminiCaptureRequest) parseUpstreamChunk(p []byte) {
 	// chunks and keeps a carry buffer to avoid losing a JSON line split across
 	// network reads. The exact bytes remain in upstream.bin unchanged.
 	r.mu.Lock()
+	if r.parserDisabled {
+		r.mu.Unlock()
+		return
+	}
+	if len(r.parseBuffer)+len(p) > geminiCaptureParserMaxBytes {
+		r.parserDisabled = true
+		r.parseBuffer = ""
+		r.incompleteReason["parser_quota"] = struct{}{}
+		r.mu.Unlock()
+		return
+	}
 	combined := r.parseBuffer + string(p)
 	lines := strings.Split(strings.ReplaceAll(combined, "\r\n", "\n"), "\n")
 	r.parseBuffer = lines[len(lines)-1]
@@ -1244,6 +1583,10 @@ func (r *geminiCaptureReadCloser) Read(p []byte) (int, error) {
 		if n > 0 {
 			r.attempt.trace.parseUpstreamChunk(p[:n])
 		}
+		if err == io.EOF {
+			r.attempt.trace.flushCaptureParser()
+			r.attempt.trace.flushCaptureFile(r.attempt.responseFile)
+		}
 	}
 	return n, err
 }
@@ -1251,6 +1594,8 @@ func (r *geminiCaptureReadCloser) Read(p []byte) (int, error) {
 func (r *geminiCaptureReadCloser) Close() error {
 	if r.attempt != nil {
 		r.attempt.markClosed()
+		r.attempt.trace.flushCaptureParser()
+		r.attempt.trace.flushCaptureFile(r.attempt.responseFile)
 	}
 	return r.ReadCloser.Close()
 }
@@ -1344,24 +1689,24 @@ func sanitizeCaptureError(value string) string {
 	return value
 }
 
-func redactGeminiCaptureJSON(body []byte) ([]byte, []string) {
+func redactGeminiCaptureJSON(body []byte) ([]byte, []string, bool) {
 	if len(body) == 0 {
-		return nil, nil
+		return nil, nil, true
 	}
 	var value any
 	if json.Unmarshal(body, &value) != nil {
-		return append([]byte(nil), body...), nil
+		return nil, nil, false
 	}
 	fields := make([]string, 0)
 	redacted := redactGeminiCaptureValue(value, "", &fields)
 	if len(fields) == 0 {
-		return append([]byte(nil), body...), nil
+		return append([]byte(nil), body...), nil, true
 	}
 	result, err := json.Marshal(redacted)
 	if err != nil {
-		return append([]byte(nil), body...), nil
+		return nil, fields, false
 	}
-	return result, fields
+	return result, fields, true
 }
 
 func redactGeminiCaptureValue(value any, parent string, fields *[]string) any {
@@ -1392,11 +1737,12 @@ func parentPath(parent, key string) string {
 
 func isCredentialCaptureField(key string) bool {
 	lower := strings.ToLower(strings.TrimSpace(key))
-	if lower == "thoughtsignature" || lower == "thought_signature" {
+	normalized := strings.NewReplacer("_", "", "-", "", " ", "").Replace(lower)
+	if normalized == "thoughtsignature" || normalized == "opaque" || normalized == "opaquesignature" || normalized == "providersignature" {
 		return false
 	}
-	for _, needle := range []string{"authorization", "access_token", "refresh_token", "api_key", "apikey", "client_secret", "private_key", "password", "cookie", "credential", "secret"} {
-		if strings.Contains(lower, needle) {
+	for _, exact := range []string{"authorization", "auth", "bearer", "accesstoken", "refreshtoken", "idtoken", "token", "apikey", "apitoken", "clientsecret", "privatekey", "password", "cookie", "credential", "secret"} {
+		if normalized == exact || strings.HasSuffix(normalized, exact) && (exact == "token" || exact == "secret") {
 			return true
 		}
 	}
