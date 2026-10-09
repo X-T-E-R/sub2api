@@ -10,7 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
-func TestGeminiCapture_NativeGeminiForwardAllowsAPIKeyAccount(t *testing.T) {
+func TestGeminiCapture_NativeGeminiForwardActivatesOAuthAccount(t *testing.T) {
 	outputDir := t.TempDir()
 	leasePath := filepath.Join(t.TempDir(), "lease.json")
 	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
@@ -19,7 +19,7 @@ func TestGeminiCapture_NativeGeminiForwardAllowsAPIKeyAccount(t *testing.T) {
 	if capture == nil {
 		t.Fatal("expected exact capture candidate")
 	}
-	if !capture.Activate(&Account{ID: 69, Platform: PlatformAntigravity, Type: AccountTypeAPIKey}, GeminiCaptureTargetModel, []byte(`{"wrapped":true}`)) {
+	if !capture.Activate(&Account{ID: 69, Platform: PlatformAntigravity, Type: "oauth"}, GeminiCaptureTargetModel, []byte(`{"wrapped":true}`)) {
 		t.Fatal("native Gemini Forward path must activate capture for API-key-backed Antigravity accounts")
 	}
 	capture.Finish(200)

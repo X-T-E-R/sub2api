@@ -756,7 +756,7 @@ func (r *GeminiCaptureRequest) MarkAntigravitySelected(accountID int64) {
 // Activate records the transformed Gemini body after the final model is known.
 // It is intentionally callable only by the Antigravity Messages forwarding path.
 func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, geminiBody []byte) bool {
-	if r == nil || account == nil || account.Platform != PlatformAntigravity {
+	if r == nil || account == nil || account.Platform != PlatformAntigravity || account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
 		return false
 	}
 	modelMatched := finalModel == GeminiCaptureTargetModel
