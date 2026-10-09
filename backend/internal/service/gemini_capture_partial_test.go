@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,9 +14,34 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 )
 
-func TestGeminiCapture_ConvertedPartialWriteIsIncomplete(t *testing.T) {
+type partialNonStreamingWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (w *partialNonStreamingWriter) Header() http.Header { return w.header }
+
+func (w *partialNonStreamingWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *partialNonStreamingWriter) Write(p []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	n := len(p) / 2
+	if n == 0 && len(p) > 0 {
+		n = 1
+	}
+	_, _ = w.body.Write(p[:n])
+	return n, io.ErrShortWrite
+}
+
+func TestGeminiCapture_ConvertedNonStreamingTapMarksPartialWrite(t *testing.T) {
 	outputDir := t.TempDir()
 	leasePath := filepath.Join(t.TempDir(), "lease.json")
 	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
@@ -22,8 +50,16 @@ func TestGeminiCapture_ConvertedPartialWriteIsIncomplete(t *testing.T) {
 	if capture == nil || !capture.Activate(&Account{ID: 1, Platform: PlatformAntigravity, Type: "oauth"}, GeminiCaptureTargetModel, []byte(`{}`)) {
 		t.Fatal("expected active capture")
 	}
-	capture.RecordConvertedWrite([]byte("converted"), 3, errors.New("short write"))
-	capture.Finish(200)
+	partialWriter := &partialNonStreamingWriter{header: make(http.Header)}
+	c, _ := gin.CreateTestContext(partialWriter)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Request = c.Request.WithContext(WithGeminiCapture(c.Request.Context(), capture))
+	convertedBody := []byte(`{"ok":true}`)
+	writeClaudeNonStreamingResponse(c, convertedBody)
+	if c.Writer.Status() != http.StatusOK || partialWriter.header.Get("Content-Type") != "application/json" {
+		t.Fatalf("normal Gin status/header semantics changed: status=%d content_type=%q", c.Writer.Status(), partialWriter.header.Get("Content-Type"))
+	}
+	capture.Finish(c.Writer.Status())
 	entries, err := os.ReadDir(outputDir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("expected artifact: err=%v entries=%d", err, len(entries))
@@ -44,7 +80,8 @@ func TestGeminiCapture_ConvertedPartialWriteIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(converted) != "con" {
-		t.Fatalf("partial prefix mismatch: %q", converted)
+	wantPrefix := string(convertedBody[:len(convertedBody)/2])
+	if string(converted) != wantPrefix {
+		t.Fatalf("partial prefix mismatch: got=%q want=%q", converted, wantPrefix)
 	}
 }

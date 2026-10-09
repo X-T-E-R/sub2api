@@ -46,4 +46,4 @@ GATEWAY_GEMINI_CAPTURE_LEASE_FILE=/app/data/gemini-capture/lease.json
 
 只记录上述 body/bytes，不记录任何 HTTP request/response headers；Auth、cookie、API key、secret 等 JSON 字段替换为 `[REDACTED]` 并在 manifest 标明。provider `thoughtSignature`/其他 opaque 签名不是 auth token，会保留。单请求 inbound 截取上限为 64 MiB，异步写队列上限为 4 MiB；超过上限立即停止继续采集并标 `incomplete`。磁盘、权限或容量失败 fail-open，业务响应继续，不会伪称完整。
 
-取证消费完毕后由外部 controller 删除 artifact、删除 lease，并恢复/确认空的 `GATEWAY_GEMINI_CAPTURE_LEASE_FILE` 配置；本模块不执行部署、启停或消费动作。
+关闭/恢复时由外部 controller 独立 disarm（写 `enabled:false` 或移除 lease）并恢复/确认空的 `GATEWAY_GEMINI_CAPTURE_LEASE_FILE` 配置；私有 artifact 保留在原 output 目录，不随 disarm、配置恢复或服务启停自动删除。本模块不执行部署、启停或消费动作。

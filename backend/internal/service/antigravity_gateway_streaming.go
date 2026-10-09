@@ -103,6 +103,49 @@ func (cw *antigravityClientWriter) markDisconnected() {
 	logger.LegacyPrintf("service.antigravity_gateway", "Client disconnected during streaming (%s), continuing to drain upstream for billing", cw.prefix)
 }
 
+// geminiCaptureResponseWriter taps the bytes that Gin's normal Data renderer
+// actually hands to the underlying response writer. It delegates every other
+// ResponseWriter method unchanged, so status/content-type/header semantics stay
+// exactly on Gin's existing path.
+type geminiCaptureResponseWriter struct {
+	gin.ResponseWriter
+	capture *GeminiCaptureRequest
+}
+
+func (w *geminiCaptureResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	w.record(p, n, err)
+	return n, err
+}
+
+func (w *geminiCaptureResponseWriter) WriteString(value string) (int, error) {
+	n, err := w.ResponseWriter.WriteString(value)
+	w.record([]byte(value), n, err)
+	return n, err
+}
+
+func (w *geminiCaptureResponseWriter) record(p []byte, n int, err error) {
+	if w.capture == nil {
+		return
+	}
+	w.capture.RecordConvertedWrite(p, n, err)
+	if err != nil || n != len(p) {
+		w.capture.MarkClientDisconnect()
+	}
+}
+
+func writeClaudeNonStreamingResponse(c *gin.Context, body []byte) {
+	capture := GeminiCaptureFromContext(c.Request.Context())
+	if capture == nil {
+		c.Data(http.StatusOK, "application/json", body)
+		return
+	}
+	originalWriter := c.Writer
+	c.Writer = &geminiCaptureResponseWriter{ResponseWriter: originalWriter, capture: capture}
+	defer func() { c.Writer = originalWriter }()
+	c.Data(http.StatusOK, "application/json", body)
+}
+
 // handleStreamReadError 处理上游读取错误的通用逻辑。
 // 返回 (clientDisconnect, handled)：handled=true 表示错误已处理，调用方应返回已收集的 usage。
 func handleStreamReadError(err error, clientDisconnected bool, prefix string) (disconnect bool, handled bool) {
@@ -929,10 +972,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, errType, errMsg)
 	}
-	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
-		capture.RecordConvertedBody(claudeResp)
-	}
-	c.Data(http.StatusOK, "application/json", claudeResp)
+	writeClaudeNonStreamingResponse(c, claudeResp)
 	return streamRes, nil
 }
 

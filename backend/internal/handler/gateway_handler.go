@@ -168,8 +168,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
 	}
-	inboundBody := append([]byte(nil), body...)
-	body = parsedReq.Body.Bytes()
 	reqModel := parsedReq.Model
 	var geminiCapture *service.GeminiCaptureRequest
 	if h.geminiCapture != nil {
@@ -177,12 +175,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		if c.Request != nil && c.Request.URL != nil {
 			requestPath = c.Request.URL.Path
 		}
-		geminiCapture = h.geminiCapture.Begin(c.Request.Context(), requestPath, inboundBody, parsedReq.MetadataUserID, reqModel, parsedReq.Stream, subject.UserID)
+		// Begin performs the exact lease/path/model/user match before copying
+		// body, so capture-off and unrelated Messages requests do not allocate a
+		// second request-body buffer. body is still the pre-rewrite bytes here.
+		geminiCapture = h.geminiCapture.Begin(c.Request.Context(), requestPath, body, parsedReq.MetadataUserID, reqModel, parsedReq.Stream, subject.UserID)
 		if geminiCapture != nil {
 			c.Request = c.Request.WithContext(service.WithGeminiCapture(c.Request.Context(), geminiCapture))
 			defer func() { geminiCapture.Finish(c.Writer.Status()) }()
 		}
 	}
+	body = parsedReq.Body.Bytes()
 	reqStream := parsedReq.Stream
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
