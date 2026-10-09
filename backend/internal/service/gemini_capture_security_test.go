@@ -3,14 +3,32 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 func TestGeminiCapture_RedactionParseFailureIsFailClosed(t *testing.T) {
 	redacted, fields, ok := redactGeminiCaptureJSON([]byte(`{"accessToken":"must-not-fallback"`))
 	if ok || len(redacted) != 0 || len(fields) != 0 {
 		t.Fatalf("parse failure must not return raw fallback: redacted=%q fields=%v ok=%v", redacted, fields, ok)
+	}
+}
+
+func TestGeminiCapture_SSEControlAndMalformedCredentialLinesAreSafe(t *testing.T) {
+	for _, raw := range [][]byte{[]byte("data:   \r\n"), []byte("data: [DONE]\r\n"), []byte(":keepalive\r\n"), []byte("\r\n")} {
+		got, _, changed, safe := redactGeminiCaptureLine(raw)
+		if !safe || changed || string(got) != string(raw) {
+			t.Fatalf("SSE control line changed or failed: raw=%q got=%q changed=%v safe=%v", raw, got, changed, safe)
+		}
+	}
+	malformed := []byte("data: {\"access-token\":\"REVIEW_FAKE_AUTH\",\n")
+	got, _, _, safe := redactGeminiCaptureLine(malformed)
+	if safe && strings.Contains(string(got), "REVIEW_FAKE_AUTH") {
+		t.Fatalf("malformed credential escaped fail-closed path: %q", got)
 	}
 }
 
@@ -24,6 +42,18 @@ func TestGeminiCapture_CredentialFieldMatcherCoversTokenSpellings(t *testing.T) 
 		if isCredentialCaptureField(key) {
 			t.Fatalf("provider carrier must be retained: %q", key)
 		}
+	}
+}
+
+func TestGeminiCapture_CancelledManifestCannotLateWriteCompleteSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	task := &geminiCaptureManifestTask{path: path, body: []byte(`{"incomplete":false}`), cancelled: make(chan struct{}), done: make(chan error, 1)}
+	close(task.cancelled)
+	if err := writeGeminiCaptureManifestTask(task); err == nil {
+		t.Fatal("cancelled manifest task unexpectedly succeeded")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cancelled task left a late manifest: err=%v", err)
 	}
 }
 
@@ -45,6 +75,52 @@ func TestGeminiCapture_CloseHasBoundedWaitOnStalledWorker(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("stalled worker cleanup did not finish")
+	}
+}
+
+func TestGeminiCapture_ExistingOutputConsumesSharedBudget(t *testing.T) {
+	outputDir := t.TempDir()
+	existing := filepath.Join(outputDir, "existing-artifact.bin")
+	file, err := os.OpenFile(existing, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(geminiCaptureOutputBytes); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	leasePath := filepath.Join(t.TempDir(), "lease.json")
+	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
+	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
+	capture := controller.Begin(nil, "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
+	if capture == nil {
+		t.Fatal("expected exact lease candidate")
+	}
+	if capture.Activate(&Account{ID: 1, Platform: PlatformAntigravity, Type: "oauth"}, GeminiCaptureTargetModel, []byte(`{}`)) {
+		t.Fatal("existing output at shared budget must block a new artifact")
+	}
+}
+
+func TestGeminiCapture_SharedBudgetSerializesConcurrentReservations(t *testing.T) {
+	budget := &geminiCaptureOutputBudget{ready: true, used: geminiCaptureOutputBytes - 64}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	accepted := 0
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if budget.reserve(48) {
+				mu.Lock()
+				accepted++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted != 1 {
+		t.Fatalf("shared output budget was not atomic across concurrent requests: accepted=%d", accepted)
 	}
 }
 
