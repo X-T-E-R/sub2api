@@ -41,6 +41,10 @@ const (
 	geminiCaptureManifestTimeout   = 500 * time.Millisecond
 	geminiCaptureAbortWorkerCount  = 4
 	geminiCaptureManifestQueueSize = 8
+	geminiCaptureWriterSlots       = 8
+	geminiCaptureFailureWorkers    = 2
+	geminiCaptureFailureQueueSize  = 8
+	geminiCaptureManifestReserve   = 4096
 )
 
 // GeminiCaptureLease is the only runtime control surface for the temporary
@@ -99,21 +103,24 @@ type GeminiCaptureRequest struct {
 	lastLeaseCheck       time.Time
 	leaseRefreshInFlight bool
 
-	queue             *geminiCaptureQueue
-	sanitizers        map[string]*geminiCaptureStreamSanitizer
-	attempts          []*GeminiCaptureAttempt
-	nextSeq           int
-	terminals         map[string]struct{}
-	usage             map[string]any
-	parseBuffer       string
-	parserDisabled    bool
-	clientDisconnect  bool
-	ctxCanceled       bool
-	timeout           bool
-	upstreamReadError bool
-	upstreamEOF       bool
-	gatewayStatus     int
-	convertedWritten  bool
+	queue              *geminiCaptureQueue
+	sanitizers         map[string]*geminiCaptureStreamSanitizer
+	attempts           []*GeminiCaptureAttempt
+	nextSeq            int
+	terminals          map[string]struct{}
+	usage              map[string]any
+	parseBuffer        string
+	parserDisabled     bool
+	clientDisconnect   bool
+	ctxCanceled        bool
+	timeout            bool
+	upstreamReadError  bool
+	upstreamEOF        bool
+	gatewayStatus      int
+	convertedWritten   bool
+	budgetReservation  int64
+	budget             *geminiCaptureOutputBudget
+	localFailureWorker bool
 }
 
 // GeminiCaptureAttempt identifies one actual HTTP attempt. Response IDs are
@@ -166,6 +173,10 @@ var (
 	geminiCaptureAbortQueue    chan []*os.File
 	geminiCaptureManifestOnce  sync.Once
 	geminiCaptureManifestQueue chan *geminiCaptureManifestTask
+	geminiCaptureWriterOnce    sync.Once
+	geminiCaptureWriterSlotsCh chan struct{}
+	geminiCaptureFailureOnce   sync.Once
+	geminiCaptureFailureQueue  chan *GeminiCaptureRequest
 )
 
 type geminiCaptureManifestTask struct {
@@ -185,17 +196,18 @@ type geminiCaptureOutputBudget struct {
 }
 
 type geminiCaptureQueue struct {
-	mu           sync.Mutex
-	items        chan geminiCaptureChunk
-	closed       bool
-	drop         bool
-	pendingBytes int64
-	totalBytes   int64
-	budget       *geminiCaptureOutputBudget
-	done         chan struct{}
-	incomplete   map[string]struct{}
-	files        map[string]*geminiCaptureFile
-	wg           sync.WaitGroup
+	mu             sync.Mutex
+	items          chan geminiCaptureChunk
+	closed         bool
+	drop           bool
+	pendingBytes   int64
+	totalBytes     int64
+	budget         *geminiCaptureOutputBudget
+	done           chan struct{}
+	writerAdmitted bool
+	incomplete     map[string]struct{}
+	files          map[string]*geminiCaptureFile
+	wg             sync.WaitGroup
 }
 
 func newGeminiCaptureQueue(budgets ...*geminiCaptureOutputBudget) *geminiCaptureQueue {
@@ -211,14 +223,31 @@ func newGeminiCaptureQueue(budgets ...*geminiCaptureOutputBudget) *geminiCapture
 		files:      make(map[string]*geminiCaptureFile),
 	}
 	q.wg.Add(1)
-	go q.run()
+	q.acquireWriter()
 	return q
+}
+
+func (q *geminiCaptureQueue) acquireWriter() {
+	geminiCaptureWriterOnce.Do(func() {
+		geminiCaptureWriterSlotsCh = make(chan struct{}, geminiCaptureWriterSlots)
+	})
+	select {
+	case geminiCaptureWriterSlotsCh <- struct{}{}:
+		q.writerAdmitted = true
+		go q.run()
+	default:
+		q.incomplete["writer_admission"] = struct{}{}
+		q.drop = true
+		q.wg.Done()
+		close(q.done)
+	}
 }
 
 func (q *geminiCaptureQueue) run() {
 	defer q.wg.Done()
 	defer close(q.done)
 	defer q.finishFiles()
+	defer func() { <-geminiCaptureWriterSlotsCh }()
 	for item := range q.items {
 		q.mu.Lock()
 		q.pendingBytes -= int64(len(item.data))
@@ -354,6 +383,34 @@ func (q *geminiCaptureQueue) enqueue(target string, p []byte, expected int) bool
 		if q.budget != nil {
 			q.budget.release(dataLen)
 		}
+		return false
+	}
+}
+
+func startGeminiCaptureFailureWorkers() {
+	geminiCaptureFailureOnce.Do(func() {
+		geminiCaptureFailureQueue = make(chan *GeminiCaptureRequest, geminiCaptureFailureQueueSize)
+		for i := 0; i < geminiCaptureFailureWorkers; i++ {
+			go func() {
+				for capture := range geminiCaptureFailureQueue {
+					capture.mu.Lock()
+					capture.localFailureWorker = true
+					capture.finalized = false
+					status := capture.gatewayStatus
+					capture.mu.Unlock()
+					capture.Finish(status)
+				}
+			}()
+		}
+	})
+}
+
+func enqueueGeminiCaptureFailure(capture *GeminiCaptureRequest) bool {
+	startGeminiCaptureFailureWorkers()
+	select {
+	case geminiCaptureFailureQueue <- capture:
+		return true
+	default:
 		return false
 	}
 }
@@ -573,7 +630,7 @@ func (b *geminiCaptureOutputBudget) readyForCapture() bool {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.ready && !b.blocked
+	return b.ready && !b.blocked && b.used < geminiCaptureOutputBytes
 }
 
 func (b *geminiCaptureOutputBudget) reserve(size int64) bool {
@@ -732,10 +789,14 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 		return false
 	}
 	budget := r.controller.outputBudget(lease.OutputDir)
-	if !budget.readyForCapture() {
+	if !budget.readyForCapture() || !budget.reserve(geminiCaptureManifestReserve) {
 		r.disable("shared_budget_unready")
 		return false
 	}
+	r.mu.Lock()
+	r.budgetReservation = geminiCaptureManifestReserve
+	r.budget = budget
+	r.mu.Unlock()
 	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
 	if err := os.Mkdir(artifactDir, 0700); err != nil {
 		r.disable("artifact_dir_unavailable")
@@ -1129,6 +1190,20 @@ func (s *geminiCaptureStreamSanitizer) emit(line []byte) bool {
 	return q != nil && q.enqueue(s.target, redacted, len(redacted))
 }
 
+func (r *GeminiCaptureRequest) releaseBudgetReservation() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	budget := r.budget
+	amount := r.budgetReservation
+	r.budgetReservation = 0
+	r.mu.Unlock()
+	if budget != nil && amount > 0 {
+		budget.release(amount)
+	}
+}
+
 func (r *GeminiCaptureRequest) addRedactedFields(fields ...string) {
 	if len(fields) == 0 {
 		return
@@ -1209,7 +1284,7 @@ func redactGeminiCaptureLine(line []byte) ([]byte, []string, bool, bool) {
 func captureBytesLookCredentialLike(body []byte) bool {
 	lower := strings.ToLower(string(body))
 	compact := strings.NewReplacer("_", "", "-", "", " ", "").Replace(lower)
-	for _, key := range []string{"\"authorization\"", "\"accesstoken\"", "\"refreshtoken\"", "\"token\"", "\"apikey\"", "\"clientsecret\"", "\"password\"", "\"cookie\"", "\"credential\"", "\"privatekey\"", "\"secret\""} {
+	for _, key := range []string{"\"authorization\"", "\"accesstoken\"", "\"refreshtoken\"", "\"token\"", "\"apikey\"", "\"apitoken\"", "\"clientsecret\"", "\"password\"", "\"cookie\"", "\"credential\"", "\"privatekey\"", "\"secret\""} {
 		if strings.Contains(compact, key) {
 			return true
 		}
@@ -1385,12 +1460,22 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 	activated := r.activated
 	r.mu.Unlock()
 
+	if !activated && needLocalArtifact && !r.localFailureWorker {
+		r.mu.Lock()
+		r.finalized = true
+		r.mu.Unlock()
+		if !enqueueGeminiCaptureFailure(r) {
+			r.addIncomplete("local_failure_queue_full")
+		}
+		return
+	}
 	if !activated && needLocalArtifact {
 		if r.activateLocalFailureArtifact() {
 			activated = true
 		}
 	}
 	if !activated {
+		r.releaseBudgetReservation()
 		r.mu.Lock()
 		r.finalized = true
 		r.mu.Unlock()
@@ -1498,16 +1583,23 @@ func writeGeminiCaptureManifestBounded(path string, body []byte) error {
 }
 
 func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
-	lease, expiresAt, ok := readGeminiCaptureLease(r.controller.leasePath)
-	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || time.Now().After(expiresAt) || !privateOutputDir(lease.OutputDir) {
+	r.mu.Lock()
+	lease := r.lease
+	expiresAt := r.leaseExpiresAt
+	r.mu.Unlock()
+	if !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || time.Now().After(expiresAt) || !privateOutputDir(lease.OutputDir) {
 		r.disable("lease_invalid_or_expired")
 		return false
 	}
 	budget := r.controller.outputBudget(lease.OutputDir)
-	if !budget.readyForCapture() {
+	if !budget.readyForCapture() || !budget.reserve(geminiCaptureManifestReserve) {
 		r.disable("shared_budget_unready")
 		return false
 	}
+	r.mu.Lock()
+	r.budgetReservation = geminiCaptureManifestReserve
+	r.budget = budget
+	r.mu.Unlock()
 	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
 	if err := os.Mkdir(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
 		r.disable("artifact_dir_unavailable")

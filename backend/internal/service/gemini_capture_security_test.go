@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,21 @@ func TestGeminiCapture_CredentialFieldMatcherCoversTokenSpellings(t *testing.T) 
 		if isCredentialCaptureField(key) {
 			t.Fatalf("provider carrier must be retained: %q", key)
 		}
+	}
+}
+
+func TestGeminiCapture_WriterAdmissionIsBounded(t *testing.T) {
+	queues := make([]*geminiCaptureQueue, 0, geminiCaptureWriterSlots)
+	for i := 0; i < geminiCaptureWriterSlots; i++ {
+		queues = append(queues, newGeminiCaptureQueue())
+	}
+	extra := newGeminiCaptureQueue()
+	if extra.writerAdmitted {
+		extra.close()
+		t.Fatal("writer admission exceeded shared slot bound")
+	}
+	for _, q := range queues {
+		q.close()
 	}
 }
 
@@ -158,4 +174,36 @@ func TestGeminiCapture_DiskAndParserBudgetsStopCapture(t *testing.T) {
 	if !parserMarked {
 		t.Fatal("parser quota failure was not marked")
 	}
+}
+
+func TestGeminiCapture_LocalFailureFinishUsesCachedLeaseAndReturnsBounded(t *testing.T) {
+	outputDir := t.TempDir()
+	leasePath := filepath.Join(t.TempDir(), "lease.json")
+	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
+	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
+	capture := controller.Begin(nil, "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
+	if capture == nil {
+		t.Fatal("expected exact lease candidate")
+	}
+	capture.MarkAntigravitySelected(42)
+	if err := os.Remove(leasePath); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	capture.Finish(http.StatusServiceUnavailable)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("local-failure Finish performed blocking storage work: %v", elapsed)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(outputDir)
+		if len(entries) > 0 {
+			manifest := filepath.Join(outputDir, entries[0].Name(), "manifest.json")
+			if _, err := os.Stat(manifest); err == nil {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("bounded local-failure worker did not finish artifact")
 }
