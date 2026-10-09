@@ -80,8 +80,7 @@ func TestGeminiCapture_ConvertedNonStreamingTapMarksPartialWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := string(convertedBody[:len(convertedBody)/2])
-	if string(converted) != wantPrefix {
-		t.Fatalf("partial prefix mismatch: got=%q want=%q", converted, wantPrefix)
+	if len(converted) != 0 {
+		t.Fatalf("invalid partial JSON must be dropped fail-closed: got=%q", converted)
 	}
 }

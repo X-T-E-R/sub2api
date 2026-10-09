@@ -797,21 +797,25 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	r.budgetReservation = geminiCaptureManifestReserve
 	r.budget = budget
 	r.mu.Unlock()
-	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
-	if err := os.Mkdir(artifactDir, 0700); err != nil {
-		r.disable("artifact_dir_unavailable")
-		return false
-	}
-	if err := os.Chmod(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
-		r.disable("artifact_dir_not_private")
-		return false
-	}
-
 	q := newGeminiCaptureQueue(budget)
 	if !q.writerAdmitted {
 		q.close()
 		r.releaseBudgetReservation()
 		r.disable("writer_admission")
+		return false
+	}
+	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
+	if err := os.Mkdir(artifactDir, 0700); err != nil {
+		q.close()
+		r.releaseBudgetReservation()
+		r.disable("artifact_dir_unavailable")
+		return false
+	}
+	if err := os.Chmod(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
+		q.close()
+		_ = os.RemoveAll(artifactDir)
+		r.releaseBudgetReservation()
+		r.disable("artifact_dir_not_private")
 		return false
 	}
 	openFile := func(target, rel string) bool {
@@ -1297,28 +1301,12 @@ func redactGeminiCaptureLine(line []byte) ([]byte, []string, bool, bool) {
 	}
 	redacted, fields, ok := redactGeminiCaptureJSON(body)
 	if !ok {
-		if captureBytesLookCredentialLike(body) {
-			return line, nil, false, false
-		}
-		return append([]byte(nil), line...), []string{"[redaction_parse_failed]"}, true, true
+		return line, nil, false, false
 	}
 	if len(fields) == 0 {
 		return append([]byte(nil), line...), nil, false, true
 	}
 	return append(redacted, ending...), fields, true, true
-}
-
-// RecordConvertedWrite records the exact bytes actually handed to the client
-// writer, including a partial prefix when the writer reports an error.
-func captureBytesLookCredentialLike(body []byte) bool {
-	lower := strings.ToLower(string(body))
-	compact := strings.NewReplacer("_", "", "-", "", " ", "").Replace(lower)
-	for _, key := range []string{"\"authorization\"", "\"accesstoken\"", "\"refreshtoken\"", "\"token\"", "\"apikey\"", "\"apitoken\"", "\"clientsecret\"", "\"password\"", "\"cookie\"", "\"credential\"", "\"privatekey\"", "\"secret\""} {
-		if strings.Contains(compact, key) {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *GeminiCaptureRequest) RecordConvertedWrite(p []byte, n int, err error) {
@@ -1632,16 +1620,18 @@ func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
 	r.budgetReservation = geminiCaptureManifestReserve
 	r.budget = budget
 	r.mu.Unlock()
-	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
-	if err := os.Mkdir(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
-		r.disable("artifact_dir_unavailable")
-		return false
-	}
 	q := newGeminiCaptureQueue(budget)
 	if !q.writerAdmitted {
 		q.close()
 		r.releaseBudgetReservation()
 		r.disable("writer_admission")
+		return false
+	}
+	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
+	if err := os.Mkdir(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
+		q.close()
+		r.releaseBudgetReservation()
+		r.disable("artifact_dir_unavailable")
 		return false
 	}
 	openFile := func(target, rel string) bool {
