@@ -71,6 +71,11 @@ func writeCaptureLease(t *testing.T, path, outputDir string, enabled bool, expir
 	if err != nil {
 		t.Fatal(err)
 	}
+	if info, err := os.Stat(outputDir); err == nil && info.IsDir() {
+		if err := os.Chmod(outputDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(path, append(body, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}

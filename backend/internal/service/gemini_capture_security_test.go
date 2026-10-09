@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,33 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
+
+func TestGeminiCapture_PrivateOutputFixtureMatchesProductionPermissionContract(t *testing.T) {
+	output := t.TempDir()
+	if err := os.Chmod(output, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if !privateOutputDir(output) {
+		t.Fatalf("0700 fixture must be accepted: mode=%o", mustMode(t, output))
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(output, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if privateOutputDir(output) {
+			t.Fatalf("0755 fixture must be rejected: mode=%o", mustMode(t, output))
+		}
+	}
+}
+
+func mustMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
 
 func TestGeminiCapture_RedactionParseFailureIsFailClosed(t *testing.T) {
 	redacted, fields, ok := redactGeminiCaptureJSON([]byte(`{"accessToken":"must-not-fallback"`))
