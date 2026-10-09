@@ -480,6 +480,9 @@ gateway:
   # Concurrency slot expiration time (minutes)
   # 并发槽位过期时间（分钟）
   concurrency_slot_ttl_minutes: 30
+  # Temporary exact-session Gemini forensic capture lease file; empty=disabled
+  # 临时精确会话 Gemini 取证 lease 文件；留空=关闭
+  gemini_capture_lease_file: ""
   # Stream data interval timeout (seconds), 0=disable
   # 流数据间隔超时（秒），0=禁用
   stream_data_interval_timeout: 180

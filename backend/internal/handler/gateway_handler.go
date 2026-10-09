@@ -57,6 +57,7 @@ type GatewayHandler struct {
 	maxAccountSwitchesGemini  int
 	cfg                       *config.Config
 	settingService            *service.SettingService
+	geminiCapture             *service.GeminiCapture
 }
 
 // NewGatewayHandler creates a new GatewayHandler
@@ -114,6 +115,7 @@ func NewGatewayHandler(
 		maxAccountSwitchesGemini:  maxAccountSwitchesGemini,
 		cfg:                       cfg,
 		settingService:            settingService,
+		geminiCapture:             service.NewGeminiCapture(cfg),
 	}
 }
 
@@ -166,8 +168,21 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return
 	}
+	inboundBody := append([]byte(nil), body...)
 	body = parsedReq.Body.Bytes()
 	reqModel := parsedReq.Model
+	var geminiCapture *service.GeminiCaptureRequest
+	if h.geminiCapture != nil {
+		requestPath := ""
+		if c.Request != nil && c.Request.URL != nil {
+			requestPath = c.Request.URL.Path
+		}
+		geminiCapture = h.geminiCapture.Begin(c.Request.Context(), requestPath, inboundBody, parsedReq.MetadataUserID, reqModel, parsedReq.Stream, subject.UserID)
+		if geminiCapture != nil {
+			c.Request = c.Request.WithContext(service.WithGeminiCapture(c.Request.Context(), geminiCapture))
+			defer func() { geminiCapture.Finish(c.Writer.Status()) }()
+		}
+	}
 	reqStream := parsedReq.Stream
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
@@ -252,6 +267,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 设置请求所属分组 ID（用于渠道级功能判断，如 WebSearch 模拟）
 	parsedReq.GroupID = apiKey.GroupID
+	if geminiCapture != nil {
+		geminiCapture.SetGroupID(derefGroupID(apiKey.GroupID))
+	}
 
 	// 计算粘性会话hash
 	parsedReq.SessionContext = &service.SessionContext{
@@ -857,6 +875,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+				if geminiCapture != nil && account.Type != service.AccountTypeUpstream {
+					geminiCapture.MarkAntigravitySelected(account.ID)
+				}
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)

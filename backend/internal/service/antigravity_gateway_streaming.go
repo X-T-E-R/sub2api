@@ -50,6 +50,8 @@ type antigravityClientWriter struct {
 	disconnected     bool
 	prefix           string // 日志前缀，标识来源方法
 	beforeFirstWrite func()
+	onWrite          func([]byte, int, error)
+	onDisconnect     func()
 }
 
 func newAntigravityClientWriter(w gin.ResponseWriter, flusher http.Flusher, prefix string) *antigravityClientWriter {
@@ -62,7 +64,11 @@ func (cw *antigravityClientWriter) Write(p []byte) bool {
 		return false
 	}
 	cw.prepareFirstWrite()
-	if _, err := cw.w.Write(p); err != nil {
+	n, err := cw.w.Write(p)
+	if cw.onWrite != nil {
+		cw.onWrite(p, n, err)
+	}
+	if err != nil {
 		cw.markDisconnected()
 		return false
 	}
@@ -72,16 +78,7 @@ func (cw *antigravityClientWriter) Write(p []byte) bool {
 
 // Fprintf 格式化写入数据到客户端，写入失败时标记断开并返回 false
 func (cw *antigravityClientWriter) Fprintf(format string, args ...any) bool {
-	if cw.disconnected {
-		return false
-	}
-	cw.prepareFirstWrite()
-	if _, err := fmt.Fprintf(cw.w, format, args...); err != nil {
-		cw.markDisconnected()
-		return false
-	}
-	cw.flusher.Flush()
-	return true
+	return cw.Write([]byte(fmt.Sprintf(format, args...)))
 }
 
 func (cw *antigravityClientWriter) Disconnected() bool { return cw.disconnected }
@@ -96,7 +93,13 @@ func (cw *antigravityClientWriter) prepareFirstWrite() {
 }
 
 func (cw *antigravityClientWriter) markDisconnected() {
+	if cw.disconnected {
+		return
+	}
 	cw.disconnected = true
+	if cw.onDisconnect != nil {
+		cw.onDisconnect()
+	}
 	logger.LegacyPrintf("service.antigravity_gateway", "Client disconnected during streaming (%s), continuing to drain upstream for billing", cw.prefix)
 }
 
@@ -217,8 +220,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
-		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
-		flusher.Flush()
+		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 
 	for {
@@ -300,6 +302,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity)")
+			if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+				capture.MarkTimeout()
+			}
 			sendErrorEvent("stream_timeout")
 			return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
 
@@ -924,6 +929,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, errType, errMsg)
 	}
+	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+		capture.RecordConvertedBody(claudeResp)
+	}
 	c.Data(http.StatusOK, "application/json", claudeResp)
 	return streamRes, nil
 }
@@ -1028,6 +1036,10 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	lastDataAt := time.Now()
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity claude")
+	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+		cw.onWrite = capture.RecordConvertedWrite
+		cw.onDisconnect = capture.MarkClientDisconnect
+	}
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱
 	errorEventSent := false
@@ -1036,8 +1048,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
-		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
-		flusher.Flush()
+		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 
 	// finishUsage 是获取 processor 最终 usage 的辅助函数
@@ -1102,6 +1113,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity)")
+			if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+				capture.MarkTimeout()
+			}
 			sendErrorEvent("stream_timeout")
 			return &antigravityStreamResult{usage: convertUsage(nil), firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
 

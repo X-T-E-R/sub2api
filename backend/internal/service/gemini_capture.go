@@ -1,0 +1,1404 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/google/uuid"
+)
+
+const (
+	// GeminiCaptureTargetModel is intentionally fixed. This trace is a temporary
+	// incident tool, not a general body logging switch.
+	GeminiCaptureTargetModel = "gemini-3.8-flash"
+
+	geminiCaptureSchemaVersion = 1
+	geminiCaptureLeaseEnv      = "GATEWAY_GEMINI_CAPTURE_LEASE_FILE"
+	geminiCaptureLeaseMaxBytes = 64 * 1024
+	geminiCaptureMaxBytes      = 64 << 20
+	geminiCaptureQueueBytes    = 4 << 20
+	geminiCaptureQueueDepth    = 256
+	geminiCaptureLeasePoll     = 250 * time.Millisecond
+)
+
+// GeminiCaptureLease is the only runtime control surface for the temporary
+// capture. It is read-only from the process: an operator arms, disarms, or
+// renews it by replacing this small JSON file.
+type GeminiCaptureLease struct {
+	Enabled         bool     `json:"enabled"`
+	MetadataUserIDs []string `json:"metadata_user_ids"`
+	Model           string   `json:"model"`
+	ExpiresAt       string   `json:"expires_at"`
+	OutputDir       string   `json:"output_dir"`
+}
+
+// GeminiCapture is a cheap, disabled-by-default controller. A configured path
+// alone does not enable capture; the lease must also validate at request time.
+type GeminiCapture struct {
+	leasePath string
+}
+
+// GeminiCaptureRequest is request-scoped state carried through the gateway
+// context. It is deliberately not exported as a generic tracing interface.
+type GeminiCaptureRequest struct {
+	controller *GeminiCapture
+	ctx        context.Context
+
+	mu sync.Mutex
+
+	candidate        bool
+	selectedAG       bool
+	modelChecked     bool
+	modelMatched     bool
+	activated        bool
+	finalized        bool
+	captureEnabled   bool
+	incompleteReason map[string]struct{}
+
+	metadataUserID    string
+	requestModel      string
+	stream            bool
+	userID            int64
+	groupID           int64
+	selectedAccountID int64
+	requestID         string
+	clientRequestID   string
+	startedAtTime     time.Time
+
+	inboundBody          []byte
+	inboundRedacted      []byte
+	redactedFields       []string
+	inboundTruncated     bool
+	artifactDir          string
+	lease                GeminiCaptureLease
+	leaseExpiresAt       time.Time
+	lastLeaseCheck       time.Time
+	leaseRefreshInFlight bool
+
+	queue             *geminiCaptureQueue
+	attempts          []*GeminiCaptureAttempt
+	nextSeq           int
+	terminals         map[string]struct{}
+	usage             map[string]any
+	parseBuffer       string
+	clientDisconnect  bool
+	ctxCanceled       bool
+	timeout           bool
+	upstreamReadError bool
+	upstreamEOF       bool
+	gatewayStatus     int
+	convertedWritten  bool
+}
+
+// GeminiCaptureAttempt identifies one actual HTTP attempt. Response IDs are
+// kept here; they are never conflated with the gateway request ID.
+type GeminiCaptureAttempt struct {
+	trace        *GeminiCaptureRequest
+	sequence     int
+	accountID    int64
+	groupID      int64
+	requestFile  string
+	responseFile string
+
+	mu                sync.Mutex
+	statusCode        int
+	upstreamRequestID string
+	responseEOF       bool
+	responseClosed    bool
+	responseReadError bool
+	clientDisconnect  bool
+	ctxCanceled       bool
+	timeout           bool
+	requestError      string
+}
+
+type geminiCaptureFile struct {
+	file     *os.File
+	path     string
+	bytes    int64
+	expected int64
+	complete bool
+}
+
+type geminiCaptureChunk struct {
+	target string
+	data   []byte
+}
+
+// geminiCaptureQueue makes all body/file writes asynchronous and bounded. A
+// full queue fails capture open rather than delaying a provider stream.
+type geminiCaptureQueue struct {
+	mu           sync.Mutex
+	items        chan geminiCaptureChunk
+	closed       bool
+	drop         bool
+	pendingBytes int64
+	incomplete   map[string]struct{}
+	files        map[string]*geminiCaptureFile
+	wg           sync.WaitGroup
+}
+
+func newGeminiCaptureQueue() *geminiCaptureQueue {
+	q := &geminiCaptureQueue{
+		items:      make(chan geminiCaptureChunk, geminiCaptureQueueDepth),
+		incomplete: make(map[string]struct{}),
+		files:      make(map[string]*geminiCaptureFile),
+	}
+	q.wg.Add(1)
+	go q.run()
+	return q
+}
+
+func (q *geminiCaptureQueue) run() {
+	defer q.wg.Done()
+	for item := range q.items {
+		q.mu.Lock()
+		q.pendingBytes -= int64(len(item.data))
+		file := q.files[item.target]
+		q.mu.Unlock()
+		if file == nil {
+			q.markIncomplete(item.target)
+			continue
+		}
+		n, err := file.file.Write(item.data)
+		q.mu.Lock()
+		file.bytes += int64(n)
+		if err != nil || n != len(item.data) {
+			file.complete = false
+			q.incomplete[item.target] = struct{}{}
+			q.drop = true
+		}
+		q.mu.Unlock()
+	}
+}
+
+func (q *geminiCaptureQueue) addFile(target, path string, f *os.File) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.files[target] = &geminiCaptureFile{file: f, path: path, complete: true}
+}
+
+func (q *geminiCaptureQueue) markIncomplete(reason string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.incomplete[reason] = struct{}{}
+	q.drop = true
+}
+
+func (q *geminiCaptureQueue) enqueue(target string, p []byte, expected int) bool {
+	if len(p) == 0 && expected == 0 {
+		return true
+	}
+	copyBytes := append([]byte(nil), p...)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed || q.drop {
+		if expected > 0 {
+			q.incomplete["capture_disabled_or_overflow"] = struct{}{}
+		}
+		return false
+	}
+	if expected < 0 {
+		expected = 0
+	}
+	if q.pendingBytes+int64(len(copyBytes)) > geminiCaptureQueueBytes {
+		q.incomplete["queue_quota"] = struct{}{}
+		q.drop = true
+		return false
+	}
+	file := q.files[target]
+	if file == nil {
+		q.incomplete["unknown_file"] = struct{}{}
+		q.drop = true
+		return false
+	}
+	file.expected += int64(expected)
+	if expected > len(copyBytes) {
+		file.complete = false
+	}
+	if expected > 0 && len(copyBytes) == 0 {
+		file.complete = false
+	}
+	select {
+	case q.items <- geminiCaptureChunk{target: target, data: copyBytes}:
+		q.pendingBytes += int64(len(copyBytes))
+		return true
+	default:
+		q.incomplete["queue_full"] = struct{}{}
+		q.drop = true
+		file.complete = false
+		return false
+	}
+}
+
+func (q *geminiCaptureQueue) close() {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return
+	}
+	q.closed = true
+	close(q.items)
+	q.mu.Unlock()
+	q.wg.Wait()
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, file := range q.files {
+		if file.file != nil {
+			_ = file.file.Sync()
+			_ = file.file.Close()
+		}
+	}
+}
+
+func (q *geminiCaptureQueue) snapshot() (map[string]GeminiCaptureFileEvidence, []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	files := make(map[string]GeminiCaptureFileEvidence, len(q.files))
+	for target, file := range q.files {
+		complete := file.complete && file.bytes == file.expected
+		files[target] = GeminiCaptureFileEvidence{
+			Path:     file.path,
+			Bytes:    file.bytes,
+			Expected: file.expected,
+			Complete: complete,
+		}
+	}
+	reasons := make([]string, 0, len(q.incomplete))
+	for reason := range q.incomplete {
+		reasons = append(reasons, reason)
+	}
+	return files, reasons
+}
+
+// GeminiCaptureFileEvidence is a relative artifact path and completeness
+// record. It intentionally contains no headers or credential material.
+type GeminiCaptureFileEvidence struct {
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Expected int64  `json:"expected_bytes"`
+	Complete bool   `json:"complete"`
+}
+
+type geminiCaptureAttemptEvidence struct {
+	Sequence          int    `json:"sequence"`
+	AccountID         int64  `json:"account_id"`
+	GroupID           int64  `json:"group_id,omitempty"`
+	StatusCode        int    `json:"status_code"`
+	Outcome           string `json:"outcome"`
+	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
+	RequestFile       string `json:"request_file,omitempty"`
+	ResponseFile      string `json:"response_file,omitempty"`
+	ResponseEOF       bool   `json:"response_eof"`
+	ResponseComplete  bool   `json:"response_complete"`
+	ResponseReadError bool   `json:"response_read_error"`
+	RequestError      string `json:"request_error,omitempty"`
+	ClientDisconnect  bool   `json:"client_disconnect"`
+	ContextCanceled   bool   `json:"context_canceled"`
+	Timeout           bool   `json:"timeout"`
+}
+
+type geminiCaptureManifest struct {
+	SchemaVersion         int                                  `json:"schema_version"`
+	StartedAt             string                               `json:"started_at"`
+	FinishedAt            string                               `json:"finished_at"`
+	RequestID             string                               `json:"request_id,omitempty"`
+	ClientRequestID       string                               `json:"client_request_id,omitempty"`
+	UserID                int64                                `json:"user_id,omitempty"`
+	GroupID               int64                                `json:"group_id,omitempty"`
+	SelectedAccountID     int64                                `json:"selected_account_id,omitempty"`
+	MetadataUserID        string                               `json:"metadata_user_id"`
+	RequestPath           string                               `json:"request_path"`
+	RequestModel          string                               `json:"request_model"`
+	FinalModel            string                               `json:"final_model,omitempty"`
+	Stream                bool                                 `json:"stream"`
+	AGChain               bool                                 `json:"ag_chain"`
+	GatewayStatus         int                                  `json:"gateway_status"`
+	Outcome               string                               `json:"outcome"`
+	UpstreamAttempts      int                                  `json:"upstream_attempts"`
+	UpstreamFinishReasons []string                             `json:"upstream_finish_reasons,omitempty"`
+	Usage                 map[string]any                       `json:"usage,omitempty"`
+	Termination           []string                             `json:"termination,omitempty"`
+	Incomplete            bool                                 `json:"incomplete"`
+	IncompleteReasons     []string                             `json:"incomplete_reasons,omitempty"`
+	RedactedFields        []string                             `json:"redacted_fields,omitempty"`
+	HeadersRecorded       bool                                 `json:"headers_recorded"`
+	CredentialHandling    string                               `json:"credential_handling"`
+	Files                 map[string]GeminiCaptureFileEvidence `json:"files"`
+	Attempts              []geminiCaptureAttemptEvidence       `json:"attempts"`
+}
+
+// NewGeminiCapture creates a controller using the configured lease path. The
+// environment fallback keeps directly constructed test Config values useful;
+// normal deployments use the Viper-bound config field.
+func NewGeminiCapture(cfg *config.Config) *GeminiCapture {
+	path := ""
+	if cfg != nil {
+		path = strings.TrimSpace(cfg.Gateway.GeminiCaptureLeaseFile)
+	}
+	if path == "" {
+		path = strings.TrimSpace(os.Getenv(geminiCaptureLeaseEnv))
+	}
+	return &GeminiCapture{leasePath: path}
+}
+
+// Begin matches only the legal Messages endpoint and exact request model/user
+// lease entry. It does not create files yet; actual AG activation is required.
+func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBody []byte, metadataUserID, requestModel string, stream bool, userID int64) *GeminiCaptureRequest {
+	if g == nil || strings.TrimSpace(g.leasePath) == "" || requestPath != "/v1/messages" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lease, expiresAt, ok := readGeminiCaptureLease(g.leasePath)
+	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || requestModel != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, metadataUserID) {
+		return nil
+	}
+	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
+	clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
+	capturedBody := append([]byte(nil), inboundBody...)
+	truncated := false
+	if len(capturedBody) > geminiCaptureMaxBytes {
+		capturedBody = capturedBody[:geminiCaptureMaxBytes]
+		truncated = true
+	}
+	redacted, fields := redactGeminiCaptureJSON(capturedBody)
+	return &GeminiCaptureRequest{
+		controller:       g,
+		ctx:              ctx,
+		candidate:        true,
+		captureEnabled:   true,
+		incompleteReason: make(map[string]struct{}),
+		terminals:        make(map[string]struct{}),
+		metadataUserID:   metadataUserID,
+		requestModel:     requestModel,
+		stream:           stream,
+		userID:           userID,
+		requestID:        strings.TrimSpace(requestID),
+		clientRequestID:  strings.TrimSpace(clientRequestID),
+		startedAtTime:    time.Now().UTC(),
+		inboundBody:      capturedBody,
+		inboundRedacted:  redacted,
+		redactedFields:   fields,
+		inboundTruncated: truncated,
+		lease:            lease,
+		leaseExpiresAt:   expiresAt,
+		lastLeaseCheck:   time.Now(),
+	}
+}
+
+// WithGeminiCapture carries a request-scoped candidate through service calls.
+func WithGeminiCapture(ctx context.Context, capture *GeminiCaptureRequest) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if capture == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, geminiCaptureContextKey{}, capture)
+}
+
+// GeminiCaptureFromContext retrieves the request-scoped capture, if any.
+func GeminiCaptureFromContext(ctx context.Context) *GeminiCaptureRequest {
+	if ctx == nil {
+		return nil
+	}
+	capture, _ := ctx.Value(geminiCaptureContextKey{}).(*GeminiCaptureRequest)
+	return capture
+}
+
+type geminiCaptureContextKey struct{}
+
+// SetGroupID associates the authenticated non-secret group identifier.
+func (r *GeminiCaptureRequest) SetGroupID(groupID int64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.groupID = groupID
+	r.mu.Unlock()
+}
+
+// MarkAntigravitySelected preserves a local gateway failure artifact even when
+// the selected account fails before any HTTP attempt is constructed.
+func (r *GeminiCaptureRequest) MarkAntigravitySelected(accountID int64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.selectedAG = true
+	if accountID > 0 {
+		r.selectedAccountID = accountID
+	}
+	r.mu.Unlock()
+}
+
+// Activate records the transformed Gemini body after the final model is known.
+// It is intentionally callable only by the Antigravity Messages forwarding path.
+func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, geminiBody []byte) bool {
+	if r == nil || account == nil || account.Platform != PlatformAntigravity || account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
+		return false
+	}
+	modelMatched := finalModel == GeminiCaptureTargetModel
+	r.mu.Lock()
+	r.modelChecked = true
+	r.modelMatched = modelMatched
+	r.selectedAG = true
+	r.mu.Unlock()
+	if !modelMatched {
+		return false
+	}
+	return r.activateArtifact(geminiBody)
+}
+
+func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
+	r.mu.Lock()
+	if r.finalized || r.activated || !r.captureEnabled {
+		r.mu.Unlock()
+		return r.activated
+	}
+	r.mu.Unlock()
+
+	lease, expiresAt, ok := readGeminiCaptureLease(r.controller.leasePath)
+	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || !privateOutputDir(lease.OutputDir) {
+		r.disable("lease_invalid_or_expired")
+		return false
+	}
+	if time.Now().After(expiresAt) {
+		r.disable("lease_expired")
+		return false
+	}
+	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
+	if err := os.Mkdir(artifactDir, 0700); err != nil {
+		r.disable("artifact_dir_unavailable")
+		return false
+	}
+	if err := os.Chmod(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
+		r.disable("artifact_dir_not_private")
+		return false
+	}
+
+	q := newGeminiCaptureQueue()
+	openFile := func(target, rel string) bool {
+		path := filepath.Join(artifactDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			q.markIncomplete("file_parent_unavailable")
+			return false
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			q.markIncomplete("file_open_failed")
+			return false
+		}
+		_ = os.Chmod(path, 0600)
+		q.addFile(target, rel, f)
+		return true
+	}
+	if !openFile("inbound", "inbound.bin") || !openFile("gemini_request", "gemini_request.bin") || !openFile("converted", "converted.bin") {
+		q.close()
+		_ = os.RemoveAll(artifactDir)
+		r.disable("file_open_failed")
+		return false
+	}
+
+	r.mu.Lock()
+	if r.finalized || !r.captureEnabled {
+		r.mu.Unlock()
+		q.close()
+		_ = os.RemoveAll(artifactDir)
+		return false
+	}
+	r.lease = lease
+	r.leaseExpiresAt = expiresAt
+	r.lastLeaseCheck = time.Now()
+	r.artifactDir = artifactDir
+	r.queue = q
+	r.activated = true
+	r.captureEnabled = true
+	r.mu.Unlock()
+
+	if r.inboundTruncated {
+		r.addIncomplete("inbound_quota")
+	}
+	if !q.enqueue("inbound", r.inboundRedacted, len(r.inboundRedacted)) {
+		r.addIncomplete("inbound_write_failed")
+	}
+	redactedGemini, fields := redactGeminiCaptureJSON(geminiBody)
+	r.mu.Lock()
+	r.redactedFields = appendUniqueStrings(r.redactedFields, fields...)
+	r.mu.Unlock()
+	if !q.enqueue("gemini_request", redactedGemini, len(redactedGemini)) {
+		r.addIncomplete("gemini_request_write_failed")
+	}
+	return true
+}
+
+// BeginUpstreamAttempt registers one actual upstream HTTP attempt and stores its
+// exact (credential-redacted) request body. It is safe to call from retry code.
+func (r *GeminiCaptureRequest) BeginUpstreamAttempt(accountID, groupID int64, body []byte) *GeminiCaptureAttempt {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	if !r.activated || r.finalized || !r.captureEnabled || r.queue == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	if groupID == 0 {
+		groupID = r.groupID
+	}
+	r.nextSeq++
+	seq := r.nextSeq
+	artifactDir := r.artifactDir
+	q := r.queue
+	r.mu.Unlock()
+
+	requestRel := fmt.Sprintf("attempts/%03d/request.bin", seq)
+	responseRel := fmt.Sprintf("attempts/%03d/upstream.bin", seq)
+	// Use stable logical keys rather than path-derived keys so manifest
+	// assembly remains independent of platform path separators.
+	requestTarget := fmt.Sprintf("attempt-%03d-request", seq)
+	responseTarget := fmt.Sprintf("attempt-%03d-response", seq)
+	requestPath := filepath.Join(artifactDir, filepath.FromSlash(requestRel))
+	responsePath := filepath.Join(artifactDir, filepath.FromSlash(responseRel))
+	if err := os.MkdirAll(filepath.Dir(requestPath), 0700); err != nil {
+		q.markIncomplete("attempt_parent_unavailable")
+		return nil
+	}
+	requestFile, err := os.OpenFile(requestPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		q.markIncomplete("attempt_request_open_failed")
+		return nil
+	}
+	responseFile, err := os.OpenFile(responsePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		_ = requestFile.Close()
+		q.markIncomplete("attempt_response_open_failed")
+		return nil
+	}
+	_ = os.Chmod(requestPath, 0600)
+	_ = os.Chmod(responsePath, 0600)
+	q.addFile(requestTarget, requestRel, requestFile)
+	q.addFile(responseTarget, responseRel, responseFile)
+
+	attempt := &GeminiCaptureAttempt{
+		trace: r, sequence: seq, accountID: accountID, groupID: groupID,
+		requestFile: requestTarget, responseFile: responseTarget,
+	}
+	redacted, fields := redactGeminiCaptureJSON(body)
+	r.mu.Lock()
+	r.redactedFields = appendUniqueStrings(r.redactedFields, fields...)
+	r.attempts = append(r.attempts, attempt)
+	r.mu.Unlock()
+	if !q.enqueue(requestTarget, redacted, len(redacted)) {
+		r.addIncomplete("attempt_request_write_failed")
+	}
+	return attempt
+}
+
+// AttachResponse wraps the upstream body before Scanner or error readers see it.
+func (a *GeminiCaptureAttempt) AttachResponse(resp *http.Response) *http.Response {
+	if a == nil || resp == nil {
+		return resp
+	}
+	a.mu.Lock()
+	a.statusCode = resp.StatusCode
+	a.upstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
+	a.mu.Unlock()
+	if resp.Body != nil {
+		resp.Body = &geminiCaptureReadCloser{ReadCloser: resp.Body, attempt: a}
+	}
+	return resp
+}
+
+func (a *GeminiCaptureAttempt) MarkRequestError(err error) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	if err != nil {
+		a.requestError = sanitizeCaptureError(err.Error())
+	}
+	a.mu.Unlock()
+}
+
+func (a *GeminiCaptureAttempt) markRead(n int, err error, p []byte) {
+	if a == nil {
+		return
+	}
+	if n > 0 {
+		a.trace.appendAttemptBytes(a, p[:n])
+	}
+	if err == io.EOF {
+		a.trace.flushCaptureParser()
+		a.mu.Lock()
+		a.responseEOF = true
+		a.mu.Unlock()
+		a.trace.mu.Lock()
+		a.trace.upstreamEOF = true
+		a.trace.mu.Unlock()
+		a.trace.markTermination("eof")
+	} else if err != nil {
+		a.mu.Lock()
+		a.responseReadError = true
+		a.mu.Unlock()
+		a.trace.mu.Lock()
+		a.trace.upstreamReadError = true
+		a.trace.mu.Unlock()
+		a.trace.markTermination("read_error")
+		if errors.Is(err, context.Canceled) {
+			a.MarkContextCanceled()
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			a.MarkTimeout()
+		}
+	}
+}
+
+func (a *GeminiCaptureAttempt) markClosed() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	if !a.responseEOF {
+		a.responseClosed = true
+		a.responseReadError = true
+	}
+	a.mu.Unlock()
+	if !a.responseEOF {
+		a.trace.mu.Lock()
+		a.trace.upstreamReadError = true
+		a.trace.mu.Unlock()
+		a.trace.markTermination("read_error")
+		a.trace.addIncomplete("upstream_response_closed_before_eof")
+	}
+}
+
+func (a *GeminiCaptureAttempt) MarkClientDisconnect() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.clientDisconnect = true
+	a.mu.Unlock()
+	a.trace.mu.Lock()
+	a.trace.clientDisconnect = true
+	a.trace.mu.Unlock()
+	a.trace.markTermination("client_disconnect")
+}
+
+func (a *GeminiCaptureAttempt) MarkContextCanceled() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.ctxCanceled = true
+	a.mu.Unlock()
+	a.trace.mu.Lock()
+	a.trace.ctxCanceled = true
+	a.trace.mu.Unlock()
+	a.trace.markTermination("ctx_cancel")
+}
+
+func (a *GeminiCaptureAttempt) MarkTimeout() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.timeout = true
+	a.mu.Unlock()
+	a.trace.mu.Lock()
+	a.trace.timeout = true
+	a.trace.mu.Unlock()
+	a.trace.markTermination("timeout")
+}
+
+func (r *GeminiCaptureRequest) appendAttemptBytes(a *GeminiCaptureAttempt, p []byte) {
+	if r == nil || a == nil || len(p) == 0 {
+		return
+	}
+	if !r.leaseStillValid() {
+		return
+	}
+	r.mu.Lock()
+	q := r.queue
+	r.mu.Unlock()
+	if q == nil || !q.enqueue(a.responseFile, p, len(p)) {
+		r.addIncomplete("upstream_response_write_failed")
+	}
+}
+
+// RecordConvertedWrite records the exact bytes actually handed to the client
+// writer, including a partial prefix when the writer reports an error.
+func (r *GeminiCaptureRequest) RecordConvertedWrite(p []byte, n int, err error) {
+	if r == nil || len(p) == 0 {
+		return
+	}
+	if n < 0 {
+		n = 0
+	}
+	if n > len(p) {
+		n = len(p)
+	}
+	if !r.leaseStillValid() {
+		return
+	}
+	r.mu.Lock()
+	q := r.queue
+	r.convertedWritten = r.convertedWritten || n > 0
+	r.mu.Unlock()
+	if q == nil || !q.enqueue("converted", p[:n], len(p)) {
+		r.addIncomplete("converted_write_failed")
+	}
+	if err != nil || n != len(p) {
+		r.addIncomplete("client_write_partial_or_failed")
+	}
+}
+
+// RecordConvertedBody records non-streaming output before c.Data writes it.
+func (r *GeminiCaptureRequest) RecordConvertedBody(body []byte) {
+	r.RecordConvertedWrite(body, len(body), nil)
+}
+
+func (r *GeminiCaptureRequest) MarkTimeout() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.timeout = true
+	r.mu.Unlock()
+	r.markTermination("timeout")
+}
+
+func (r *GeminiCaptureRequest) MarkContextCanceled() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.ctxCanceled = true
+	r.mu.Unlock()
+	r.markTermination("ctx_cancel")
+}
+
+func (r *GeminiCaptureRequest) MarkClientDisconnect() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.clientDisconnect = true
+	r.mu.Unlock()
+	r.markTermination("client_disconnect")
+}
+
+func (r *GeminiCaptureRequest) markTermination(reason string) {
+	r.mu.Lock()
+	if r.terminals == nil {
+		r.terminals = make(map[string]struct{})
+	}
+	r.terminals[reason] = struct{}{}
+	r.mu.Unlock()
+}
+
+func (r *GeminiCaptureRequest) addIncomplete(reason string) {
+	if r == nil || reason == "" {
+		return
+	}
+	r.mu.Lock()
+	if r.incompleteReason == nil {
+		r.incompleteReason = make(map[string]struct{})
+	}
+	r.incompleteReason[reason] = struct{}{}
+	r.mu.Unlock()
+}
+
+func (r *GeminiCaptureRequest) disable(reason string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.captureEnabled = false
+	if reason != "" {
+		if r.incompleteReason == nil {
+			r.incompleteReason = make(map[string]struct{})
+		}
+		r.incompleteReason[reason] = struct{}{}
+	}
+	r.mu.Unlock()
+}
+
+func (r *GeminiCaptureRequest) leaseStillValid() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	if !r.captureEnabled || r.finalized || r.queue == nil {
+		r.mu.Unlock()
+		return false
+	}
+	now := time.Now()
+	if !now.Before(r.leaseExpiresAt) {
+		r.captureEnabled = false
+		r.incompleteReason["lease_expired"] = struct{}{}
+		r.mu.Unlock()
+		return false
+	}
+	if time.Since(r.lastLeaseCheck) < geminiCaptureLeasePoll || r.leaseRefreshInFlight {
+		r.mu.Unlock()
+		return true
+	}
+	path := r.controller.leasePath
+	metadataUserID := r.metadataUserID
+	r.lastLeaseCheck = now
+	r.leaseRefreshInFlight = true
+	r.mu.Unlock()
+
+	// Do not make the stream writer wait on filesystem I/O. One bounded
+	// refresh is allowed in flight; it either renews the snapshot or disables
+	// subsequent appends. Finish performs the final manifest after queued data.
+	go func() {
+		lease, expiresAt, ok := readGeminiCaptureLease(path)
+		valid := ok && lease.Enabled && lease.Model == GeminiCaptureTargetModel && containsExact(lease.MetadataUserIDs, metadataUserID) && time.Now().Before(expiresAt)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.leaseRefreshInFlight = false
+		if r.finalized || !r.captureEnabled {
+			return
+		}
+		if !valid {
+			r.captureEnabled = false
+			r.incompleteReason["lease_expired_or_disarmed"] = struct{}{}
+			return
+		}
+		r.lease = lease
+		r.leaseExpiresAt = expiresAt
+	}()
+	return true
+}
+
+func (r *GeminiCaptureRequest) refreshLeaseNow() {
+	if r == nil || r.controller == nil {
+		return
+	}
+	r.mu.Lock()
+	if !r.captureEnabled || r.finalized {
+		r.mu.Unlock()
+		return
+	}
+	path := r.controller.leasePath
+	metadataUserID := r.metadataUserID
+	r.mu.Unlock()
+	lease, expiresAt, ok := readGeminiCaptureLease(path)
+	valid := ok && lease.Enabled && lease.Model == GeminiCaptureTargetModel && containsExact(lease.MetadataUserIDs, metadataUserID) && time.Now().Before(expiresAt)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.leaseRefreshInFlight = false
+	if !valid {
+		r.captureEnabled = false
+		r.incompleteReason["lease_expired_or_disarmed"] = struct{}{}
+		return
+	}
+	r.lease = lease
+	r.leaseExpiresAt = expiresAt
+	r.lastLeaseCheck = time.Now()
+}
+
+// Finish is called by the handler defer. It never returns an error to the
+// gateway, and all write/permission failures are represented as incomplete.
+func (r *GeminiCaptureRequest) Finish(status int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.finalized {
+		r.mu.Unlock()
+		return
+	}
+	r.gatewayStatus = status
+	needLocalArtifact := r.candidate && !r.activated && (r.selectedAG || status >= 400) && r.captureEnabled && !r.modelChecked
+	activated := r.activated
+	r.mu.Unlock()
+
+	if !activated && needLocalArtifact {
+		if r.activateLocalFailureArtifact() {
+			activated = true
+		}
+	}
+	if !activated {
+		r.mu.Lock()
+		r.finalized = true
+		r.mu.Unlock()
+		return
+	}
+
+	if activated {
+		r.refreshLeaseNow()
+	}
+	r.mu.Lock()
+	q := r.queue
+	r.finalized = true
+	if r.ctx != nil && errors.Is(r.ctx.Err(), context.Canceled) {
+		r.ctxCanceled = true
+		r.terminals["ctx_cancel"] = struct{}{}
+	}
+	r.mu.Unlock()
+	if q == nil {
+		return
+	}
+	q.close()
+	files, queueReasons := q.snapshot()
+	r.mu.Lock()
+	for _, reason := range queueReasons {
+		r.incompleteReason[reason] = struct{}{}
+	}
+	manifest := r.buildManifestLocked(files)
+	artifactDir := r.artifactDir
+	r.mu.Unlock()
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		r.addIncomplete("manifest_marshal_failed")
+		return
+	}
+	manifestPath := filepath.Join(artifactDir, "manifest.json")
+	manifestTmpPath := manifestPath + ".tmp"
+	if err := os.WriteFile(manifestTmpPath, append(manifestBytes, '\n'), 0600); err != nil {
+		r.addIncomplete("manifest_write_failed")
+		return
+	}
+	_ = os.Chmod(manifestTmpPath, 0600)
+	if err := os.Rename(manifestTmpPath, manifestPath); err != nil {
+		_ = os.Remove(manifestTmpPath)
+		r.addIncomplete("manifest_rename_failed")
+		return
+	}
+	_ = os.Chmod(manifestPath, 0600)
+}
+
+func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
+	lease, expiresAt, ok := readGeminiCaptureLease(r.controller.leasePath)
+	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || time.Now().After(expiresAt) || !privateOutputDir(lease.OutputDir) {
+		r.disable("lease_invalid_or_expired")
+		return false
+	}
+	artifactDir := filepath.Join(lease.OutputDir, "gemini-"+uuid.NewString())
+	if err := os.Mkdir(artifactDir, 0700); err != nil || !privateOutputDir(artifactDir) {
+		r.disable("artifact_dir_unavailable")
+		return false
+	}
+	q := newGeminiCaptureQueue()
+	openFile := func(target, rel string) bool {
+		path := filepath.Join(artifactDir, filepath.FromSlash(rel))
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			q.markIncomplete("file_open_failed")
+			return false
+		}
+		_ = os.Chmod(path, 0600)
+		q.addFile(target, rel, f)
+		return true
+	}
+	if !openFile("inbound", "inbound.bin") {
+		q.close()
+		_ = os.RemoveAll(artifactDir)
+		return false
+	}
+	r.mu.Lock()
+	if r.finalized || !r.captureEnabled {
+		r.mu.Unlock()
+		q.close()
+		_ = os.RemoveAll(artifactDir)
+		return false
+	}
+	r.lease = lease
+	r.leaseExpiresAt = expiresAt
+	r.artifactDir = artifactDir
+	r.queue = q
+	r.activated = true
+	r.mu.Unlock()
+	if !q.enqueue("inbound", r.inboundRedacted, len(r.inboundRedacted)) {
+		r.addIncomplete("inbound_write_failed")
+	}
+	return true
+}
+
+func (r *GeminiCaptureRequest) buildManifestLocked(files map[string]GeminiCaptureFileEvidence) geminiCaptureManifest {
+	attempts := make([]geminiCaptureAttemptEvidence, 0, len(r.attempts))
+	for _, attempt := range r.attempts {
+		attempt.mu.Lock()
+		attemptOutcome := "http_response"
+		if attempt.requestError != "" {
+			attemptOutcome = "request_error"
+		} else if attempt.timeout {
+			attemptOutcome = "timeout"
+		} else if attempt.ctxCanceled {
+			attemptOutcome = "ctx_cancel"
+		} else if attempt.clientDisconnect {
+			attemptOutcome = "client_disconnect"
+		} else if attempt.responseReadError {
+			attemptOutcome = "read_error"
+		} else if attempt.responseEOF {
+			attemptOutcome = "eof"
+		}
+		evidence := geminiCaptureAttemptEvidence{
+			Sequence: attempt.sequence, AccountID: attempt.accountID, GroupID: attempt.groupID,
+			StatusCode: attempt.statusCode, Outcome: attemptOutcome, UpstreamRequestID: attempt.upstreamRequestID,
+			ResponseEOF: attempt.responseEOF, ResponseComplete: attempt.responseEOF && !attempt.responseReadError,
+			ResponseReadError: attempt.responseReadError, RequestError: attempt.requestError,
+			ClientDisconnect: attempt.clientDisconnect, ContextCanceled: attempt.ctxCanceled, Timeout: attempt.timeout,
+		}
+		if f, ok := files[attempt.requestFile]; ok {
+			evidence.RequestFile = f.Path
+		}
+		if f, ok := files[attempt.responseFile]; ok {
+			evidence.ResponseFile = f.Path
+			if !f.Complete {
+				evidence.ResponseComplete = false
+			}
+		}
+		attempt.mu.Unlock()
+		attempts = append(attempts, evidence)
+	}
+	termination := make([]string, 0, len(r.terminals))
+	for reason := range r.terminals {
+		termination = append(termination, reason)
+	}
+	sort.Strings(termination)
+	incompleteReasons := make([]string, 0, len(r.incompleteReason))
+	for reason := range r.incompleteReason {
+		incompleteReasons = append(incompleteReasons, reason)
+	}
+	sort.Strings(incompleteReasons)
+	if r.inboundTruncated {
+		incompleteReasons = appendUniqueStrings(incompleteReasons, "inbound_quota")
+	}
+	sort.Strings(incompleteReasons)
+	incomplete := len(incompleteReasons) > 0
+	for _, file := range files {
+		if !file.Complete {
+			incomplete = true
+			break
+		}
+	}
+	outcome := "completed"
+	switch {
+	case r.gatewayStatus >= 400 && len(attempts) == 0:
+		outcome = "gateway_error_no_upstream_attempt"
+	case r.timeout:
+		outcome = "timeout"
+	case r.clientDisconnect:
+		outcome = "client_disconnect"
+	case r.ctxCanceled:
+		outcome = "ctx_cancel"
+	case r.upstreamReadError:
+		outcome = "upstream_read_error"
+	case r.upstreamEOF:
+		outcome = "upstream_eof"
+	case len(attempts) > 0 && r.gatewayStatus >= 400:
+		outcome = "upstream_http_error"
+	}
+	return geminiCaptureManifest{
+		SchemaVersion: geminiCaptureSchemaVersion, StartedAt: r.startedAt(), FinishedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID: r.requestID, ClientRequestID: r.clientRequestID, UserID: r.userID,
+		GroupID: r.groupID, SelectedAccountID: r.selectedAccountID,
+		MetadataUserID: r.metadataUserID, RequestPath: "/v1/messages", RequestModel: r.requestModel,
+		FinalModel: r.finalModelLocked(), Stream: r.stream, AGChain: r.selectedAG,
+		GatewayStatus: r.gatewayStatus, Outcome: outcome, UpstreamAttempts: len(attempts),
+		UpstreamFinishReasons: r.collectFinishReasons(files), Usage: r.usage, Termination: termination,
+		Incomplete: incomplete, IncompleteReasons: incompleteReasons, RedactedFields: r.redactedFields,
+		HeadersRecorded: false, CredentialHandling: "JSON credential-like fields are replaced with [REDACTED]; HTTP headers are never recorded; thoughtSignature is retained.",
+		Files: files, Attempts: attempts,
+	}
+}
+
+func (r *GeminiCaptureRequest) startedAt() string {
+	if r.startedAtTime.IsZero() {
+		return ""
+	}
+	return r.startedAtTime.Format(time.RFC3339Nano)
+}
+
+func (r *GeminiCaptureRequest) finalModelLocked() string {
+	if r.modelMatched {
+		return GeminiCaptureTargetModel
+	}
+	return ""
+}
+
+func (r *GeminiCaptureRequest) collectFinishReasons(files map[string]GeminiCaptureFileEvidence) []string {
+	// Finish reasons are accumulated by the raw SSE parser below. The parser
+	// stores them as synthetic terminal keys, avoiding any body re-read. The
+	// caller already holds r.mu while building the manifest.
+	result := make([]string, 0)
+	for key := range r.terminals {
+		if strings.HasPrefix(key, "finish:") {
+			result = append(result, strings.TrimPrefix(key, "finish:"))
+		}
+	}
+	sort.Strings(result)
+	_ = files
+	return result
+}
+
+func (r *GeminiCaptureRequest) parseUpstreamChunk(p []byte) {
+	if r == nil || len(p) == 0 {
+		return
+	}
+	// Scanner strips line endings, so this parser receives the original reader
+	// chunks and keeps a carry buffer to avoid losing a JSON line split across
+	// network reads. The exact bytes remain in upstream.bin unchanged.
+	r.mu.Lock()
+	combined := r.parseBuffer + string(p)
+	lines := strings.Split(strings.ReplaceAll(combined, "\r\n", "\n"), "\n")
+	r.parseBuffer = lines[len(lines)-1]
+	r.mu.Unlock()
+	for _, line := range lines[:len(lines)-1] {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var value any
+		if json.Unmarshal([]byte(payload), &value) != nil {
+			continue
+		}
+		r.observeCapturePayload(value)
+	}
+}
+
+func (r *GeminiCaptureRequest) flushCaptureParser() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	line := r.parseBuffer
+	r.parseBuffer = ""
+	r.mu.Unlock()
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "data:") {
+		return
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return
+	}
+	var value any
+	if json.Unmarshal([]byte(payload), &value) == nil {
+		r.observeCapturePayload(value)
+	}
+}
+
+func (r *GeminiCaptureRequest) observeCapturePayload(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if usage, ok := typed["usageMetadata"].(map[string]any); ok {
+			r.mu.Lock()
+			r.usage = cloneCaptureMap(usage)
+			r.mu.Unlock()
+		}
+		if reason, ok := typed["finishReason"].(string); ok && reason != "" {
+			r.markTermination("finish:" + reason)
+		}
+		for _, child := range typed {
+			r.observeCapturePayload(child)
+		}
+	case []any:
+		for _, child := range typed {
+			r.observeCapturePayload(child)
+		}
+	}
+}
+
+func cloneCaptureMap(value map[string]any) map[string]any {
+	result := make(map[string]any, len(value))
+	for key, child := range value {
+		result[key] = child
+	}
+	return result
+}
+
+type geminiCaptureReadCloser struct {
+	io.ReadCloser
+	attempt *GeminiCaptureAttempt
+}
+
+func (r *geminiCaptureReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if r.attempt != nil {
+		r.attempt.markRead(n, err, p)
+		if n > 0 {
+			r.attempt.trace.parseUpstreamChunk(p[:n])
+		}
+	}
+	return n, err
+}
+
+func (r *geminiCaptureReadCloser) Close() error {
+	if r.attempt != nil {
+		r.attempt.markClosed()
+	}
+	return r.ReadCloser.Close()
+}
+
+func readGeminiCaptureLease(path string) (GeminiCaptureLease, time.Time, bool) {
+	var lease GeminiCaptureLease
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return lease, time.Time{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return lease, time.Time{}, false
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, geminiCaptureLeaseMaxBytes+1))
+	if err != nil || len(body) > geminiCaptureLeaseMaxBytes {
+		return lease, time.Time{}, false
+	}
+	if json.Unmarshal(body, &lease) != nil {
+		return lease, time.Time{}, false
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lease.ExpiresAt))
+	if err != nil || expiresAt.IsZero() || !expiresAt.After(time.Now()) {
+		return lease, time.Time{}, false
+	}
+	if strings.TrimSpace(lease.Model) != GeminiCaptureTargetModel || strings.TrimSpace(lease.OutputDir) == "" || len(lease.MetadataUserIDs) == 0 {
+		return lease, time.Time{}, false
+	}
+	for _, userID := range lease.MetadataUserIDs {
+		if strings.TrimSpace(userID) == "" {
+			return lease, time.Time{}, false
+		}
+	}
+	lease.ExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
+	return lease, expiresAt, true
+}
+
+func privateOutputDir(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	lstat, err := os.Lstat(path)
+	if err != nil || lstat.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0077 == 0
+}
+
+func containsExact(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueStrings(values []string, more ...string) []string {
+	for _, value := range more {
+		if value == "" {
+			continue
+		}
+		found := false
+		for _, existing := range values {
+			if existing == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func sanitizeCaptureError(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 256 {
+		value = value[:256]
+	}
+	return value
+}
+
+func redactGeminiCaptureJSON(body []byte) ([]byte, []string) {
+	if len(body) == 0 {
+		return nil, nil
+	}
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		return append([]byte(nil), body...), nil
+	}
+	fields := make([]string, 0)
+	redacted := redactGeminiCaptureValue(value, "", &fields)
+	if len(fields) == 0 {
+		return append([]byte(nil), body...), nil
+	}
+	result, err := json.Marshal(redacted)
+	if err != nil {
+		return append([]byte(nil), body...), nil
+	}
+	return result, fields
+}
+
+func redactGeminiCaptureValue(value any, parent string, fields *[]string) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if isCredentialCaptureField(key) && !strings.EqualFold(key, "thoughtSignature") {
+				typed[key] = "[REDACTED]"
+				*fields = appendUniqueStrings(*fields, parentPath(parent, key))
+				continue
+			}
+			typed[key] = redactGeminiCaptureValue(child, parentPath(parent, key), fields)
+		}
+	case []any:
+		for i, child := range typed {
+			typed[i] = redactGeminiCaptureValue(child, fmt.Sprintf("%s[%d]", parent, i), fields)
+		}
+	}
+	return value
+}
+
+func parentPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "." + key
+}
+
+func isCredentialCaptureField(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if lower == "thoughtsignature" || lower == "thought_signature" {
+		return false
+	}
+	for _, needle := range []string{"authorization", "access_token", "refresh_token", "api_key", "apikey", "client_secret", "private_key", "password", "cookie", "credential", "secret"} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}

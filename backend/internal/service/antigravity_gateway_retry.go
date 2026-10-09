@@ -227,8 +227,21 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 					},
 				}
 			}
+			var captureRetryAttempt *GeminiCaptureAttempt
+			if capture := GeminiCaptureFromContext(p.ctx); capture != nil {
+				captureRetryAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
+			}
 
 			retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+			if captureRetryAttempt != nil {
+				if retryResp != nil {
+					retryResp = captureRetryAttempt.AttachResponse(retryResp)
+				} else if retryErr != nil {
+					captureRetryAttempt.MarkRequestError(retryErr)
+				} else {
+					captureRetryAttempt.MarkRequestError(errors.New("upstream returned nil response"))
+				}
+			}
 			if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 				log.Printf("%s status=%d smart_retry_success attempt=%d/%d", p.prefix, retryResp.StatusCode, attempt, maxAttempts)
 				// 重试成功，清除 MODEL_CAPACITY_EXHAUSTED cooldown
@@ -402,8 +415,21 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 			logger.LegacyPrintf("service.antigravity_gateway", "%s single_account_503_retry: request_build_failed error=%v", p.prefix, err)
 			break
 		}
+		var captureRetryAttempt *GeminiCaptureAttempt
+		if capture := GeminiCaptureFromContext(p.ctx); capture != nil {
+			captureRetryAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
+		}
 
 		retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+		if captureRetryAttempt != nil {
+			if retryResp != nil {
+				retryResp = captureRetryAttempt.AttachResponse(retryResp)
+			} else if retryErr != nil {
+				captureRetryAttempt.MarkRequestError(retryErr)
+			} else {
+				captureRetryAttempt.MarkRequestError(errors.New("upstream returned nil response"))
+			}
+		}
 		if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d single_account_503_retry_success attempt=%d/%d total_waited=%v",
 				p.prefix, retryResp.StatusCode, attempt, antigravitySingleAccountSmartRetryMaxAttempts, totalWaited)
@@ -540,10 +566,24 @@ urlFallbackLoop:
 			if err != nil {
 				return nil, err
 			}
+			var captureAttempt *GeminiCaptureAttempt
+			if capture := GeminiCaptureFromContext(p.ctx); capture != nil {
+				captureAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
+			}
 
 			resp, err = p.httpUpstream.Do(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+			if captureAttempt != nil {
+				if resp != nil {
+					resp = captureAttempt.AttachResponse(resp)
+				} else if err != nil {
+					captureAttempt.MarkRequestError(err)
+				}
+			}
 			if err == nil && resp == nil {
 				err = errors.New("upstream returned nil response")
+			}
+			if captureAttempt != nil && resp == nil && err != nil {
+				captureAttempt.MarkRequestError(err)
 			}
 			if err != nil {
 				safeErr := sanitizeUpstreamErrorMessage(err.Error())
