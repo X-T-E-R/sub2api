@@ -40,6 +40,7 @@ type StreamingProcessor struct {
 	outputTokens      int
 	cacheReadTokens   int
 	imageOutputTokens int
+	hasContent        bool
 }
 
 // NewStreamingProcessor 创建流式响应处理器
@@ -175,6 +176,11 @@ func (p *StreamingProcessor) MessageStartSent() bool {
 	return p.messageStartSent
 }
 
+// HasContent reports whether any substantive text, thinking, or tool calls were emitted.
+func (p *StreamingProcessor) HasContent() bool {
+	return p.hasContent
+}
+
 // emitMessageStart 发送 message_start 事件
 func (p *StreamingProcessor) emitMessageStart(v1Resp *V1InternalResponse) []byte {
 	if p.messageStartSent {
@@ -244,7 +250,10 @@ func (p *StreamingProcessor) processPart(part *GeminiPart) []byte {
 	}
 
 	// 2. Text 处理
-	if part.Text != "" || part.Thought {
+	// Signature-only Gemini parts are carriers for the thought signature chain.
+	// Route them through processText so the signature reaches the following
+	// text/tool or final message instead of being silently discarded.
+	if part.Text != "" || part.Thought || signature != "" {
 		if part.Thought {
 			_, _ = result.Write(p.processThinking(part.Text, signature))
 		} else {
@@ -290,12 +299,14 @@ func (p *StreamingProcessor) processThinking(text, signature string) []byte {
 	// 开始或继续 thinking 块
 	if p.blockType != BlockTypeThinking {
 		_, _ = result.Write(p.startBlock(BlockTypeThinking, map[string]any{
-			"type":     "thinking",
-			"thinking": "",
+			"type":      "thinking",
+			"thinking":  "",
+			"signature": "",
 		}))
 	}
 
 	if text != "" {
+		p.hasContent = true
 		_, _ = result.Write(p.emitDelta("thinking_delta", map[string]any{
 			"thinking": text,
 		}))
@@ -328,17 +339,18 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 		p.trailingSignature = ""
 	}
 
-	// 非空 text 带签名 - 特殊处理
+	// Visible text carries its own signature; do not synthesize a thought block.
 	if signature != "" {
 		_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
-			"type": "text",
-			"text": "",
+			"type":      "text",
+			"text":      "",
+			"signature": signature,
 		}))
 		_, _ = result.Write(p.emitDelta("text_delta", map[string]any{
 			"text": text,
 		}))
 		_, _ = result.Write(p.endBlock())
-		_, _ = result.Write(p.emitEmptyThinkingWithSignature(signature))
+		// Signature remains on the visible text block.
 		return result.Bytes()
 	}
 
@@ -350,6 +362,7 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 		}))
 	}
 
+	p.hasContent = true
 	_, _ = result.Write(p.emitDelta("text_delta", map[string]any{
 		"text": text,
 	}))
@@ -362,6 +375,7 @@ func (p *StreamingProcessor) processFunctionCall(fc *GeminiFunctionCall, signatu
 	var result bytes.Buffer
 
 	p.usedTool = true
+	p.hasContent = true
 
 	toolID := fc.ID
 	if toolID == "" {
@@ -466,8 +480,9 @@ func (p *StreamingProcessor) emitEmptyThinkingWithSignature(signature string) []
 	var result bytes.Buffer
 
 	_, _ = result.Write(p.startBlock(BlockTypeThinking, map[string]any{
-		"type":     "thinking",
-		"thinking": "",
+		"type":      "thinking",
+		"thinking":  "",
+		"signature": "",
 	}))
 	_, _ = result.Write(p.emitDelta("thinking_delta", map[string]any{
 		"thinking": "",

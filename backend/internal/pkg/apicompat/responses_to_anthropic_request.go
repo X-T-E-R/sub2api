@@ -1,17 +1,32 @@
 package apicompat
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 )
+
+// ResponsesToAnthropicOptions controls explicit provider-owned opaque carriers.
+// Generic conversion keeps ordinary OpenAI encrypted reasoning dropped; only a
+// recognized Antigravity envelope is restored when the caller opts in.
+type ResponsesToAnthropicOptions struct {
+	PreserveThinkingSignatures bool
+}
 
 // ResponsesToAnthropicRequest converts a Responses API request into an
 // Anthropic Messages request. This is the reverse of AnthropicToResponses and
 // enables Anthropic platform groups to accept OpenAI Responses API requests
 // by converting them to the native /v1/messages format before forwarding upstream.
 func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, error) {
-	system, messages, err := convertResponsesInputToAnthropic(req.Instructions, req.Input)
+	return ResponsesToAnthropicRequestWithOptions(req, ResponsesToAnthropicOptions{})
+}
+
+// ResponsesToAnthropicRequestWithOptions restores only explicit provider-owned
+// thinking envelopes. It must not reinterpret arbitrary OpenAI encrypted_content
+// as an Anthropic/Gemini thought signature.
+func ResponsesToAnthropicRequestWithOptions(req *ResponsesRequest, opts ResponsesToAnthropicOptions) (*AnthropicRequest, error) {
+	system, messages, err := convertResponsesInputToAnthropicWithOptions(req.Instructions, req.Input, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +116,10 @@ func mapResponsesEffortToAnthropic(effort string) string {
 // a Responses API instructions + input array. Returns the system as raw JSON
 // (for Anthropic's polymorphic system field) and a list of Anthropic messages.
 func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMessage) (json.RawMessage, []AnthropicMessage, error) {
+	return convertResponsesInputToAnthropicWithOptions(instructions, inputRaw, ResponsesToAnthropicOptions{})
+}
+
+func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw json.RawMessage, opts ResponsesToAnthropicOptions) (json.RawMessage, []AnthropicMessage, error) {
 	var systemParts []string
 	if strings.TrimSpace(instructions) != "" {
 		systemParts = append(systemParts, strings.TrimSpace(instructions))
@@ -144,6 +163,12 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 				Name:  item.Name,
 				Input: input,
 			}
+			if opts.PreserveThinkingSignatures {
+				if carrier, ok := decodeAntigravityToolSignature(item.EncryptedContent); ok &&
+					carrier.Name == block.Name && antigravityToolIDsMatch(carrier.ID, block.ID) {
+					block.Signature = carrier.Signature
+				}
+			}
 			blockJSON, _ := json.Marshal([]AnthropicContentBlock{block})
 			messages = append(messages, AnthropicMessage{
 				Role:    "assistant",
@@ -165,11 +190,15 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 			})
 
 		case item.Type == "reasoning":
-			// Anthropic 无法摄入 OpenAI 的 reasoning：encrypted_content 是不透明的，
-			// 而 thinking 块的重放需要 Anthropic 自己签发的 signature，无法伪造。
-			// Codex 常见形态（只带 summary + encrypted_content）本来就会被丢弃，
-			// 这里让带 content 数组的形态保持同样行为——否则 reasoning_text 块会被
-			// 原样塞进 Anthropic 请求体，上游直接回 400。
+			// Generic Responses requests keep opaque OpenAI reasoning dropped. An
+			// Antigravity response carries an explicit anthropic-thinking-v1
+			// envelope; only the opt-in path decodes it into a signed thinking block.
+			if opts.PreserveThinkingSignatures {
+				if block, ok := decodeAnthropicThinking(item.EncryptedContent); ok {
+					blockJSON, _ := json.Marshal([]AnthropicContentBlock{block})
+					messages = append(messages, AnthropicMessage{Role: "assistant", Content: blockJSON})
+				}
+			}
 
 		case item.Role == "user":
 			content, err := convertResponsesUserToAnthropicContent(item.Content)
@@ -188,7 +217,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 			})
 
 		case item.Role == "assistant":
-			content, err := convertResponsesAssistantToAnthropicContent(item.Content)
+			content, err := convertResponsesAssistantToAnthropicContentWithOptions(item.Content, opts)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -239,6 +268,39 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	}
 
 	return system, messages, nil
+}
+
+func antigravityToolIDsMatch(carrierID, anthropicID string) bool {
+	if carrierID == anthropicID {
+		return true
+	}
+	return fromResponsesCallIDToAnthropic(carrierID) == anthropicID || fromResponsesCallIDToAnthropic(anthropicID) == carrierID
+}
+
+func decodeAnthropicThinking(encrypted string) (AnthropicContentBlock, bool) {
+	if !strings.HasPrefix(encrypted, anthropicThinkingEnvelopePrefix) {
+		return AnthropicContentBlock{}, false
+	}
+	encoded := strings.TrimPrefix(encrypted, anthropicThinkingEnvelopePrefix)
+	payload, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return AnthropicContentBlock{}, false
+	}
+	var block struct {
+		Type      string `json:"type"`
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		Data      string `json:"data"`
+	}
+	if json.Unmarshal(payload, &block) != nil || (block.Type != "thinking" && block.Type != "redacted_thinking") {
+		return AnthropicContentBlock{}, false
+	}
+	return AnthropicContentBlock{
+		Type:      block.Type,
+		Thinking:  block.Thinking,
+		Signature: block.Signature,
+		Data:      block.Data,
+	}, true
 }
 
 func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {
@@ -353,8 +415,22 @@ func normalizeAnthropicToolPairing(messages []AnthropicMessage) []AnthropicMessa
 				continue
 			}
 			asstBlocks := make([]AnthropicContentBlock, 0, len(others)+len(kept))
-			asstBlocks = append(asstBlocks, others...)
-			asstBlocks = append(asstBlocks, kept...)
+			// Keep non-tool blocks and answered tool_use blocks in their original relative order.
+			keptIDs := make(map[string]struct{}, len(kept))
+			for _, tu := range kept {
+				keptIDs[tu.ID] = struct{}{}
+			}
+			asstBlocks = asstBlocks[:0]
+			for _, block := range blocks {
+				if block.Type != "tool_use" {
+					asstBlocks = append(asstBlocks, block)
+					continue
+				}
+				if _, ok := keptIDs[block.ID]; ok {
+					asstBlocks = append(asstBlocks, block)
+				}
+			}
+			// answered tool_use blocks were reinserted above at their original boundaries
 			out = append(out, anthropicMessageFromBlocks("assistant", asstBlocks))
 
 			resBlocks := make([]AnthropicContentBlock, 0, len(kept))
@@ -496,6 +572,10 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 // convertResponsesAssistantToAnthropicContent converts a Responses assistant
 // message content field into Anthropic content blocks JSON.
 func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawMessage, error) {
+	return convertResponsesAssistantToAnthropicContentWithOptions(raw, ResponsesToAnthropicOptions{})
+}
+
+func convertResponsesAssistantToAnthropicContentWithOptions(raw json.RawMessage, opts ResponsesToAnthropicOptions) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return json.Marshal([]AnthropicContentBlock{{Type: "text", Text: ""}})
 	}
@@ -517,10 +597,11 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 		switch p.Type {
 		case "output_text", "text":
 			if p.Text != "" {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type: "text",
-					Text: p.Text,
-				})
+				block := AnthropicContentBlock{Type: "text", Text: p.Text}
+				if opts.PreserveThinkingSignatures {
+					block.Signature = p.Signature
+				}
+				blocks = append(blocks, block)
 			}
 		}
 	}

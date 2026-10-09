@@ -143,7 +143,8 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 	}
 
 	// 2. Text 处理
-	if part.Text != "" || part.Thought {
+	// Signature-only Gemini parts must reach the trailing-signature path.
+	if part.Text != "" || part.Thought || signature != "" {
 		if part.Thought {
 			// Thinking part
 			p.flushText()
@@ -186,17 +187,16 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 				p.trailingSignature = ""
 			}
 
-			// 非空 text 带签名 - 特殊处理：先输出 text，再输出空 thinking 块
+			// 非空 text 带签名：签名保留在可见 text carrier
 			if signature != "" {
+				// Preserve unsigned text before this signed target.
+				p.flushText()
 				p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
-					Type: "text",
-					Text: part.Text,
-				})
-				p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
-					Type:      "thinking",
-					Thinking:  "",
+					Type:      "text",
+					Text:      part.Text,
 					Signature: signature,
 				})
+
 			} else {
 				// 普通 text (无签名) - 累积到 builder
 				p.textBuilder += part.Text

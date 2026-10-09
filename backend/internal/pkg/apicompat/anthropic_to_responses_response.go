@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,10 +13,26 @@ import (
 // Non-streaming: AnthropicResponse → ResponsesResponse
 // ---------------------------------------------------------------------------
 
+// AnthropicToResponsesOptions controls provider-specific opaque carriers.
+// Generic callers keep the default zero value: provider-encrypted reasoning is
+// not inferred as a Gemini thought signature unless the caller explicitly opts
+// into the Antigravity envelope.
+type AnthropicToResponsesOptions struct {
+	PreserveThinkingSignatures bool
+}
+
 // AnthropicToResponsesResponse converts an Anthropic Messages response into a
 // Responses API response. This is the reverse of ResponsesToAnthropic and
 // enables Anthropic upstream responses to be returned in OpenAI Responses format.
 func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
+	return AnthropicToResponsesResponseWithOptions(resp, AnthropicToResponsesOptions{})
+}
+
+// AnthropicToResponsesResponseWithOptions converts an Anthropic response while
+// optionally carrying an explicit provider-owned thinking signature envelope.
+// The envelope is deliberately opt-in so ordinary OpenAI encrypted reasoning is
+// not silently reinterpreted as a Gemini thought signature.
+func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts AnthropicToResponsesOptions) *ResponsesResponse {
 	id := resp.ID
 	if id == "" {
 		id = generateResponsesID()
@@ -32,45 +49,10 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 
 	var outputs []ResponsesOutput
 	var msgParts []ResponsesContentPart
-
-	for _, block := range resp.Content {
-		switch block.Type {
-		case "thinking":
-			if block.Thinking != "" {
-				outputs = append(outputs, ResponsesOutput{
-					Type: "reasoning",
-					ID:   generateItemID(),
-					Summary: []ResponsesSummary{{
-						Type: "summary_text",
-						Text: block.Thinking,
-					}},
-				})
-			}
-		case "text":
-			if block.Text != "" {
-				msgParts = append(msgParts, ResponsesContentPart{
-					Type: "output_text",
-					Text: block.Text,
-				})
-			}
-		case "tool_use":
-			args := "{}"
-			if len(block.Input) > 0 {
-				args = string(block.Input)
-			}
-			outputs = append(outputs, ResponsesOutput{
-				Type:      "function_call",
-				ID:        generateItemID(),
-				CallID:    toResponsesCallID(block.ID),
-				Name:      block.Name,
-				Arguments: args,
-				Status:    "completed",
-			})
+	flushMessage := func() {
+		if len(msgParts) == 0 {
+			return
 		}
-	}
-
-	// Assemble message output item from text parts
-	if len(msgParts) > 0 {
 		outputs = append(outputs, ResponsesOutput{
 			Type:    "message",
 			ID:      generateItemID(),
@@ -78,7 +60,64 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 			Content: msgParts,
 			Status:  "completed",
 		})
+		msgParts = nil
 	}
+
+	for _, block := range resp.Content {
+		switch block.Type {
+		case "thinking":
+			if opts.PreserveThinkingSignatures {
+				flushMessage()
+			}
+			if block.Thinking != "" || (opts.PreserveThinkingSignatures && (block.Signature != "" || block.Data != "")) {
+				item := ResponsesOutput{
+					Type: "reasoning",
+					ID:   generateItemID(),
+				}
+				if block.Thinking != "" {
+					item.Summary = []ResponsesSummary{{
+						Type: "summary_text",
+						Text: block.Thinking,
+					}}
+				}
+				if opts.PreserveThinkingSignatures && (block.Signature != "" || block.Data != "") {
+					item.EncryptedContent = encodeAnthropicThinking(block)
+				}
+				outputs = append(outputs, item)
+			}
+		case "text":
+			if block.Text != "" {
+				part := ResponsesContentPart{Type: "output_text", Text: block.Text}
+				if opts.PreserveThinkingSignatures {
+					part.Signature = block.Signature
+				}
+				msgParts = append(msgParts, part)
+			}
+		case "tool_use":
+			if opts.PreserveThinkingSignatures {
+				flushMessage()
+			}
+			args := "{}"
+			if len(block.Input) > 0 {
+				args = string(block.Input)
+			}
+			item := ResponsesOutput{
+				Type:      "function_call",
+				ID:        generateItemID(),
+				CallID:    toResponsesCallID(block.ID),
+				Name:      block.Name,
+				Arguments: args,
+				Status:    "completed",
+			}
+			if opts.PreserveThinkingSignatures && block.Signature != "" {
+				item.EncryptedContent = encodeAntigravityToolSignature(block)
+			}
+			outputs = append(outputs, item)
+		}
+	}
+
+	// Assemble message output item from text parts
+	flushMessage()
 
 	if len(outputs) == 0 {
 		outputs = append(outputs, ResponsesOutput{
@@ -160,13 +199,26 @@ type AnthropicEventToResponsesState struct {
 	TextAccum string
 
 	// For function_call: track per-output info
-	CurrentCallID string
-	CurrentName   string
+	CurrentCallID        string
+	CurrentName          string
+	CurrentToolSignature string
 
 	// Content of the currently open item, folded into Outputs when it closes.
-	CurrentContent []ResponsesContentPart // message
-	CurrentArgs    string                 // function_call
-	CurrentSummary string                 // reasoning
+	CurrentContent       []ResponsesContentPart // message
+	CurrentTextSignature string
+	CurrentArgs          string                // function_call
+	CurrentSummary       string                // reasoning
+	CurrentThinking      AnthropicContentBlock // provider-owned thinking carrier
+
+	// PreserveThinkingSignatures is an explicit provider opt-in. Generic
+	// Anthropic→Responses conversion leaves signatures out of encrypted_content.
+	PreserveThinkingSignatures bool
+
+	// PendingToolInput holds tool arguments that arrived complete on
+	// content_block_start instead of as input_json_delta. It is only consumed at
+	// content_block_stop, and only when no delta ever arrived, so a canonical
+	// Anthropic stream keeps its exact event sequence.
+	PendingToolInput string
 
 	// Outputs accumulates every closed output item so that response.completed
 	// can carry the full output list. The OpenAI SDK's get_final_response()
@@ -187,8 +239,15 @@ type AnthropicEventToResponsesState struct {
 
 // NewAnthropicEventToResponsesState returns an initialised stream state.
 func NewAnthropicEventToResponsesState() *AnthropicEventToResponsesState {
+	return NewAnthropicEventToResponsesStateWithOptions(AnthropicToResponsesOptions{})
+}
+
+// NewAnthropicEventToResponsesStateWithOptions returns a stream converter state
+// with explicit provider-carrier behavior.
+func NewAnthropicEventToResponsesStateWithOptions(opts AnthropicToResponsesOptions) *AnthropicEventToResponsesState {
 	return &AnthropicEventToResponsesState{
-		Created: time.Now().Unix(),
+		Created:                    time.Now().Unix(),
+		PreserveThinkingSignatures: opts.PreserveThinkingSignatures,
 	}
 }
 
@@ -280,8 +339,20 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 
 	switch evt.ContentBlock.Type {
 	case "thinking":
+		// 开新 item 前必须先关掉在开的那个，与下面的 tool_use 分支一致。
+		// 一个 message item 在它的 text 块 content_block_stop 时是刻意保持打开的
+		// （同一 item 里可能还有后续 text 块），所以 thinking 块到来时它仍然开着：
+		// 不关就直接被 CurrentItemType/CurrentItemID 覆盖，累积在 CurrentContent
+		// 里的助手文本既不会进 state.Outputs，也拿不到 output_item.done，
+		// response.completed 于是只带 reasoning——客户端看到的是「成功但无输出」。
+		// 交错思考（interleaved-thinking，本仓库在 anthropic-beta 透传里明确支持）
+		// 会稳定产生 text → thinking 这个顺序。
+		events = append(events, closeCurrentResponsesItem(state)...)
+
 		state.CurrentItemID = generateItemID()
 		state.CurrentItemType = "reasoning"
+		state.CurrentThinking = *evt.ContentBlock
+		state.CurrentSummary = evt.ContentBlock.Thinking
 		state.ContentIndex = 0
 
 		events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
@@ -293,8 +364,18 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 		}))
 
 	case "text":
+		// Every text block owns its own carrier; reset before emitting this part.
+		state.CurrentTextSignature = ""
+		if state.PreserveThinkingSignatures {
+			state.CurrentTextSignature = evt.ContentBlock.Signature
+		}
 		// If we don't have an open message item, open one
 		if state.CurrentItemType != "message" {
+			// 走到这里时 CurrentItemType 只可能是 ""（前一个 reasoning/function_call
+			// 已在自己的 content_block_stop 里关闭）；保留这次关闭是为了让三个分支
+			// 的「开新 item 前先关旧的」保持同一条不变式，而不是留一个仅 text 例外。
+			events = append(events, closeCurrentResponsesItem(state)...)
+
 			state.CurrentItemID = generateItemID()
 			state.CurrentItemType = "message"
 			state.ContentIndex = 0
@@ -322,7 +403,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 			OutputIndex:  state.OutputIndex,
 			ContentIndex: state.ContentIndex,
 			ItemID:       state.CurrentItemID,
-			Part:         &ResponsesContentPart{Type: "output_text", Text: ""},
+			Part:         &ResponsesContentPart{Type: "output_text", Text: "", Signature: state.CurrentTextSignature},
 		}))
 		state.TextAccum = ""
 
@@ -334,6 +415,13 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 		state.CurrentItemType = "function_call"
 		state.CurrentCallID = toResponsesCallID(evt.ContentBlock.ID)
 		state.CurrentName = evt.ContentBlock.Name
+		state.CurrentToolSignature = evt.ContentBlock.Signature
+		// The canonical Anthropic stream leaves input empty here and streams the
+		// arguments as input_json_delta, but Anthropic-compatible relays may put
+		// the complete arguments on this event and never send a delta. Keep them
+		// as a seed rather than emitting now: a delta, if one follows, is
+		// authoritative and must not be concatenated onto this JSON.
+		state.PendingToolInput = seedToolArguments(evt.ContentBlock.Input)
 
 		events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
 			OutputIndex: state.OutputIndex,
@@ -384,6 +472,9 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 		if evt.Delta.PartialJSON == "" {
 			return nil
 		}
+		// A real delta supersedes whatever content_block_start carried; keeping
+		// both would splice two complete JSON documents together.
+		state.PendingToolInput = ""
 		state.CurrentArgs += evt.Delta.PartialJSON
 		return []ResponsesStreamEvent{makeResponsesEvent(state, "response.function_call_arguments.delta", &ResponsesStreamEvent{
 			OutputIndex: state.OutputIndex,
@@ -394,7 +485,16 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 		})}
 
 	case "signature_delta":
-		// Anthropic signature deltas have no Responses equivalent; skip
+		// Responses has no visible signature delta. Preserve it only in the
+		// provider-scoped opaque envelope requested by the caller.
+		if state.PreserveThinkingSignatures {
+			switch state.CurrentItemType {
+			case "reasoning":
+				state.CurrentThinking.Signature += evt.Delta.Signature
+			case "function_call":
+				state.CurrentToolSignature += evt.Delta.Signature
+			}
+		}
 		return nil
 	}
 
@@ -416,15 +516,35 @@ func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *Anthropic
 		return events
 
 	case "function_call":
-		// Emit function_call_arguments.done + output item done
-		events := []ResponsesStreamEvent{
-			makeResponsesEvent(state, "response.function_call_arguments.done", &ResponsesStreamEvent{
+		var events []ResponsesStreamEvent
+		// No delta ever arrived, so the arguments the upstream put on
+		// content_block_start are all there is. Emit them as one delta here so
+		// the done event below still repeats exactly what the deltas streamed.
+		if state.CurrentArgs == "" && state.PendingToolInput != "" {
+			state.CurrentArgs = state.PendingToolInput
+			events = append(events, makeResponsesEvent(state, "response.function_call_arguments.delta", &ResponsesStreamEvent{
 				OutputIndex: state.OutputIndex,
+				Delta:       state.PendingToolInput,
 				ItemID:      state.CurrentItemID,
 				CallID:      state.CurrentCallID,
 				Name:        state.CurrentName,
-			}),
+			}))
 		}
+		state.PendingToolInput = ""
+
+		// Emit function_call_arguments.done + output item done.
+		// arguments must repeat exactly what the deltas already streamed for this
+		// item: clients reconcile the done event against the accumulated
+		// function_call_arguments.delta payloads and reject the call as
+		// inconsistent_tool_call when the two disagree. Omitting the field left it
+		// empty while the deltas carried the whole JSON.
+		events = append(events, makeResponsesEvent(state, "response.function_call_arguments.done", &ResponsesStreamEvent{
+			OutputIndex: state.OutputIndex,
+			ItemID:      state.CurrentItemID,
+			CallID:      state.CurrentCallID,
+			Name:        state.CurrentName,
+			Arguments:   state.CurrentArgs,
+		}))
 		events = append(events, closeCurrentResponsesItem(state)...)
 		return events
 
@@ -434,19 +554,27 @@ func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *Anthropic
 		// item itself stays open since more blocks may follow.
 		text := state.TextAccum
 		state.TextAccum = ""
-		state.CurrentContent = append(state.CurrentContent, ResponsesContentPart{Type: "output_text", Text: text})
+		contentIndex := state.ContentIndex
+		state.CurrentContent = append(state.CurrentContent, ResponsesContentPart{Type: "output_text", Text: text, Signature: state.CurrentTextSignature})
+		// 关掉一个 part 就推进 content_index：上面那句注释说的「item 保持打开，
+		// 因为后面可能还有块」正是这里的触发条件。不推进的话，同一 item 里第二个
+		// text 块会再发一次 content_part.added(content_index=0)，与第一个 part 撞在
+		// 同一下标上——SDK 的累积式 stream helper 按 content[content_index] 写入，
+		// 后一个 part 直接覆盖前一个，可见文本丢失。
+		// 只在这里推进：新 item 的 content_index 由 closeCurrentResponsesItem 归 0。
+		state.ContentIndex++
 		return []ResponsesStreamEvent{
 			makeResponsesEvent(state, "response.output_text.done", &ResponsesStreamEvent{
 				OutputIndex:  state.OutputIndex,
-				ContentIndex: state.ContentIndex,
+				ContentIndex: contentIndex,
 				ItemID:       state.CurrentItemID,
 				Text:         text,
 			}),
 			makeResponsesEvent(state, "response.content_part.done", &ResponsesStreamEvent{
 				OutputIndex:  state.OutputIndex,
-				ContentIndex: state.ContentIndex,
+				ContentIndex: contentIndex,
 				ItemID:       state.CurrentItemID,
-				Part:         &ResponsesContentPart{Type: "output_text", Text: text},
+				Part:         &ResponsesContentPart{Type: "output_text", Text: text, Signature: state.CurrentTextSignature},
 			}),
 		}
 	}
@@ -497,6 +625,19 @@ func anthropicResponsesStreamTerminalState(stopReason string) (string, *Response
 	return "completed", nil
 }
 
+// seedToolArguments normalizes a tool_use content block's inline input into a
+// seed for the streaming converter. Empty, absent and no-argument payloads
+// return "" so the existing "{}" fallback still applies and no empty delta is
+// synthesized.
+func seedToolArguments(input json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(input))
+	switch trimmed {
+	case "", "{}", "null":
+		return ""
+	}
+	return trimmed
+}
+
 func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []ResponsesStreamEvent {
 	if state.CurrentItemType == "" {
 		return nil
@@ -522,9 +663,21 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 			args = "{}"
 		}
 		item.Arguments = args
+		if state.PreserveThinkingSignatures && state.CurrentToolSignature != "" {
+			item.EncryptedContent = encodeAntigravityToolSignature(AnthropicContentBlock{
+				Type:      "tool_use",
+				ID:        state.CurrentCallID,
+				Name:      state.CurrentName,
+				Signature: state.CurrentToolSignature,
+			})
+		}
 	case "reasoning":
 		if state.CurrentSummary != "" {
 			item.Summary = []ResponsesSummary{{Type: "summary_text", Text: state.CurrentSummary}}
+		}
+		if state.PreserveThinkingSignatures && (state.CurrentThinking.Signature != "" || state.CurrentThinking.Data != "") {
+			state.CurrentThinking.Thinking = state.CurrentSummary
+			item.EncryptedContent = encodeAnthropicThinking(state.CurrentThinking)
 		}
 	}
 	state.Outputs = append(state.Outputs, item)
@@ -534,9 +687,13 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 	state.CurrentItemID = ""
 	state.CurrentCallID = ""
 	state.CurrentName = ""
+	state.CurrentToolSignature = ""
 	state.CurrentContent = nil
 	state.CurrentArgs = ""
+	state.PendingToolInput = ""
 	state.CurrentSummary = ""
+	state.CurrentTextSignature = ""
+	state.CurrentThinking = AnthropicContentBlock{}
 	state.TextAccum = ""
 	state.OutputIndex++
 	state.ContentIndex = 0
