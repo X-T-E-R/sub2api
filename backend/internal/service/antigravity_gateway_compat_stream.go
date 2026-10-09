@@ -74,7 +74,9 @@ type antigravityResponsesStreamAdapter struct {
 }
 
 func newAntigravityResponsesStreamAdapter(model string) *antigravityResponsesStreamAdapter {
-	state := apicompat.NewAnthropicEventToResponsesState()
+	state := apicompat.NewAnthropicEventToResponsesStateWithOptions(apicompat.AnthropicToResponsesOptions{
+		PreserveThinkingSignatures: true,
+	})
 	state.Model = model
 	return &antigravityResponsesStreamAdapter{anthropicState: state}
 }

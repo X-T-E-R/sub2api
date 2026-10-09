@@ -337,8 +337,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	var firstTokenMs *int
 	var last map[string]any
 	var lastWithParts map[string]any
-	var collectedImageParts []map[string]any // 收集所有包含图片的 parts
-	var collectedTextParts []string          // 收集所有文本片段
+	var collectedParts []map[string]any // 收集所有 parts，保留 thinking/tool/signature 顺序
 
 	type scanEvent struct {
 		line string
@@ -457,16 +456,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			// 保留最后一个有 parts 的响应
 			if parts := extractGeminiParts(parsed); len(parts) > 0 {
 				lastWithParts = parsed
-				// 收集包含图片和文本的 parts
-				for _, part := range parts {
-					if inlineData, ok := part["inlineData"].(map[string]any); ok {
-						collectedImageParts = append(collectedImageParts, part)
-						_ = inlineData // 避免 unused 警告
-					}
-					if text, ok := part["text"].(string); ok && text != "" {
-						collectedTextParts = append(collectedTextParts, text)
-					}
-				}
+				// 收集所有 parts，保留 thinking/tool/signature 的原始顺序
+				collectedParts = append(collectedParts, parts...)
 			}
 
 		case <-intervalCh:
@@ -493,14 +484,10 @@ returnResponse:
 		}
 	}
 
-	// 如果收集到了图片 parts，需要合并到最终响应中
-	if len(collectedImageParts) > 0 {
-		finalResponse = mergeImagePartsToResponse(finalResponse, collectedImageParts)
-	}
-
-	// 如果收集到了文本，需要合并到最终响应中
-	if len(collectedTextParts) > 0 {
-		finalResponse = mergeTextPartsToResponse(finalResponse, collectedTextParts)
+	// 将所有收集到的 parts 合并回最终响应，保留 thinking、tool
+	// 和 thoughtSignature carrier 的顺序与内容。
+	if len(collectedParts) > 0 {
+		finalResponse = mergeCollectedPartsToResponse(finalResponse, collectedParts)
 	}
 
 	respBody, err := json.Marshal(finalResponse)
@@ -582,19 +569,26 @@ func mergeCollectedPartsToResponse(response map[string]any, collectedParts []map
 	}
 
 	for _, part := range collectedParts {
-		// 检查是否是普通 text part
-		if text, ok := part["text"].(string); ok {
-			// 检查是否有 thought 标记
-			if thought, _ := part["thought"].(bool); thought {
-				// thinking part，先刷新 text buffer，然后保留原样
-				flushTextBuffer()
-				mergedParts = append(mergedParts, part)
-			} else {
-				// 普通 text，累积到 buffer
-				_, _ = textBuffer.WriteString(text)
-			}
-		} else {
-			// 非 text part（functionCall、inlineData 等），先刷新 text buffer，然后保留原样
+		text, hasText := part["text"].(string)
+		thought, _ := part["thought"].(bool)
+		_, hasSignature := part["thoughtSignature"]
+
+		switch {
+		case thought:
+			// Thinking parts (including empty carriers) must never be mixed into
+			// ordinary text and retain their thoughtSignature field.
+			flushTextBuffer()
+			mergedParts = append(mergedParts, part)
+		case hasSignature:
+			// A non-thought signature carrier belongs at this exact boundary. Do
+			// not turn it into ordinary text or drop the signature key.
+			flushTextBuffer()
+			mergedParts = append(mergedParts, part)
+		case hasText:
+			// Only unsigned ordinary text may be coalesced.
+			_, _ = textBuffer.WriteString(text)
+		default:
+			// Non-text parts (functionCall, inlineData, etc.) retain order.
 			flushTextBuffer()
 			mergedParts = append(mergedParts, part)
 		}

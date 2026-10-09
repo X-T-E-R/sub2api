@@ -250,7 +250,10 @@ func (p *StreamingProcessor) processPart(part *GeminiPart) []byte {
 	}
 
 	// 2. Text 处理
-	if part.Text != "" || part.Thought {
+	// Signature-only Gemini parts are carriers for the thought signature chain.
+	// Route them through processText so the signature reaches the following
+	// text/tool or final message instead of being silently discarded.
+	if part.Text != "" || part.Thought || signature != "" {
 		if part.Thought {
 			_, _ = result.Write(p.processThinking(part.Text, signature))
 		} else {

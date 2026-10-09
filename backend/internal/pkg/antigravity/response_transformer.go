@@ -143,7 +143,8 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 	}
 
 	// 2. Text 处理
-	if part.Text != "" || part.Thought {
+	// Signature-only Gemini parts must reach the trailing-signature path.
+	if part.Text != "" || part.Thought || signature != "" {
 		if part.Thought {
 			// Thinking part
 			p.flushText()

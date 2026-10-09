@@ -13,10 +13,26 @@ import (
 // Non-streaming: AnthropicResponse → ResponsesResponse
 // ---------------------------------------------------------------------------
 
+// AnthropicToResponsesOptions controls provider-specific opaque carriers.
+// Generic callers keep the default zero value: provider-encrypted reasoning is
+// not inferred as a Gemini thought signature unless the caller explicitly opts
+// into the Antigravity envelope.
+type AnthropicToResponsesOptions struct {
+	PreserveThinkingSignatures bool
+}
+
 // AnthropicToResponsesResponse converts an Anthropic Messages response into a
 // Responses API response. This is the reverse of ResponsesToAnthropic and
 // enables Anthropic upstream responses to be returned in OpenAI Responses format.
 func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
+	return AnthropicToResponsesResponseWithOptions(resp, AnthropicToResponsesOptions{})
+}
+
+// AnthropicToResponsesResponseWithOptions converts an Anthropic response while
+// optionally carrying an explicit provider-owned thinking signature envelope.
+// The envelope is deliberately opt-in so ordinary OpenAI encrypted reasoning is
+// not silently reinterpreted as a Gemini thought signature.
+func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts AnthropicToResponsesOptions) *ResponsesResponse {
 	id := resp.ID
 	if id == "" {
 		id = generateResponsesID()
@@ -37,15 +53,21 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
-			if block.Thinking != "" {
-				outputs = append(outputs, ResponsesOutput{
+			if block.Thinking != "" || (opts.PreserveThinkingSignatures && (block.Signature != "" || block.Data != "")) {
+				item := ResponsesOutput{
 					Type: "reasoning",
 					ID:   generateItemID(),
-					Summary: []ResponsesSummary{{
+				}
+				if block.Thinking != "" {
+					item.Summary = []ResponsesSummary{{
 						Type: "summary_text",
 						Text: block.Thinking,
-					}},
-				})
+					}}
+				}
+				if opts.PreserveThinkingSignatures && (block.Signature != "" || block.Data != "") {
+					item.EncryptedContent = encodeAnthropicThinking(block)
+				}
+				outputs = append(outputs, item)
 			}
 		case "text":
 			if block.Text != "" {
@@ -165,9 +187,14 @@ type AnthropicEventToResponsesState struct {
 	CurrentName   string
 
 	// Content of the currently open item, folded into Outputs when it closes.
-	CurrentContent []ResponsesContentPart // message
-	CurrentArgs    string                 // function_call
-	CurrentSummary string                 // reasoning
+	CurrentContent  []ResponsesContentPart // message
+	CurrentArgs     string                 // function_call
+	CurrentSummary  string                 // reasoning
+	CurrentThinking AnthropicContentBlock  // provider-owned thinking carrier
+
+	// PreserveThinkingSignatures is an explicit provider opt-in. Generic
+	// Anthropic→Responses conversion leaves signatures out of encrypted_content.
+	PreserveThinkingSignatures bool
 
 	// PendingToolInput holds tool arguments that arrived complete on
 	// content_block_start instead of as input_json_delta. It is only consumed at
@@ -194,8 +221,15 @@ type AnthropicEventToResponsesState struct {
 
 // NewAnthropicEventToResponsesState returns an initialised stream state.
 func NewAnthropicEventToResponsesState() *AnthropicEventToResponsesState {
+	return NewAnthropicEventToResponsesStateWithOptions(AnthropicToResponsesOptions{})
+}
+
+// NewAnthropicEventToResponsesStateWithOptions returns a stream converter state
+// with explicit provider-carrier behavior.
+func NewAnthropicEventToResponsesStateWithOptions(opts AnthropicToResponsesOptions) *AnthropicEventToResponsesState {
 	return &AnthropicEventToResponsesState{
-		Created: time.Now().Unix(),
+		Created:                    time.Now().Unix(),
+		PreserveThinkingSignatures: opts.PreserveThinkingSignatures,
 	}
 }
 
@@ -299,6 +333,8 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 
 		state.CurrentItemID = generateItemID()
 		state.CurrentItemType = "reasoning"
+		state.CurrentThinking = *evt.ContentBlock
+		state.CurrentSummary = evt.ContentBlock.Thinking
 		state.ContentIndex = 0
 
 		events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
@@ -425,7 +461,11 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 		})}
 
 	case "signature_delta":
-		// Anthropic signature deltas have no Responses equivalent; skip
+		// Responses has no visible signature delta. Preserve it only in the
+		// provider-scoped opaque envelope requested by the caller.
+		if state.PreserveThinkingSignatures && state.CurrentItemType == "reasoning" {
+			state.CurrentThinking.Signature += evt.Delta.Signature
+		}
 		return nil
 	}
 
@@ -598,6 +638,10 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 		if state.CurrentSummary != "" {
 			item.Summary = []ResponsesSummary{{Type: "summary_text", Text: state.CurrentSummary}}
 		}
+		if state.PreserveThinkingSignatures && (state.CurrentThinking.Signature != "" || state.CurrentThinking.Data != "") {
+			state.CurrentThinking.Thinking = state.CurrentSummary
+			item.EncryptedContent = encodeAnthropicThinking(state.CurrentThinking)
+		}
 	}
 	state.Outputs = append(state.Outputs, item)
 
@@ -610,6 +654,7 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 	state.CurrentArgs = ""
 	state.PendingToolInput = ""
 	state.CurrentSummary = ""
+	state.CurrentThinking = AnthropicContentBlock{}
 	state.TextAccum = ""
 	state.OutputIndex++
 	state.ContentIndex = 0
