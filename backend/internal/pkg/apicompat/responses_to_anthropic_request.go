@@ -569,12 +569,6 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 	return json.Marshal(blocks)
 }
 
-// convertResponsesAssistantToAnthropicContent converts a Responses assistant
-// message content field into Anthropic content blocks JSON.
-func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawMessage, error) {
-	return convertResponsesAssistantToAnthropicContentWithOptions(raw, ResponsesToAnthropicOptions{})
-}
-
 func convertResponsesAssistantToAnthropicContentWithOptions(raw json.RawMessage, opts ResponsesToAnthropicOptions) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return json.Marshal([]AnthropicContentBlock{{Type: "text", Text: ""}})
