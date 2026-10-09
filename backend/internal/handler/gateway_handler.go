@@ -879,10 +879,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
+			if geminiCapture != nil && account.Platform == service.PlatformAntigravity {
+				geminiCapture.MarkAntigravitySelected(account.ID, account.Type)
+			}
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
-				if geminiCapture != nil && account.Type != service.AccountTypeUpstream {
-					geminiCapture.MarkAntigravitySelected(account.ID, account.Type)
-				}
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)

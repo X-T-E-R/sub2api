@@ -162,3 +162,85 @@ func TestGeminiCapture_ActivationDiagnosticsDistinguishNotCalledAndRejectedType(
 		require.Equal(t, AccountTypeUpstream, capture.selectedAccountType)
 	})
 }
+
+func TestGeminiCapture_ExcludedSubtypeDoesNotCreateLocalFailureArtifact(t *testing.T) {
+	tests := []struct {
+		name        string
+		accountType string
+		status      int
+	}{
+		{name: "api key 400", accountType: AccountTypeAPIKey, status: http.StatusBadRequest},
+		{name: "upstream 503", accountType: AccountTypeUpstream, status: http.StatusServiceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			leasePath := filepath.Join(t.TempDir(), "lease.json")
+			writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
+			controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
+			capture := controller.Begin(newCaptureTestContext(), "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, false, 1)
+			require.NotNil(t, capture)
+			capture.MarkAntigravitySelected(101, tc.accountType)
+			capture.Finish(tc.status)
+
+			entries, err := os.ReadDir(outputDir)
+			require.NoError(t, err)
+			require.Empty(t, entries, "known excluded account subtype must not create a local-failure artifact")
+			capture.mu.Lock()
+			require.Equal(t, tc.accountType, capture.selectedAccountType)
+			require.Equal(t, "activate_not_called", capture.activationStage)
+			capture.mu.Unlock()
+		})
+	}
+}
+
+func TestGeminiCapture_NoAccount503StillCreatesLocalFailureArtifact(t *testing.T) {
+	outputDir := t.TempDir()
+	leasePath := filepath.Join(t.TempDir(), "lease.json")
+	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
+	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
+	capture := controller.Begin(newCaptureTestContext(), "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, false, 1)
+	require.NotNil(t, capture)
+	capture.Finish(http.StatusServiceUnavailable)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(outputDir)
+		if len(entries) == 1 {
+			_, err := os.Stat(filepath.Join(outputDir, entries[0].Name(), "manifest.json"))
+			if err == nil {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no-account 503 did not produce the existing local-failure artifact")
+}
+
+func TestGeminiCapture_ActivationDiagnosticsClearRejectedReasonOnSuccess(t *testing.T) {
+	outputDir := t.TempDir()
+	leasePath := filepath.Join(t.TempDir(), "lease.json")
+	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
+	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
+	capture := controller.Begin(newCaptureTestContext(), "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, false, 1)
+	require.NotNil(t, capture)
+	account := &Account{ID: 102, Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+
+	require.False(t, capture.Activate(account, "gemini-2.5-flash", []byte(`{"rejected":true}`)))
+	capture.mu.Lock()
+	require.Equal(t, "activate_rejected", capture.activationStage)
+	require.Equal(t, "final_model_mismatch", capture.activationReason)
+	capture.mu.Unlock()
+
+	require.True(t, capture.Activate(account, GeminiCaptureTargetModel, []byte(`{"accepted":true}`)))
+	capture.Finish(http.StatusOK)
+	entries, err := os.ReadDir(outputDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	manifestBody, err := os.ReadFile(filepath.Join(outputDir, entries[0].Name(), "manifest.json"))
+	require.NoError(t, err)
+	var manifest geminiCaptureManifest
+	require.NoError(t, json.Unmarshal(manifestBody, &manifest))
+	require.Equal(t, "activated", manifest.CaptureStage)
+	require.Empty(t, manifest.ActivationReason, "successful activation must clear a prior rejection reason")
+}

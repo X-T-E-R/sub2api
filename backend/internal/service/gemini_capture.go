@@ -749,9 +749,7 @@ func (r *GeminiCaptureRequest) recordDiagnosticStage(stage, reason string, accou
 	r.mu.Lock()
 	enabled := r.captureEnabled
 	r.activationStage = stage
-	if reason != "" {
-		r.activationReason = reason
-	}
+	r.activationReason = reason
 	if accountID > 0 {
 		r.selectedAccountID = accountID
 	}
@@ -791,10 +789,10 @@ func (r *GeminiCaptureRequest) SetGroupID(groupID int64) {
 	r.mu.Unlock()
 }
 
-// MarkAntigravitySelected preserves a local gateway failure artifact even when
-// the selected account fails before any HTTP attempt is constructed. The
-// optional type keeps older callers source-compatible while allowing the
-// scoped diagnostic to report the selected subtype without credentials.
+// MarkAntigravitySelected records the selected Antigravity subtype for the
+// scoped diagnostic, even when no HTTP attempt is constructed. Only eligible
+// account types participate in local-failure artifacts. The optional type keeps
+// older callers source-compatible.
 func (r *GeminiCaptureRequest) MarkAntigravitySelected(accountID int64, accountType ...string) {
 	if r == nil {
 		return
@@ -1565,7 +1563,8 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 		return
 	}
 	r.gatewayStatus = status
-	needLocalArtifact := r.candidate && !r.activated && (r.selectedAG || status >= 400) && r.captureEnabled && !r.modelChecked
+	knownExcludedSubtype := r.selectedAccountType == AccountTypeAPIKey || r.selectedAccountType == AccountTypeUpstream
+	needLocalArtifact := r.candidate && !r.activated && !knownExcludedSubtype && (r.selectedAG || status >= 400) && r.captureEnabled && !r.modelChecked
 	activated := r.activated
 	activationStage := r.activationStage
 	selectedAccountID := r.selectedAccountID
