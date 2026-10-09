@@ -3353,9 +3353,24 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 						// 单个 block 时保留所有内容（包括空白）
 						// 多个 blocks 时过滤掉空白
 						if singleBlock || strings.TrimSpace(text) != "" {
-							parts = append(parts, map[string]any{"text": text})
+							part := map[string]any{"text": text}
+							if signature, _ := bm["signature"].(string); signature != "" {
+								part["thoughtSignature"] = signature
+							}
+							parts = append(parts, part)
 						}
 					}
+				case "thinking":
+					thinking, _ := bm["thinking"].(string)
+					signature, _ := bm["signature"].(string)
+					if signature == "" {
+						signature = geminiDummyThoughtSignature
+					}
+					parts = append(parts, map[string]any{
+						"text":             thinking,
+						"thought":          true,
+						"thoughtSignature": signature,
+					})
 				case "tool_use":
 					id, _ := bm["id"].(string)
 					name, _ := bm["name"].(string)

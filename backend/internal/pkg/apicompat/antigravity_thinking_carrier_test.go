@@ -101,3 +101,42 @@ func TestAntigravityThinkingCarrierPreservesStreamingSignatureDelta(t *testing.T
 	require.Len(t, completed.Response.Output, 1)
 	require.True(t, strings.HasPrefix(completed.Response.Output[0].EncryptedContent, anthropicThinkingEnvelopePrefix))
 }
+
+func TestAG002StreamingTextCarrierResetsPerBlockAndGuardsGeneric(t *testing.T) {
+	feed := func(state *AnthropicEventToResponsesState, signature string, index int) {
+		idx := index
+		AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "content_block_start", Index: &idx, ContentBlock: &AnthropicContentBlock{Type: "text", Text: "part", Signature: signature}}, state)
+		AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "content_block_delta", Index: &idx, Delta: &AnthropicDelta{Type: "text_delta", Text: "part"}}, state)
+		AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "content_block_stop", Index: &idx}, state)
+	}
+	for _, tc := range []struct {
+		name string
+		opts AnthropicToResponsesOptions
+		want []string
+	}{
+		{"provider opt-in", AnthropicToResponsesOptions{PreserveThinkingSignatures: true}, []string{"sig-A", "", "sig-C"}},
+		{"generic", AnthropicToResponsesOptions{}, []string{"", "", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := NewAnthropicEventToResponsesStateWithOptions(tc.opts)
+			feed(state, "sig-A", 0)
+			feed(state, "", 1)
+			feed(state, "sig-C", 2)
+			events := AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "message_stop"}, state)
+			var completed *ResponsesStreamEvent
+			for i := range events {
+				if events[i].Type == "response.completed" {
+					completed = &events[i]
+				}
+			}
+			require.NotNil(t, completed)
+			require.Len(t, completed.Response.Output, 1)
+			require.Len(t, completed.Response.Output[0].Content, 3)
+			got := make([]string, 0, 3)
+			for _, part := range completed.Response.Output[0].Content {
+				got = append(got, part.Signature)
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

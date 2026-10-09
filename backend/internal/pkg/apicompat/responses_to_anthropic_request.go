@@ -165,7 +165,7 @@ func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw j
 			}
 			if opts.PreserveThinkingSignatures {
 				if carrier, ok := decodeAntigravityToolSignature(item.EncryptedContent); ok &&
-					carrier.ID == block.ID && carrier.Name == block.Name {
+					carrier.Name == block.Name && antigravityToolIDsMatch(carrier.ID, block.ID) {
 					block.Signature = carrier.Signature
 				}
 			}
@@ -268,6 +268,13 @@ func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw j
 	}
 
 	return system, messages, nil
+}
+
+func antigravityToolIDsMatch(carrierID, anthropicID string) bool {
+	if carrierID == anthropicID {
+		return true
+	}
+	return fromResponsesCallIDToAnthropic(carrierID) == anthropicID || fromResponsesCallIDToAnthropic(anthropicID) == carrierID
 }
 
 func decodeAnthropicThinking(encrypted string) (AnthropicContentBlock, bool) {

@@ -189,6 +189,8 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 
 			// 非空 text 带签名：签名保留在可见 text carrier
 			if signature != "" {
+				// Preserve unsigned text before this signed target.
+				p.flushText()
 				p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
 					Type:      "text",
 					Text:      part.Text,

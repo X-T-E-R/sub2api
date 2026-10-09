@@ -49,10 +49,26 @@ func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts Anthr
 
 	var outputs []ResponsesOutput
 	var msgParts []ResponsesContentPart
+	flushMessage := func() {
+		if len(msgParts) == 0 {
+			return
+		}
+		outputs = append(outputs, ResponsesOutput{
+			Type:    "message",
+			ID:      generateItemID(),
+			Role:    "assistant",
+			Content: msgParts,
+			Status:  "completed",
+		})
+		msgParts = nil
+	}
 
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
+			if opts.PreserveThinkingSignatures {
+				flushMessage()
+			}
 			if block.Thinking != "" || (opts.PreserveThinkingSignatures && (block.Signature != "" || block.Data != "")) {
 				item := ResponsesOutput{
 					Type: "reasoning",
@@ -78,6 +94,9 @@ func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts Anthr
 				msgParts = append(msgParts, part)
 			}
 		case "tool_use":
+			if opts.PreserveThinkingSignatures {
+				flushMessage()
+			}
 			args := "{}"
 			if len(block.Input) > 0 {
 				args = string(block.Input)
@@ -98,15 +117,7 @@ func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts Anthr
 	}
 
 	// Assemble message output item from text parts
-	if len(msgParts) > 0 {
-		outputs = append(outputs, ResponsesOutput{
-			Type:    "message",
-			ID:      generateItemID(),
-			Role:    "assistant",
-			Content: msgParts,
-			Status:  "completed",
-		})
-	}
+	flushMessage()
 
 	if len(outputs) == 0 {
 		outputs = append(outputs, ResponsesOutput{
@@ -353,6 +364,11 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 		}))
 
 	case "text":
+		// Every text block owns its own carrier; reset before emitting this part.
+		state.CurrentTextSignature = ""
+		if state.PreserveThinkingSignatures {
+			state.CurrentTextSignature = evt.ContentBlock.Signature
+		}
 		// If we don't have an open message item, open one
 		if state.CurrentItemType != "message" {
 			// 走到这里时 CurrentItemType 只可能是 ""（前一个 reasoning/function_call
@@ -362,7 +378,6 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 
 			state.CurrentItemID = generateItemID()
 			state.CurrentItemType = "message"
-			state.CurrentTextSignature = evt.ContentBlock.Signature
 			state.ContentIndex = 0
 
 			events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
@@ -390,9 +405,6 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 			ItemID:       state.CurrentItemID,
 			Part:         &ResponsesContentPart{Type: "output_text", Text: "", Signature: state.CurrentTextSignature},
 		}))
-		if state.CurrentTextSignature == "" {
-			state.CurrentTextSignature = evt.ContentBlock.Signature
-		}
 		state.TextAccum = ""
 
 	case "tool_use":
