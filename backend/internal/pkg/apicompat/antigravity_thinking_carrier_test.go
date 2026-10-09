@@ -51,6 +51,32 @@ func TestAntigravityThinkingCarrierIsExplicitAndRoundTrips(t *testing.T) {
 	require.Empty(t, rawConverted.Messages)
 }
 
+func TestAG002VisibleTextSignatureRoundTripsThroughResponses(t *testing.T) {
+	stop := "end_turn"
+	resp := &AnthropicResponse{StopReason: &stop, Content: []AnthropicContentBlock{{Type: "text", Text: "answer", Signature: "sig-text"}}}
+	converted := AnthropicToResponsesResponseWithOptions(resp, AnthropicToResponsesOptions{PreserveThinkingSignatures: true})
+	require.Len(t, converted.Output, 1)
+	require.Equal(t, "message", converted.Output[0].Type)
+	require.Equal(t, "sig-text", converted.Output[0].Content[0].Signature)
+	raw, err := json.Marshal([]ResponsesInputItem{{Type: "message", Role: "assistant", Content: mustJSON(t, converted.Output[0].Content)}})
+	require.NoError(t, err)
+	replayed, err := ResponsesToAnthropicRequestWithOptions(&ResponsesRequest{Input: raw}, ResponsesToAnthropicOptions{PreserveThinkingSignatures: true})
+	require.NoError(t, err)
+	var blocks []AnthropicContentBlock
+	require.NoError(t, json.Unmarshal(replayed.Messages[0].Content, &blocks))
+	require.Len(t, blocks, 1)
+	require.Equal(t, "text", blocks[0].Type)
+	require.Equal(t, "answer", blocks[0].Text)
+	require.Equal(t, "sig-text", blocks[0].Signature)
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return raw
+}
+
 func TestAntigravityThinkingCarrierPreservesStreamingSignatureDelta(t *testing.T) {
 	state := NewAnthropicEventToResponsesStateWithOptions(AnthropicToResponsesOptions{PreserveThinkingSignatures: true})
 	idx := 0

@@ -163,6 +163,12 @@ func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw j
 				Name:  item.Name,
 				Input: input,
 			}
+			if opts.PreserveThinkingSignatures {
+				if carrier, ok := decodeAntigravityToolSignature(item.EncryptedContent); ok &&
+					carrier.ID == block.ID && carrier.Name == block.Name {
+					block.Signature = carrier.Signature
+				}
+			}
 			blockJSON, _ := json.Marshal([]AnthropicContentBlock{block})
 			messages = append(messages, AnthropicMessage{
 				Role:    "assistant",
@@ -211,7 +217,7 @@ func convertResponsesInputToAnthropicWithOptions(instructions string, inputRaw j
 			})
 
 		case item.Role == "assistant":
-			content, err := convertResponsesAssistantToAnthropicContent(item.Content)
+			content, err := convertResponsesAssistantToAnthropicContentWithOptions(item.Content, opts)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -402,8 +408,22 @@ func normalizeAnthropicToolPairing(messages []AnthropicMessage) []AnthropicMessa
 				continue
 			}
 			asstBlocks := make([]AnthropicContentBlock, 0, len(others)+len(kept))
-			asstBlocks = append(asstBlocks, others...)
-			asstBlocks = append(asstBlocks, kept...)
+			// Keep non-tool blocks and answered tool_use blocks in their original relative order.
+			keptIDs := make(map[string]struct{}, len(kept))
+			for _, tu := range kept {
+				keptIDs[tu.ID] = struct{}{}
+			}
+			asstBlocks = asstBlocks[:0]
+			for _, block := range blocks {
+				if block.Type != "tool_use" {
+					asstBlocks = append(asstBlocks, block)
+					continue
+				}
+				if _, ok := keptIDs[block.ID]; ok {
+					asstBlocks = append(asstBlocks, block)
+				}
+			}
+			// answered tool_use blocks were reinserted above at their original boundaries
 			out = append(out, anthropicMessageFromBlocks("assistant", asstBlocks))
 
 			resBlocks := make([]AnthropicContentBlock, 0, len(kept))
@@ -545,6 +565,10 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 // convertResponsesAssistantToAnthropicContent converts a Responses assistant
 // message content field into Anthropic content blocks JSON.
 func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawMessage, error) {
+	return convertResponsesAssistantToAnthropicContentWithOptions(raw, ResponsesToAnthropicOptions{})
+}
+
+func convertResponsesAssistantToAnthropicContentWithOptions(raw json.RawMessage, opts ResponsesToAnthropicOptions) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return json.Marshal([]AnthropicContentBlock{{Type: "text", Text: ""}})
 	}
@@ -566,10 +590,11 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 		switch p.Type {
 		case "output_text", "text":
 			if p.Text != "" {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type: "text",
-					Text: p.Text,
-				})
+				block := AnthropicContentBlock{Type: "text", Text: p.Text}
+				if opts.PreserveThinkingSignatures {
+					block.Signature = p.Signature
+				}
+				blocks = append(blocks, block)
 			}
 		}
 	}

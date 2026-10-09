@@ -521,7 +521,13 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 		case "text":
 			if (geminiOptions.enabled && strings.TrimSpace(block.Text) != "") ||
 				(!geminiOptions.enabled && block.Text != "(no content)" && strings.TrimSpace(block.Text) != "") {
-				parts = append(parts, GeminiPart{Text: block.Text})
+				part := GeminiPart{Text: block.Text}
+				// A signed visible text block keeps the signature on the same
+				// target part; do not turn it into a synthetic thought block.
+				if block.Signature != "" {
+					part.ThoughtSignature = block.Signature
+				}
+				parts = append(parts, part)
 			}
 
 		case "thinking":

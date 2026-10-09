@@ -339,17 +339,18 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 		p.trailingSignature = ""
 	}
 
-	// 非空 text 带签名 - 特殊处理
+	// Visible text carries its own signature; do not synthesize a thought block.
 	if signature != "" {
 		_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
-			"type": "text",
-			"text": "",
+			"type":      "text",
+			"text":      "",
+			"signature": signature,
 		}))
 		_, _ = result.Write(p.emitDelta("text_delta", map[string]any{
 			"text": text,
 		}))
 		_, _ = result.Write(p.endBlock())
-		_, _ = result.Write(p.emitEmptyThinkingWithSignature(signature))
+		// Signature remains on the visible text block.
 		return result.Bytes()
 	}
 

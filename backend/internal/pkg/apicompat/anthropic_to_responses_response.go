@@ -71,24 +71,29 @@ func AnthropicToResponsesResponseWithOptions(resp *AnthropicResponse, opts Anthr
 			}
 		case "text":
 			if block.Text != "" {
-				msgParts = append(msgParts, ResponsesContentPart{
-					Type: "output_text",
-					Text: block.Text,
-				})
+				part := ResponsesContentPart{Type: "output_text", Text: block.Text}
+				if opts.PreserveThinkingSignatures {
+					part.Signature = block.Signature
+				}
+				msgParts = append(msgParts, part)
 			}
 		case "tool_use":
 			args := "{}"
 			if len(block.Input) > 0 {
 				args = string(block.Input)
 			}
-			outputs = append(outputs, ResponsesOutput{
+			item := ResponsesOutput{
 				Type:      "function_call",
 				ID:        generateItemID(),
 				CallID:    toResponsesCallID(block.ID),
 				Name:      block.Name,
 				Arguments: args,
 				Status:    "completed",
-			})
+			}
+			if opts.PreserveThinkingSignatures && block.Signature != "" {
+				item.EncryptedContent = encodeAntigravityToolSignature(block)
+			}
+			outputs = append(outputs, item)
 		}
 	}
 
@@ -183,14 +188,16 @@ type AnthropicEventToResponsesState struct {
 	TextAccum string
 
 	// For function_call: track per-output info
-	CurrentCallID string
-	CurrentName   string
+	CurrentCallID        string
+	CurrentName          string
+	CurrentToolSignature string
 
 	// Content of the currently open item, folded into Outputs when it closes.
-	CurrentContent  []ResponsesContentPart // message
-	CurrentArgs     string                 // function_call
-	CurrentSummary  string                 // reasoning
-	CurrentThinking AnthropicContentBlock  // provider-owned thinking carrier
+	CurrentContent       []ResponsesContentPart // message
+	CurrentTextSignature string
+	CurrentArgs          string                // function_call
+	CurrentSummary       string                // reasoning
+	CurrentThinking      AnthropicContentBlock // provider-owned thinking carrier
 
 	// PreserveThinkingSignatures is an explicit provider opt-in. Generic
 	// Anthropic→Responses conversion leaves signatures out of encrypted_content.
@@ -355,6 +362,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 
 			state.CurrentItemID = generateItemID()
 			state.CurrentItemType = "message"
+			state.CurrentTextSignature = evt.ContentBlock.Signature
 			state.ContentIndex = 0
 
 			events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{
@@ -380,8 +388,11 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 			OutputIndex:  state.OutputIndex,
 			ContentIndex: state.ContentIndex,
 			ItemID:       state.CurrentItemID,
-			Part:         &ResponsesContentPart{Type: "output_text", Text: ""},
+			Part:         &ResponsesContentPart{Type: "output_text", Text: "", Signature: state.CurrentTextSignature},
 		}))
+		if state.CurrentTextSignature == "" {
+			state.CurrentTextSignature = evt.ContentBlock.Signature
+		}
 		state.TextAccum = ""
 
 	case "tool_use":
@@ -392,6 +403,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 		state.CurrentItemType = "function_call"
 		state.CurrentCallID = toResponsesCallID(evt.ContentBlock.ID)
 		state.CurrentName = evt.ContentBlock.Name
+		state.CurrentToolSignature = evt.ContentBlock.Signature
 		// The canonical Anthropic stream leaves input empty here and streams the
 		// arguments as input_json_delta, but Anthropic-compatible relays may put
 		// the complete arguments on this event and never send a delta. Keep them
@@ -463,8 +475,13 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 	case "signature_delta":
 		// Responses has no visible signature delta. Preserve it only in the
 		// provider-scoped opaque envelope requested by the caller.
-		if state.PreserveThinkingSignatures && state.CurrentItemType == "reasoning" {
-			state.CurrentThinking.Signature += evt.Delta.Signature
+		if state.PreserveThinkingSignatures {
+			switch state.CurrentItemType {
+			case "reasoning":
+				state.CurrentThinking.Signature += evt.Delta.Signature
+			case "function_call":
+				state.CurrentToolSignature += evt.Delta.Signature
+			}
 		}
 		return nil
 	}
@@ -526,7 +543,7 @@ func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *Anthropic
 		text := state.TextAccum
 		state.TextAccum = ""
 		contentIndex := state.ContentIndex
-		state.CurrentContent = append(state.CurrentContent, ResponsesContentPart{Type: "output_text", Text: text})
+		state.CurrentContent = append(state.CurrentContent, ResponsesContentPart{Type: "output_text", Text: text, Signature: state.CurrentTextSignature})
 		// 关掉一个 part 就推进 content_index：上面那句注释说的「item 保持打开，
 		// 因为后面可能还有块」正是这里的触发条件。不推进的话，同一 item 里第二个
 		// text 块会再发一次 content_part.added(content_index=0)，与第一个 part 撞在
@@ -545,7 +562,7 @@ func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *Anthropic
 				OutputIndex:  state.OutputIndex,
 				ContentIndex: contentIndex,
 				ItemID:       state.CurrentItemID,
-				Part:         &ResponsesContentPart{Type: "output_text", Text: text},
+				Part:         &ResponsesContentPart{Type: "output_text", Text: text, Signature: state.CurrentTextSignature},
 			}),
 		}
 	}
@@ -634,6 +651,14 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 			args = "{}"
 		}
 		item.Arguments = args
+		if state.PreserveThinkingSignatures && state.CurrentToolSignature != "" {
+			item.EncryptedContent = encodeAntigravityToolSignature(AnthropicContentBlock{
+				Type:      "tool_use",
+				ID:        state.CurrentCallID,
+				Name:      state.CurrentName,
+				Signature: state.CurrentToolSignature,
+			})
+		}
 	case "reasoning":
 		if state.CurrentSummary != "" {
 			item.Summary = []ResponsesSummary{{Type: "summary_text", Text: state.CurrentSummary}}
@@ -650,10 +675,12 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 	state.CurrentItemID = ""
 	state.CurrentCallID = ""
 	state.CurrentName = ""
+	state.CurrentToolSignature = ""
 	state.CurrentContent = nil
 	state.CurrentArgs = ""
 	state.PendingToolInput = ""
 	state.CurrentSummary = ""
+	state.CurrentTextSignature = ""
 	state.CurrentThinking = AnthropicContentBlock{}
 	state.TextAccum = ""
 	state.OutputIndex++
