@@ -688,7 +688,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
 	if err != nil {
-		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); legacyErr != nil {
+		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth, platform == PlatformGemini || platform == PlatformAntigravity); legacyErr != nil {
 			return nil, legacyErr
 		} else if ok {
 			return result, nil
@@ -708,18 +708,20 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 		}
 
-		// 分层过滤选择：优先级 →（可选）最早重置 → 负载率 → LRU
+		// Preserve explicit priority and reset policy before balancing new sessions.
 		for len(available) > 0 {
-			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
-			// 2. （可选）use-it-or-lose-it：优先选用会话窗口最早重置的账号
 			if cfg.PreferSoonestReset {
 				candidates = filterBySoonestReset(candidates)
 			}
-			// 3. 取负载率最低的集合
-			candidates = filterByMinLoadRate(candidates)
-			// 4. LRU 选择最久未用的账号
-			selected := selectByLRU(candidates, preferOAuth)
+			var selected *accountWithLoad
+			if platform == PlatformGemini || platform == PlatformAntigravity {
+				// A shared load/LastUsedAt snapshot must not elect one deterministic
+				// winner for an entire burst. Sticky sessions have already returned.
+				selected = selectByCapacityHeadroom(candidates, preferOAuth, mathrand.Float64())
+			} else {
+				selected = selectByLRU(filterByMinLoadRate(candidates), preferOAuth)
+			}
 			if selected == nil {
 				break
 			}
@@ -766,9 +768,29 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	return nil, ErrNoAvailableAccounts
 }
 
-func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
+func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth, balanceNewSessions bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
-	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
+	if balanceNewSessions {
+		// Without a load snapshot, retain priority and distribute by configured
+		// capacity; atomic slot admission still enforces actual concurrency.
+		pool := make([]accountWithLoad, 0, len(candidates))
+		for _, account := range candidates {
+			pool = append(pool, accountWithLoad{account: account, loadInfo: &AccountLoadInfo{AccountID: account.ID}})
+		}
+		ordered = ordered[:0]
+		for len(pool) > 0 {
+			selected := selectByCapacityHeadroom(filterByMinPriority(pool), preferOAuth, mathrand.Float64())
+			ordered = append(ordered, selected.account)
+			for i := range pool {
+				if pool[i].account.ID == selected.account.ID {
+					pool = append(pool[:i], pool[i+1:]...)
+					break
+				}
+			}
+		}
+	} else {
+		sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
+	}
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
@@ -1499,6 +1521,9 @@ func (s *GatewayService) hydrateSelectedAccount(ctx context.Context, account *Ac
 func (s *GatewayService) newSelectionResult(ctx context.Context, account *Account, acquired bool, release func(), waitPlan *AccountWaitPlan) (*AccountSelectionResult, error) {
 	hydrated, err := s.hydrateSelectedAccount(ctx, account)
 	if err != nil {
+		if acquired && release != nil {
+			release()
+		}
 		return nil, err
 	}
 	return attachSelectionProfitGate(ctx, &AccountSelectionResult{
@@ -1580,6 +1605,67 @@ func filterBySoonestReset(accounts []accountWithLoad) []accountWithLoad {
 		}
 	}
 	return result
+}
+
+// selectByCapacityHeadroom distributes unbound Gemini/Antigravity sessions by
+// remaining scheduling capacity: EffectiveLoadFactor * (1 - LoadRate/100).
+// LoadFactor is the existing operator-controlled scheduling weight, not the hard
+// slot limit. A cached low-load account is favored, never made the sole winner;
+// the existing atomic slot acquisition is still the authority for admission.
+// Callers apply priority/reset and availability gates before sampling. Unlike
+// LRU, this does not depend on asynchronous LastUsedAt updates to avoid a herd.
+// draw is in [0, 1), passed explicitly so the weighting contract is testable.
+func selectByCapacityHeadroom(accounts []accountWithLoad, preferOAuth bool, draw float64) *accountWithLoad {
+	if len(accounts) == 0 {
+		return nil
+	}
+	weights := make([]float64, len(accounts))
+	total := 0.0
+candidate:
+	for i, item := range accounts {
+		// Preserve Gemini's existing OAuth preference within equal legacy
+		// sort groups. Do not promote subtypes across explicit priorities or
+		// turn a different historical timestamp into the sole pool winner.
+		if preferOAuth && item.account.Type != AccountTypeOAuth && item.loadInfo != nil {
+			for _, other := range accounts {
+				if other.account.Type == AccountTypeOAuth && other.loadInfo != nil && sameAccountWithLoadGroup(item, other) {
+					continue candidate
+				}
+			}
+		}
+		load := 0
+		if item.loadInfo != nil {
+			load = item.loadInfo.LoadRate
+		}
+		if load < 0 {
+			load = 0
+		}
+		if load >= 100 {
+			continue
+		}
+		weights[i] = float64(item.account.EffectiveLoadFactor()) * float64(100-load) / 100
+		total += weights[i]
+	}
+	if total <= 0 {
+		return nil
+	}
+	target := draw * total
+	for i, weight := range weights {
+		if weight <= 0 {
+			continue
+		}
+		target -= weight
+		if target < 0 {
+			return &accounts[i]
+		}
+	}
+	// Protect against floating-point rounding at the upper boundary.
+	for i := len(accounts) - 1; i >= 0; i-- {
+		if weights[i] > 0 {
+			return &accounts[i]
+		}
+	}
+	return nil
 }
 
 // selectByLRU 从集合中选择最久未用的账号
