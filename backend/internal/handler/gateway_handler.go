@@ -482,6 +482,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
 			writerSizeBeforeForward := c.Writer.Size()
 			if account.Platform == service.PlatformAntigravity {
+				if geminiCapture != nil {
+					geminiCapture.MarkAntigravitySelected(account.ID, account.Type)
+				}
 				result, err = h.antigravityGatewayService.ForwardGemini(
 					requestCtx,
 					c,
@@ -878,7 +881,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			writerSizeBeforeForward := c.Writer.Size()
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 				if geminiCapture != nil && account.Type != service.AccountTypeUpstream {
-					geminiCapture.MarkAntigravitySelected(account.ID)
+					geminiCapture.MarkAntigravitySelected(account.ID, account.Type)
 				}
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {

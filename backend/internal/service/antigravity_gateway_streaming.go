@@ -164,6 +164,14 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	if upstreamResponseModelObserverFromContext(c) == nil {
 		beginUpstreamResponseModelObservation(c)
 	}
+	// Native Gemini writes directly through the client writer. Keep the capture
+	// tap on that final converted wire as well; when disabled, leave Gin's
+	// writer untouched.
+	originalWriter := c.Writer
+	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+		c.Writer = &geminiCaptureResponseWriter{ResponseWriter: originalWriter, capture: capture}
+		defer func() { c.Writer = originalWriter }()
+	}
 	c.Status(resp.StatusCode)
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -372,6 +380,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time) (*antigravityStreamResult, error) {
 	if upstreamResponseModelObserverFromContext(c) == nil {
 		beginUpstreamResponseModelObservation(c)
+	}
+	// The non-streaming native route also writes its converted JSON directly via
+	// Gin, so tap the actual client wire without changing the disabled path.
+	originalWriter := c.Writer
+	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
+		c.Writer = &geminiCaptureResponseWriter{ResponseWriter: originalWriter, capture: capture}
+		defer func() { c.Writer = originalWriter }()
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize

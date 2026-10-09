@@ -19,6 +19,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/uuid"
 )
 
@@ -83,15 +84,18 @@ type GeminiCaptureRequest struct {
 	captureEnabled   bool
 	incompleteReason map[string]struct{}
 
-	metadataUserID    string
-	requestModel      string
-	stream            bool
-	userID            int64
-	groupID           int64
-	selectedAccountID int64
-	requestID         string
-	clientRequestID   string
-	startedAtTime     time.Time
+	metadataUserID      string
+	requestModel        string
+	stream              bool
+	userID              int64
+	groupID             int64
+	selectedAccountID   int64
+	selectedAccountType string
+	activationStage     string
+	activationReason    string
+	requestID           string
+	clientRequestID     string
+	startedAtTime       time.Time
 
 	inboundRedacted      []byte
 	inboundRedactionOK   bool
@@ -550,6 +554,9 @@ type geminiCaptureManifest struct {
 	RedactedFields        []string                             `json:"redacted_fields,omitempty"`
 	HeadersRecorded       bool                                 `json:"headers_recorded"`
 	CredentialHandling    string                               `json:"credential_handling"`
+	CaptureStage          string                               `json:"capture_stage"`
+	SelectedAccountType   string                               `json:"selected_account_type,omitempty"`
+	ActivationReason      string                               `json:"activation_reason,omitempty"`
 	Files                 map[string]GeminiCaptureFileEvidence `json:"files"`
 	Attempts              []geminiCaptureAttemptEvidence       `json:"attempts"`
 }
@@ -683,11 +690,12 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 	capturedBody := make([]byte, captureLen)
 	copy(capturedBody, inboundBody[:captureLen])
 	redacted, fields, redactionOK := redactGeminiCaptureJSON(capturedBody)
-	return &GeminiCaptureRequest{
+	capture := &GeminiCaptureRequest{
 		controller:         g,
 		ctx:                ctx,
 		candidate:          true,
 		captureEnabled:     true,
+		activationStage:    "candidate",
 		incompleteReason:   make(map[string]struct{}),
 		terminals:          make(map[string]struct{}),
 		metadataUserID:     metadataUserID,
@@ -705,6 +713,8 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 		leaseExpiresAt:     expiresAt,
 		lastLeaseCheck:     time.Now(),
 	}
+	capture.recordDiagnosticStage("begin", "", 0, "", "")
+	return capture
 }
 
 // WithGeminiCapture carries a request-scoped candidate through service calls.
@@ -729,6 +739,48 @@ func GeminiCaptureFromContext(ctx context.Context) *GeminiCaptureRequest {
 
 type geminiCaptureContextKey struct{}
 
+// recordDiagnosticStage emits only lease-scoped control-flow metadata. It never
+// includes request bodies, headers, credentials, or the exact metadata matcher.
+// A matching enabled lease is the opt-in boundary, so the normal path is silent.
+func (r *GeminiCaptureRequest) recordDiagnosticStage(stage, reason string, accountID int64, accountType, finalModel string) {
+	if r == nil || stage == "" {
+		return
+	}
+	r.mu.Lock()
+	enabled := r.captureEnabled
+	r.activationStage = stage
+	if reason != "" {
+		r.activationReason = reason
+	}
+	if accountID > 0 {
+		r.selectedAccountID = accountID
+	}
+	if accountType != "" {
+		r.selectedAccountType = accountType
+	}
+	requestModel := r.requestModel
+	requestID := r.requestID
+	clientRequestID := r.clientRequestID
+	groupID := r.groupID
+	r.mu.Unlock()
+	if !enabled {
+		return
+	}
+	logger.LegacyPrintf("service.gemini_capture", "stage=%s path=/v1/messages request_model=%s request_id=%s client_request_id=%s group_id=%d account_id=%d account_type=%s final_model=%s reason=%s", stage, sanitizeCaptureDiagnosticValue(requestModel), sanitizeCaptureDiagnosticValue(requestID), sanitizeCaptureDiagnosticValue(clientRequestID), groupID, accountID, sanitizeCaptureDiagnosticValue(accountType), sanitizeCaptureDiagnosticValue(finalModel), sanitizeCaptureDiagnosticValue(reason))
+}
+
+func (r *GeminiCaptureRequest) rejectActivation(reason string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	accountID := r.selectedAccountID
+	accountType := r.selectedAccountType
+	finalModel := r.finalModelLocked()
+	r.mu.Unlock()
+	r.recordDiagnosticStage("activate_rejected", reason, accountID, accountType, finalModel)
+}
+
 // SetGroupID associates the authenticated non-secret group identifier.
 func (r *GeminiCaptureRequest) SetGroupID(groupID int64) {
 	if r == nil {
@@ -740,23 +792,52 @@ func (r *GeminiCaptureRequest) SetGroupID(groupID int64) {
 }
 
 // MarkAntigravitySelected preserves a local gateway failure artifact even when
-// the selected account fails before any HTTP attempt is constructed.
-func (r *GeminiCaptureRequest) MarkAntigravitySelected(accountID int64) {
+// the selected account fails before any HTTP attempt is constructed. The
+// optional type keeps older callers source-compatible while allowing the
+// scoped diagnostic to report the selected subtype without credentials.
+func (r *GeminiCaptureRequest) MarkAntigravitySelected(accountID int64, accountType ...string) {
 	if r == nil {
 		return
 	}
+	selectedType := ""
+	if len(accountType) > 0 {
+		selectedType = accountType[0]
+	}
 	r.mu.Lock()
-	r.selectedAG = true
-	if accountID > 0 {
-		r.selectedAccountID = accountID
+	// API-key and upstream accounts are deliberately outside this OAuth-only
+	// capture. Still record their selected subtype for the scoped diagnostic,
+	// but do not make Finish create a local-failure artifact for them.
+	if selectedType != AccountTypeAPIKey && selectedType != AccountTypeUpstream {
+		r.selectedAG = true
 	}
 	r.mu.Unlock()
+	r.recordDiagnosticStage("ag_selected", "", accountID, selectedType, "")
 }
 
 // Activate records the transformed Gemini body after the final model is known.
 // It is intentionally callable only by the Antigravity Messages forwarding path.
 func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, geminiBody []byte) bool {
-	if r == nil || account == nil || account.Platform != PlatformAntigravity || account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
+	if r == nil {
+		return false
+	}
+	if account == nil {
+		r.recordDiagnosticStage("activate_rejected", "account_nil", 0, "", finalModel)
+		r.disable("account_nil")
+		return false
+	}
+	if account.Platform != PlatformAntigravity {
+		r.recordDiagnosticStage("activate_rejected", "platform_mismatch", account.ID, account.Type, finalModel)
+		r.disable("platform_mismatch")
+		return false
+	}
+	if account.Type == AccountTypeAPIKey {
+		r.recordDiagnosticStage("activate_rejected", "account_type_api_key", account.ID, account.Type, finalModel)
+		r.disable("account_type_api_key")
+		return false
+	}
+	if account.Type == AccountTypeUpstream {
+		r.recordDiagnosticStage("activate_rejected", "account_type_upstream", account.ID, account.Type, finalModel)
+		r.disable("account_type_upstream")
 		return false
 	}
 	modelMatched := finalModel == GeminiCaptureTargetModel
@@ -765,10 +846,16 @@ func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, gem
 	r.modelMatched = modelMatched
 	r.selectedAG = true
 	r.mu.Unlock()
+	r.recordDiagnosticStage("final_model_checked", "", account.ID, account.Type, finalModel)
 	if !modelMatched {
+		r.recordDiagnosticStage("activate_rejected", "final_model_mismatch", account.ID, account.Type, finalModel)
 		return false
 	}
-	return r.activateArtifact(geminiBody)
+	if !r.activateArtifact(geminiBody) {
+		return false
+	}
+	r.recordDiagnosticStage("activated", "", account.ID, account.Type, finalModel)
+	return true
 }
 
 func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
@@ -781,15 +868,18 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 
 	lease, expiresAt, ok := readGeminiCaptureLease(r.controller.leasePath)
 	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || !privateOutputDir(lease.OutputDir) {
+		r.rejectActivation("lease_invalid_or_expired")
 		r.disable("lease_invalid_or_expired")
 		return false
 	}
 	if time.Now().After(expiresAt) {
+		r.rejectActivation("lease_expired")
 		r.disable("lease_expired")
 		return false
 	}
 	budget := r.controller.outputBudget(lease.OutputDir)
 	if !budget.readyForCapture() || !budget.reserve(geminiCaptureManifestReserve) {
+		r.rejectActivation("shared_budget_unready")
 		r.disable("shared_budget_unready")
 		return false
 	}
@@ -801,6 +891,7 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	if !q.writerAdmitted {
 		q.close()
 		r.releaseBudgetReservation()
+		r.rejectActivation("writer_admission")
 		r.disable("writer_admission")
 		return false
 	}
@@ -808,6 +899,7 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	if err := os.Mkdir(artifactDir, 0700); err != nil {
 		q.close()
 		r.releaseBudgetReservation()
+		r.rejectActivation("artifact_dir_unavailable")
 		r.disable("artifact_dir_unavailable")
 		return false
 	}
@@ -815,6 +907,7 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 		q.close()
 		_ = os.RemoveAll(artifactDir)
 		r.releaseBudgetReservation()
+		r.rejectActivation("artifact_dir_not_private")
 		r.disable("artifact_dir_not_private")
 		return false
 	}
@@ -836,6 +929,7 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	if !openFile("inbound", "inbound.bin") || !openFile("gemini_request", "gemini_request.bin") || !openFile("converted", "converted.bin") {
 		q.close()
 		_ = os.RemoveAll(artifactDir)
+		r.rejectActivation("file_open_failed")
 		r.disable("file_open_failed")
 		return false
 	}
@@ -1473,7 +1567,14 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 	r.gatewayStatus = status
 	needLocalArtifact := r.candidate && !r.activated && (r.selectedAG || status >= 400) && r.captureEnabled && !r.modelChecked
 	activated := r.activated
+	activationStage := r.activationStage
+	selectedAccountID := r.selectedAccountID
+	selectedAccountType := r.selectedAccountType
 	r.mu.Unlock()
+
+	if !activated && (activationStage == "candidate" || activationStage == "begin" || activationStage == "ag_selected") {
+		r.recordDiagnosticStage("activate_not_called", "", selectedAccountID, selectedAccountType, "")
+	}
 
 	if !activated && needLocalArtifact && !r.localFailureWorker {
 		r.mu.Lock()
@@ -1754,6 +1855,7 @@ func (r *GeminiCaptureRequest) buildManifestLocked(files map[string]GeminiCaptur
 		UpstreamFinishReasons: r.collectFinishReasons(files), Usage: r.usage, Termination: termination,
 		Incomplete: incomplete, IncompleteReasons: incompleteReasons, RedactedFields: r.redactedFields,
 		HeadersRecorded: false, CredentialHandling: "JSON credential-like fields are replaced with [REDACTED]; HTTP headers are never recorded; thoughtSignature is retained.",
+		CaptureStage: r.activationStage, SelectedAccountType: r.selectedAccountType, ActivationReason: r.activationReason,
 		Files: files, Attempts: attempts,
 	}
 }
@@ -1992,6 +2094,22 @@ func sanitizeCaptureError(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) > 256 {
 		value = value[:256]
+	}
+	return value
+}
+
+func sanitizeCaptureDiagnosticValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return "invalid"
+		}
+	}
+	if len(value) > 128 {
+		return value[:128]
 	}
 	return value
 }
