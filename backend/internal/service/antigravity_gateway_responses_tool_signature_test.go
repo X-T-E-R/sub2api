@@ -247,6 +247,6 @@ func TestAG001AntigravityResponsesReplayReachesFinalGeminiRequest(t *testing.T) 
 
 func TestAG001AntigravityResponsesReplayNormalizesOpaqueToolID(t *testing.T) {
 	source := signedAntigravityResponse()
-	source.Content[2].ID = "native-id"
+	source.Content[3].ID = "native-id"
 	assertAG001FinalGeminiRequest(t, source)
 }
