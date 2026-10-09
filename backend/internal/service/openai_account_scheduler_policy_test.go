@@ -192,3 +192,45 @@ func TestDefaultOpenAIAccountScheduler_StrictStickyAdmissionPropagatesRecheckRea
 	})
 	require.ErrorIs(t, err, readErr)
 }
+
+func TestDefaultOpenAIAccountSchedulerStickyAdmissionPropagatesAcquireErrors(t *testing.T) {
+	acquireErr := errors.New("concurrency backend unavailable")
+	for _, tc := range []struct {
+		name                string
+		platform            string
+		strict              bool
+		disableStickyEscape bool
+	}{
+		{name: "strict session affinity", platform: PlatformOpenAI, strict: true},
+		{name: "Grok video owner", platform: PlatformGrok, disableStickyEscape: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			groupID := int64(905)
+			account := Account{ID: 71, Platform: tc.platform, Type: AccountTypeAPIKey,
+				Status: StatusActive, Schedulable: true, Concurrency: 1, GroupIDs: []int64{groupID}}
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled = true
+			service := &OpenAIGatewayService{
+				accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{account}},
+				cache:       &schedulerTestGatewayCache{},
+				cfg:         cfg,
+				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{
+					acquireErr: acquireErr,
+				}),
+			}
+			scheduler := &defaultOpenAIAccountScheduler{service: service}
+			selection, escaped, err := scheduler.selectBySessionHash(context.Background(), OpenAIAccountScheduleRequest{
+				GroupID:               &groupID,
+				Platform:              tc.platform,
+				StickyAccountID:       account.ID,
+				SessionHash:           tc.name,
+				PreserveStickyBinding: true,
+				StrictSessionAffinity: tc.strict,
+				DisableStickyEscape:   tc.disableStickyEscape,
+			})
+			require.ErrorIs(t, err, acquireErr)
+			require.Nil(t, selection)
+			require.False(t, escaped)
+		})
+	}
+}

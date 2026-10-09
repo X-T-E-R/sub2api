@@ -110,7 +110,14 @@ func TestGatewayCodexModels_NonOpenAIGroupsUseMappedModels(t *testing.T) {
 		modalities []string
 	}{
 		{
-			name:       "Grok",
+			name:       "Grok 4.7",
+			platform:   service.PlatformGrok,
+			model:      "grok-4.7",
+			efforts:    []string{"low", "medium", "high", "xhigh"},
+			modalities: []string{"text", "image"},
+		},
+		{
+			name:       "Grok 4.6",
 			platform:   service.PlatformGrok,
 			model:      "grok-4.6",
 			efforts:    []string{"low", "medium", "high", "xhigh"},

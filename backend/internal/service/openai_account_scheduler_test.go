@@ -87,6 +87,7 @@ type schedulerTestConcurrencyCache struct {
 	loadBatchErr    error
 	loadMap         map[int64]*AccountLoadInfo
 	acquireResults  map[int64]bool
+	acquireErr      error
 	waitCounts      map[int64]int
 	skipDefaultLoad bool
 	acquiredIDs     *[]int64
@@ -96,6 +97,9 @@ type schedulerTestConcurrencyCache struct {
 func (c schedulerTestConcurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
 	if c.acquiredIDs != nil {
 		*c.acquiredIDs = append(*c.acquiredIDs, accountID)
+	}
+	if c.acquireErr != nil {
+		return false, c.acquireErr
 	}
 	if c.acquireResults != nil {
 		if result, ok := c.acquireResults[accountID]; ok {

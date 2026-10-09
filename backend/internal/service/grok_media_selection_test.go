@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -82,13 +83,16 @@ func TestSelectGrokMediaVideoRequestAccountPreservesOwner(t *testing.T) {
 	}
 }
 
-func TestGrokVideoStickySelectionIgnoresHealthEscape(t *testing.T) {
+func TestGrokStickySelectionKeepsPlatformHealthEscapePolicy(t *testing.T) {
 	groupID := int64(24)
 	account := Account{ID: 1, Platform: PlatformGrok, Type: AccountTypeAPIKey,
 		Status: StatusActive, Schedulable: true, Concurrency: 50, GroupIDs: []int64{groupID}}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled = true
 	svc := &OpenAIGatewayService{
 		accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{account}},
 		cache:       &schedulerTestGatewayCache{},
+		cfg:         cfg,
 	}
 	stats := newOpenAIAccountRuntimeStats()
 	for range 20 {
@@ -97,14 +101,90 @@ func TestGrokVideoStickySelectionIgnoresHealthEscape(t *testing.T) {
 	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: stats}
 	req := OpenAIAccountScheduleRequest{GroupID: &groupID, Platform: PlatformGrok,
 		SessionHash: "task", StickyAccountID: 1, PreserveStickyBinding: true}
+
+	// Generic Grok sticky requests retain the local adaptive policy: a bad
+	// health signal may escape to a replacement account. Video lookups use the
+	// explicit owner flag below instead of changing this platform-wide policy.
 	selection, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
 	require.NoError(t, err)
 	require.Nil(t, selection)
 	require.True(t, escaped)
+
 	req.DisableStickyEscape = true
 	selection, escaped, err = scheduler.selectBySessionHash(context.Background(), req)
 	require.NoError(t, err)
 	require.False(t, escaped)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(1), selection.Account.ID)
 	require.True(t, selection.Acquired)
+	require.NotNil(t, selection.ReleaseFunc)
 	selection.ReleaseFunc()
+}
+
+func TestGrokVideoOwnerSelectionDisablesHealthEscapeForConcurrencyStates(t *testing.T) {
+	groupID := int64(24)
+	account := Account{ID: 1, Platform: PlatformGrok, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: true, Concurrency: 50, GroupIDs: []int64{groupID}}
+	acquireErr := errors.New("concurrency backend unavailable")
+	for _, tc := range []struct {
+		name         string
+		acquired     bool
+		err          error
+		wantWaitPlan bool
+	}{
+		{name: "slot acquired", acquired: true},
+		{name: "slot full", acquired: false, wantWaitPlan: true},
+		{name: "slot error", err: acquireErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var acquiredIDs, releasedIDs []int64
+			service := &OpenAIGatewayService{
+				accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{account}},
+				cache:       &schedulerTestGatewayCache{},
+				cfg:         &config.Config{Gateway: config.GatewayConfig{}},
+				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{
+					acquireResults: map[int64]bool{account.ID: tc.acquired},
+					acquireErr:     tc.err,
+					acquiredIDs:    &acquiredIDs,
+					releasedIDs:    &releasedIDs,
+				}),
+			}
+			service.cfg.Gateway.OpenAIScheduler.StickyEscapeEnabled = true
+			service.cfg.Gateway.Scheduling.StickySessionWaitTimeout = time.Second
+			service.cfg.Gateway.Scheduling.StickySessionMaxWaiting = 3
+			stats := newOpenAIAccountRuntimeStats()
+			for range 20 {
+				stats.report(account.ID, false, nil)
+			}
+			scheduler := &defaultOpenAIAccountScheduler{service: service, stats: stats}
+			req := OpenAIAccountScheduleRequest{
+				GroupID: &groupID, Platform: PlatformGrok, SessionHash: "video-task",
+				StickyAccountID: account.ID, PreserveStickyBinding: true,
+				DisableStickyEscape: true,
+			}
+
+			selection, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
+			require.False(t, escaped, "video owner must not escape for %s", tc.name)
+			if tc.err != nil {
+				require.ErrorIs(t, err, tc.err)
+				require.Nil(t, selection)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.Equal(t, account.ID, selection.Account.ID)
+			if tc.wantWaitPlan {
+				require.False(t, selection.Acquired)
+				require.Nil(t, selection.ReleaseFunc)
+				require.NotNil(t, selection.WaitPlan)
+				require.Equal(t, account.ID, selection.WaitPlan.AccountID)
+				require.Empty(t, releasedIDs)
+				return
+			}
+			require.True(t, selection.Acquired)
+			require.NotNil(t, selection.ReleaseFunc)
+			selection.ReleaseFunc()
+			require.Equal(t, []int64{account.ID}, releasedIDs)
+		})
+	}
 }
