@@ -246,8 +246,8 @@ func (q *geminiCaptureQueue) acquireWriter() {
 func (q *geminiCaptureQueue) run() {
 	defer q.wg.Done()
 	defer close(q.done)
-	defer q.finishFiles()
 	defer func() { <-geminiCaptureWriterSlotsCh }()
+	defer q.finishFiles()
 	for item := range q.items {
 		q.mu.Lock()
 		q.pendingBytes -= int64(len(item.data))
@@ -808,6 +808,12 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 	}
 
 	q := newGeminiCaptureQueue(budget)
+	if !q.writerAdmitted {
+		q.close()
+		r.releaseBudgetReservation()
+		r.disable("writer_admission")
+		return false
+	}
 	openFile := func(target, rel string) bool {
 		path := filepath.Join(artifactDir, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -1190,6 +1196,30 @@ func (s *geminiCaptureStreamSanitizer) emit(line []byte) bool {
 	return q != nil && q.enqueue(s.target, redacted, len(redacted))
 }
 
+func (r *GeminiCaptureRequest) reserveManifestBytes(size int64) bool {
+	if size <= 0 {
+		return true
+	}
+	r.mu.Lock()
+	budget := r.budget
+	reserved := r.budgetReservation
+	r.mu.Unlock()
+	if budget == nil {
+		return false
+	}
+	if size <= reserved {
+		return true
+	}
+	delta := size - reserved
+	if !budget.reserve(delta) {
+		return false
+	}
+	r.mu.Lock()
+	r.budgetReservation = size
+	r.mu.Unlock()
+	return true
+}
+
 func (r *GeminiCaptureRequest) releaseBudgetReservation() {
 	if r == nil {
 		return
@@ -1253,10 +1283,7 @@ func redactGeminiCaptureLine(line []byte) ([]byte, []string, bool, bool) {
 		}
 		redacted, fields, ok := redactGeminiCaptureJSON(payload)
 		if !ok {
-			if captureBytesLookCredentialLike(payload) {
-				return line, nil, false, false
-			}
-			return append([]byte(nil), line...), []string{"[redaction_parse_failed]"}, true, true
+			return line, nil, false, false
 		}
 		if len(fields) == 0 {
 			return append([]byte(nil), line...), nil, false, true
@@ -1281,6 +1308,8 @@ func redactGeminiCaptureLine(line []byte) ([]byte, []string, bool, bool) {
 	return append(redacted, ending...), fields, true, true
 }
 
+// RecordConvertedWrite records the exact bytes actually handed to the client
+// writer, including a partial prefix when the writer reports an error.
 func captureBytesLookCredentialLike(body []byte) bool {
 	lower := strings.ToLower(string(body))
 	compact := strings.NewReplacer("_", "", "-", "", " ", "").Replace(lower)
@@ -1292,8 +1321,6 @@ func captureBytesLookCredentialLike(body []byte) bool {
 	return false
 }
 
-// RecordConvertedWrite records the exact bytes actually handed to the client
-// writer, including a partial prefix when the writer reports an error.
 func (r *GeminiCaptureRequest) RecordConvertedWrite(p []byte, n int, err error) {
 	if r == nil {
 		return
@@ -1510,8 +1537,13 @@ func (r *GeminiCaptureRequest) Finish(status int) {
 		r.addIncomplete("manifest_marshal_failed")
 		return
 	}
+	manifestBody := append(manifestBytes, '\n')
+	if !r.reserveManifestBytes(int64(len(manifestBody))) {
+		r.addIncomplete("manifest_budget")
+		return
+	}
 	manifestPath := filepath.Join(artifactDir, "manifest.json")
-	if err := writeGeminiCaptureManifestBounded(manifestPath, append(manifestBytes, '\n')); err != nil {
+	if err := writeGeminiCaptureManifestBounded(manifestPath, manifestBody); err != nil {
 		r.addIncomplete("manifest_write_failed")
 		return
 	}
@@ -1606,6 +1638,12 @@ func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
 		return false
 	}
 	q := newGeminiCaptureQueue(budget)
+	if !q.writerAdmitted {
+		q.close()
+		r.releaseBudgetReservation()
+		r.disable("writer_admission")
+		return false
+	}
 	openFile := func(target, rel string) bool {
 		path := filepath.Join(artifactDir, filepath.FromSlash(rel))
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)

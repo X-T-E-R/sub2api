@@ -46,6 +46,29 @@ func TestGeminiCapture_CredentialFieldMatcherCoversTokenSpellings(t *testing.T) 
 	}
 }
 
+func TestGeminiCapture_WriterSlotReleasesAfterWriteSyncClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "writer.bin")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := newGeminiCaptureQueue()
+	if !q.writerAdmitted {
+		t.Fatal("writer slot unavailable")
+	}
+	q.addFile("body", "writer.bin", file)
+	if !q.enqueue("body", []byte("x"), 1) {
+		t.Fatal("enqueue failed")
+	}
+	q.close()
+	next := newGeminiCaptureQueue()
+	if !next.writerAdmitted {
+		next.close()
+		t.Fatal("writer slot was not released after queue close")
+	}
+	next.close()
+}
+
 func TestGeminiCapture_WriterAdmissionIsBounded(t *testing.T) {
 	queues := make([]*geminiCaptureQueue, 0, geminiCaptureWriterSlots)
 	for i := 0; i < geminiCaptureWriterSlots; i++ {
