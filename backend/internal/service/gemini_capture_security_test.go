@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -132,7 +133,7 @@ func TestGeminiCapture_ExistingOutputConsumesSharedBudget(t *testing.T) {
 	leasePath := filepath.Join(t.TempDir(), "lease.json")
 	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
 	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
-	capture := controller.Begin(nil, "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
+	capture := controller.Begin(context.TODO(), "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
 	if capture == nil {
 		t.Fatal("expected exact lease candidate")
 	}
@@ -204,7 +205,7 @@ func TestGeminiCapture_LocalFailureFinishUsesCachedLeaseAndReturnsBounded(t *tes
 	leasePath := filepath.Join(t.TempDir(), "lease.json")
 	writeCaptureLease(t, leasePath, outputDir, true, time.Now().Add(time.Hour), "match-session")
 	controller := NewGeminiCapture(&config.Config{Gateway: config.GatewayConfig{GeminiCaptureLeaseFile: leasePath}})
-	capture := controller.Begin(nil, "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
+	capture := controller.Begin(context.TODO(), "/v1/messages", []byte(`{"model":"gemini-3.8-flash"}`), "match-session", GeminiCaptureTargetModel, true, 1)
 	if capture == nil {
 		t.Fatal("expected exact lease candidate")
 	}

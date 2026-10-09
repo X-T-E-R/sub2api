@@ -1917,7 +1917,7 @@ func readGeminiCaptureLease(path string) (GeminiCaptureLease, time.Time, bool) {
 	if err != nil {
 		return lease, time.Time{}, false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	body, err := io.ReadAll(io.LimitReader(file, geminiCaptureLeaseMaxBytes+1))
 	if err != nil || len(body) > geminiCaptureLeaseMaxBytes {
 		return lease, time.Time{}, false
