@@ -1464,7 +1464,12 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 		return CompositeModelOwnership{}, nil
 	}
 
-	cacheKey := compositeModelOwnershipCacheKey(groupID, model)
+	ctx = WithAntigravityEffortPolicySnapshot(ctx)
+	policy := antigravityEffortPolicyFromContext(ctx)
+	// Include the effective immutable policy, not the mutable global or a
+	// process pointer. Both positive and negative ownership caches stay valid
+	// for old in-flight requests while new policies take effect immediately.
+	cacheKey := compositeModelOwnershipCacheKey(groupID, model) + "|effort:" + policy.DefaultEffort + ":" + strings.Join(policy.Levels, ",")
 	if s.modelsListCache != nil {
 		if cached, found := s.modelsListCache.Get(cacheKey); found {
 			if ownership, ok := cached.(CompositeModelOwnership); ok {
@@ -1481,7 +1486,7 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 	platforms := make(map[string]struct{})
 	for _, account := range accounts {
 		platform := strings.TrimSpace(account.Platform)
-		if !isConcreteRequestPlatform(platform) || !explicitModelMappingClaims(account, model) {
+		if !isConcreteRequestPlatform(platform) || !explicitModelMappingClaimsWithContext(ctx, account, model) {
 			continue
 		}
 		platforms[platform] = struct{}{}

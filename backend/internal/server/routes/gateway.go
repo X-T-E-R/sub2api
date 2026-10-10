@@ -555,6 +555,7 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 			return
 		}
 
+		c.Request = c.Request.WithContext(service.WithAntigravityRequestEffort(c.Request.Context(), body))
 		model := compositeRequestModelFromBody(c.GetHeader("Content-Type"), body)
 		if model != "" {
 			decision, err := resolver.Resolve(c.Request.Context(), apiKey.Group.ID, model, compositeRouteEndpointForPath(c.Request.URL.Path))
@@ -643,6 +644,7 @@ func compositeGeminiTargetPlatformMiddleware(resolver *service.CompositeRouteRes
 	return func(c *gin.Context) {
 		apiKey, ok := middleware.GetAPIKeyFromContext(c)
 		if ok && apiKey != nil && apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
+			c.Request = c.Request.WithContext(service.WithAntigravityEffortPolicySnapshot(c.Request.Context()))
 			model := compositeGeminiModelFromParams(c)
 			if model != "" {
 				decision, err := resolver.Resolve(c.Request.Context(), apiKey.Group.ID, model, service.CompositeRouteEndpointGemini)

@@ -61,15 +61,23 @@ func ValidateAntigravityEffortModelMapping(credentials map[string]any) error {
 
 type antigravityRequestEffortKey struct{}
 
-// Bind once at ingress; retries and forwarding retain the same policy snapshot.
-// Budgets stay budgets because the protocols define no budget-to-level map.
-func WithAntigravityRequestEffort(ctx context.Context, body []byte) context.Context {
+// WithAntigravityEffortPolicySnapshot pins the policy at the first routing
+// decision, even when a native model ID is known before its body is read.
+// Existing request snapshots are never replaced by a global update.
+func WithAntigravityEffortPolicySnapshot(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if ctx.Value(antigravityEffortPolicyKey{}) == nil {
-		ctx = context.WithValue(ctx, antigravityEffortPolicyKey{}, currentAntigravityModelEffortSettings())
+	if ctx.Value(antigravityEffortPolicyKey{}) != nil {
+		return ctx
 	}
+	return context.WithValue(ctx, antigravityEffortPolicyKey{}, currentAntigravityModelEffortSettings())
+}
+
+// Bind once at ingress; retries and forwarding retain the same policy snapshot.
+// Budgets stay budgets because the protocols define no budget-to-level map.
+func WithAntigravityRequestEffort(ctx context.Context, body []byte) context.Context {
+	ctx = WithAntigravityEffortPolicySnapshot(ctx)
 	effort := ""
 	for _, path := range []string{"reasoning.effort", "reasoning_effort", "output_config.effort", "generationConfig.thinkingConfig.thinkingLevel", "generation_config.thinking_config.thinking_level"} {
 		value := gjson.GetBytes(body, path)

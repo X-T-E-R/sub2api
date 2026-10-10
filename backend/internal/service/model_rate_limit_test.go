@@ -108,7 +108,7 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini-3-pro-preview mapped to gemini-3-pro-high",
+			name: "antigravity platform - gemini-3-pro mapped to templated gemini-3-pro-high",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
@@ -119,11 +119,11 @@ func TestIsModelRateLimited(t *testing.T) {
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3-pro",
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit blocks mapped preview",
+			name: "antigravity platform - gemini family rate limit blocks mapped template variant",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
@@ -134,7 +134,7 @@ func TestIsModelRateLimited(t *testing.T) {
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3-pro",
 			expected:       true,
 		},
 		{
@@ -153,7 +153,7 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       false,
 		},
 		{
-			name: "non-antigravity platform - gemini-3-pro-preview NOT mapped",
+			name: "non-antigravity platform - gemini-3-pro NOT mapped",
 			account: &Account{
 				Platform: PlatformGemini,
 				Extra: map[string]any{
@@ -164,13 +164,18 @@ func TestIsModelRateLimited(t *testing.T) {
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3-pro",
 			expected:       false, // gemini 平台不走 antigravity 映射
 		},
 		{
-			name: "antigravity platform - claude-opus-4-5-thinking mapped to opus-4-6-thinking",
+			name: "antigravity platform - configured claude-opus-4-5-thinking alias mapped to opus-4-6-thinking",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"claude-opus-4-5-thinking": "claude-opus-4-6-thinking",
+					},
+				},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						"claude-opus-4-6-thinking": map[string]any{
@@ -369,9 +374,14 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    0,
 		},
 		{
-			name: "antigravity platform - claude-opus-4-5-thinking mapped to opus-4-6-thinking",
+			name: "antigravity platform - configured claude-opus-4-5-thinking alias mapped to opus-4-6-thinking",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{
+						"claude-opus-4-5-thinking": "claude-opus-4-6-thinking",
+					},
+				},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						"claude-opus-4-6-thinking": map[string]any{
@@ -396,7 +406,7 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 					},
 				},
 			},
-			requestedModel: "gemini-3-pro-preview",
+			requestedModel: "gemini-3-pro",
 			minExpected:    9 * time.Minute,
 			maxExpected:    11 * time.Minute,
 		},

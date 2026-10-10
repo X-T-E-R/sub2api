@@ -489,7 +489,7 @@ func TestAntigravityGatewayService_Forward_PromptTooLong(t *testing.T) {
 	c, _ := gin.CreateTestContext(writer)
 
 	body, err := json.Marshal(map[string]any{
-		"model": "claude-opus-4-6",
+		"model": "claude-opus-4-6-thinking",
 		"messages": []map[string]any{
 			{"role": "user", "content": "hi"},
 		},
@@ -553,7 +553,7 @@ func TestAntigravityGatewayService_Forward_ModelRateLimitTriggersFailover(t *tes
 	c, _ := gin.CreateTestContext(writer)
 
 	body, err := json.Marshal(map[string]any{
-		"model": "claude-opus-4-6",
+		"model": "claude-opus-4-6-thinking",
 		"messages": []map[string]any{
 			{"role": "user", "content": "hi"},
 		},
@@ -670,7 +670,7 @@ func TestAntigravityGatewayService_Forward_StickySessionForceCacheBilling(t *tes
 	c, _ := gin.CreateTestContext(writer)
 
 	body, err := json.Marshal(map[string]any{
-		"model":    "claude-opus-4-6",
+		"model":    "claude-opus-4-6-thinking",
 		"messages": []map[string]string{{"role": "user", "content": "hello"}},
 	})
 	require.NoError(t, err)
@@ -785,7 +785,7 @@ func TestAntigravityGatewayService_ForwardGemini_ClearsStickySessionOnGeminiRate
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3-flash-preview:generateContent", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3-flash:generateContent", bytes.NewReader(body))
 	c.Request = req
 
 	respBody := []byte(`{
@@ -833,7 +833,7 @@ func TestAntigravityGatewayService_ForwardGemini_ClearsStickySessionOnGeminiRate
 		context.Background(),
 		c,
 		account,
-		"gemini-3-flash-preview",
+		"gemini-3-flash",
 		"generateContent",
 		false,
 		body,

@@ -8,6 +8,18 @@ import zhCommon from "@/i18n/locales/zh/common";
 import zhSettings from "@/i18n/locales/zh/admin/settings";
 import SettingsView from "../SettingsView.vue";
 
+// This page suite owns its settings form; independently tested reasoning cards
+// must not make real XHR calls from jsdom when the parent view is mounted.
+vi.mock("@/views/admin/settings/ModelReasoningFloorSettings.vue", () => ({
+  default: { name: "ModelReasoningFloorSettings", template: '<div></div>' },
+}));
+vi.mock("@/views/admin/settings/AntigravityModelEffortSettings.vue", () => ({
+  default: {
+    name: "AntigravityModelEffortSettings",
+    template: '<div data-testid="antigravity-model-effort-card-stub"></div>',
+  },
+}));
+
 const {
   getSettings,
   updateSettings,
@@ -631,6 +643,7 @@ async function openGatewayTab(wrapper: ReturnType<typeof mountView>) {
   expect(gatewayTabButton).toBeDefined();
   await gatewayTabButton?.trigger("click");
   await flushPromises();
+  expect(wrapper.find('[data-testid="antigravity-model-effort-card-stub"]').exists()).toBe(true);
 }
 
 async function openUsersTab(wrapper: ReturnType<typeof mountView>) {

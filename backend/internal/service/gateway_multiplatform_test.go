@@ -1402,7 +1402,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 			cfg:         testConfig(),
 		}
 
-		acc, err := svc.selectAccountWithMixedScheduling(ctx, nil, "", "gemini-3-pro-preview", nil, PlatformGemini)
+		acc, err := svc.selectAccountWithMixedScheduling(ctx, nil, "", "gemini-3-pro", nil, PlatformGemini)
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(3), acc.ID)

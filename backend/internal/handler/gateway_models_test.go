@@ -538,7 +538,10 @@ func TestGatewayModels_CompositeAntigravityAdvertisesAntigravityDefaults(t *test
 	var got gatewayModelsResponseForTest
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	ids := modelIDsForTest(got.Data)
-	require.Contains(t, ids, "claude-opus-4-6")
+	// Antigravity's canonical catalog only seeds claude-opus-4-6-thinking; the
+	// shorter claude-opus-4-6 alias is intentionally no longer a default.
+	require.Contains(t, ids, "claude-opus-4-6-thinking")
+	require.NotContains(t, ids, "claude-opus-4-6")
 	require.Contains(t, ids, "gemini-2.5-flash")
 }
 
