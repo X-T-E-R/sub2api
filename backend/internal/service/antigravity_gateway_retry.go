@@ -919,7 +919,7 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 	if account == nil || repo == nil {
 		return false
 	}
-	keys := antigravityModelRateLimitKeys(modelName)
+	keys := antigravityModelRateLimitKeysForAccount(ctx, account, modelName)
 	if len(keys) == 0 {
 		return false
 	}

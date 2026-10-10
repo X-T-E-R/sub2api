@@ -462,6 +462,11 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if input.Platform == PlatformAntigravity {
+		if err := ValidateAntigravityEffortModelMapping(input.Credentials); err != nil {
+			return nil, infraerrors.BadRequest("INVALID_MODEL_EFFORT_TEMPLATE", err.Error())
+		}
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -555,6 +560,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if account.Platform == PlatformAntigravity && input.Credentials != nil {
+		if err := ValidateAntigravityEffortModelMapping(input.Credentials); err != nil {
+			return nil, infraerrors.BadRequest("INVALID_MODEL_EFFORT_TEMPLATE", err.Error())
+		}
 	}
 	previousDailyPolicy := codexDailySessionUpdatedAccount(account, nil, nil)
 	var normalizedExtra map[string]any

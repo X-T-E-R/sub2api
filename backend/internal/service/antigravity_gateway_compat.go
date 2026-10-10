@@ -173,6 +173,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 	request antigravityCompatRequest,
 ) (*ForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
+	ctx = WithAntigravityRequestEffort(ctx, request.originalBody)
 	call, err := s.prepareAntigravityCompatCall(ctx, c, account, request)
 	if err != nil {
 		return nil, err
@@ -214,7 +215,11 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request body")
 	}
 
-	mappedModel := s.getMappedModel(account, request.originalModel)
+	ctx = WithAntigravityRequestEffort(ctx, request.originalBody)
+	if message := antigravityEffortRequestError(ctx, account, request.originalModel); message != "" {
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", message)
+	}
+	mappedModel := resolveFinalAntigravityModelKey(ctx, account, request.originalModel)
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		message := fmt.Sprintf("model %s not in whitelist", request.originalModel)

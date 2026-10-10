@@ -4,7 +4,7 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
-import { buildModelMappingObject, getModelsByPlatform, splitModelMappingObject } from '../useModelWhitelist'
+import { buildModelMappingObject, getModelsByPlatform, getPresetMappingsByPlatform, splitModelMappingObject } from '../useModelWhitelist'
 
 describe('useModelWhitelist', () => {
   it('openai 模型列表包含 GPT-5.4 官方快照', () => {
@@ -28,12 +28,12 @@ describe('useModelWhitelist', () => {
     expect(models).not.toContain('gpt-5.2-codex')
   })
 
-  it('antigravity 模型列表包含图片模型兼容项', () => {
+  it('antigravity keeps canonical image IDs rather than retired image aliases', () => {
     const models = getModelsByPlatform('antigravity')
 
     expect(models).toContain('gemini-2.5-flash-image')
     expect(models).toContain('gemini-3.1-flash-image')
-    expect(models).toContain('gemini-3-pro-image')
+    expect(models).not.toContain('gemini-3-pro-image')
   })
 
   it('Claude 模型列表包含新发布的 Claude 模型', () => {
@@ -99,10 +99,28 @@ describe('useModelWhitelist', () => {
     expect(models.indexOf('gemini-2.5-flash-image')).toBeLessThan(models.indexOf('gemini-2.5-flash-lite'))
   })
 
-  it('antigravity 模型列表包含 Gemini 3.1 Pro 通用别名', () => {
+  it('antigravity uses one base per effort family and omits legacy aliases', () => {
     const models = getModelsByPlatform('antigravity')
 
     expect(models).toContain('gemini-3.1-pro')
+    expect(models).toContain('gemini-3.8-flash')
+    expect(models).toContain('gemini-pro-agent')
+    expect(models).not.toContain('gemini-3.1-pro-high')
+    expect(models).not.toContain('gemini-3.1-pro-low')
+    expect(models).not.toContain('claude-opus-4-5-thinking')
+    expect(models).toContain('gpt-oss-120b')
+    expect(models).not.toContain('gpt-oss-120b-medium')
+    const presets = getPresetMappingsByPlatform('antigravity')
+    expect(presets).toContainEqual(expect.objectContaining({ from: 'gemini-3.8-flash', to: 'gemini-3.8-flash-{effort}' }))
+    expect(presets.every(preset => preset.to.includes('{effort'))).toBe(true)
+  })
+
+  it('template targets round-trip through the existing mapping editor data', () => {
+    const original = { 'opus5.5': 'opus5.5-{effort}', 'custom': 'custom-{effort:low}' }
+    const parsed = splitModelMappingObject(original)
+
+    expect(parsed.allowedModels).toEqual([])
+    expect(buildModelMappingObject('mapping', parsed.allowedModels, parsed.modelMappings)).toEqual(original)
   })
 
   it('whitelist 模式会忽略通配符条目', () => {

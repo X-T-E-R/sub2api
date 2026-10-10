@@ -86,6 +86,7 @@ type GeminiCaptureRequest struct {
 
 	metadataUserID      string
 	requestModel        string
+	finalModel          string
 	stream              bool
 	userID              int64
 	groupID             int64
@@ -838,10 +839,13 @@ func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, gem
 		r.disable("account_type_upstream")
 		return false
 	}
-	modelMatched := finalModel == GeminiCaptureTargetModel
+	modelMatched := isGeminiCaptureFinalModel(finalModel)
 	r.mu.Lock()
 	r.modelChecked = true
 	r.modelMatched = modelMatched
+	if modelMatched {
+		r.finalModel = finalModel
+	}
 	r.selectedAG = true
 	r.mu.Unlock()
 	r.recordDiagnosticStage("final_model_checked", "", account.ID, account.Type, finalModel)
@@ -1868,7 +1872,7 @@ func (r *GeminiCaptureRequest) startedAt() string {
 
 func (r *GeminiCaptureRequest) finalModelLocked() string {
 	if r.modelMatched {
-		return GeminiCaptureTargetModel
+		return r.finalModel
 	}
 	return ""
 }

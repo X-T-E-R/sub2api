@@ -14,12 +14,14 @@ import type {
   ModelReasoningFloorSettings,
 } from "@/types/modelReasoningFloor";
 import type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
+import type { AntigravityModelEffortSettings } from "@/types/antigravityModelEffort";
 
 export type {
   ModelReasoningFloorRule,
   ModelReasoningFloorSettings,
 } from "@/types/modelReasoningFloor";
 export type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
+export type { AntigravityModelEffortSettings } from "@/types/antigravityModelEffort";
 
 export interface DefaultSubscriptionSetting {
   group_id: number;
@@ -1507,6 +1509,25 @@ export async function updateModelReasoningFloorSettings(
   return data;
 }
 
+// ==================== Antigravity Model Effort Settings ====================
+
+export async function getAntigravityModelEffortSettings(): Promise<AntigravityModelEffortSettings> {
+  const { data } = await apiClient.get<AntigravityModelEffortSettings>(
+    "/admin/settings/antigravity-model-effort",
+  );
+  return data;
+}
+
+export async function updateAntigravityModelEffortSettings(
+  settings: AntigravityModelEffortSettings,
+): Promise<AntigravityModelEffortSettings> {
+  const { data } = await apiClient.put<AntigravityModelEffortSettings>(
+    "/admin/settings/antigravity-model-effort",
+    settings,
+  );
+  return data;
+}
+
 // ==================== Codex Session Affinity Settings ====================
 
 export async function getCodexSessionAffinitySettings(): Promise<CodexSessionAffinitySettings> {
@@ -1661,6 +1682,8 @@ export const settingsAPI = {
   updateRectifierSettings,
   getModelReasoningFloorSettings,
   updateModelReasoningFloorSettings,
+  getAntigravityModelEffortSettings,
+  updateAntigravityModelEffortSettings,
   getCodexSessionAffinitySettings,
   updateCodexSessionAffinitySettings,
   getBetaPolicySettings,

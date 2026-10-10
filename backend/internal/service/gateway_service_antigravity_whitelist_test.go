@@ -58,7 +58,8 @@ func TestGatewayService_isModelSupportedByAccount_AntigravityNoMapping(t *testin
 	require.True(t, svc.isModelSupportedByAccount(account, "claude-sonnet-4-5"))
 	require.True(t, svc.isModelSupportedByAccount(account, "gemini-3-flash"))
 	require.True(t, svc.isModelSupportedByAccount(account, "gemini-2.5-pro"))
-	require.True(t, svc.isModelSupportedByAccount(account, "claude-haiku-4-5"))
+	// Retired aliases are no longer part of the default catalog.
+	require.False(t, svc.isModelSupportedByAccount(account, "claude-haiku-4-5"))
 
 	// 不在默认映射中的模型不被支持
 	require.False(t, svc.isModelSupportedByAccount(account, "claude-3-5-sonnet-20241022"))

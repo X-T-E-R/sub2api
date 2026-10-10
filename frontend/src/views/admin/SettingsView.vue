@@ -4917,6 +4917,7 @@
           </div>
 
           <ModelReasoningFloorSettings />
+          <AntigravityModelEffortSettings />
           <CodexSessionAffinitySettings />
 
           <!-- Upstream Billing Probe Settings -->
@@ -8968,6 +8969,7 @@ import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
 import ModelReasoningFloorSettings from "@/views/admin/settings/ModelReasoningFloorSettings.vue";
+import AntigravityModelEffortSettings from "@/views/admin/settings/AntigravityModelEffortSettings.vue";
 import CodexSessionAffinitySettings from "@/views/admin/settings/CodexSessionAffinitySettings.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {

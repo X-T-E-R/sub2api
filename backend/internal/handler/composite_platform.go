@@ -76,6 +76,7 @@ func bindRequestedReasoningEffort(c *gin.Context, body []byte, model string) {
 	if c == nil || c.Request == nil {
 		return
 	}
+	c.Request = c.Request.WithContext(service.WithAntigravityRequestEffort(c.Request.Context(), body))
 	effort := service.CanonicalRequestedReasoningEffort(body, model)
 	if effort == nil {
 		return

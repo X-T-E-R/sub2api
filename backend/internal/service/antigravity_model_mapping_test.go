@@ -37,43 +37,13 @@ func TestAntigravityGatewayService_GetMappedModel(t *testing.T) {
 			expected:       "my-opus",
 		},
 
-		// 2. 默认映射（DefaultAntigravityModelMapping）
-		{
-			name:           "默认映射 - claude-opus-4-6 → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-6",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-opus-4-5-20251101 → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-5-20251101",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-opus-4-5-thinking → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-5-thinking",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-haiku-4-5 → claude-sonnet-4-6",
-			requestedModel: "claude-haiku-4-5",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "默认映射 - claude-haiku-4-5-20251001 → claude-sonnet-4-6",
-			requestedModel: "claude-haiku-4-5-20251001",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "默认映射 - claude-sonnet-4-5-20250929 → claude-sonnet-4-6",
-			requestedModel: "claude-sonnet-4-5-20250929",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
+		// New defaults do not seed legacy aliases; canonical targets remain below.
+		{name: "retired opus base alias", requestedModel: "claude-opus-4-6", expected: ""},
+		{name: "retired dated opus alias", requestedModel: "claude-opus-4-5-20251101", expected: ""},
+		{name: "retired opus thinking alias", requestedModel: "claude-opus-4-5-thinking", expected: ""},
+		{name: "retired haiku alias", requestedModel: "claude-haiku-4-5", expected: ""},
+		{name: "retired dated haiku alias", requestedModel: "claude-haiku-4-5-20251001", expected: ""},
+		{name: "retired dated sonnet alias", requestedModel: "claude-sonnet-4-5-20250929", expected: ""},
 
 		// 3. 默认映射中的透传（映射到自己）
 		{
@@ -113,10 +83,10 @@ func TestAntigravityGatewayService_GetMappedModel(t *testing.T) {
 			expected:       "claude-opus-4-6-thinking",
 		},
 		{
-			name:           "默认映射 - claude-sonnet-4-5-thinking → claude-sonnet-4-6",
+			name:           "retired sonnet thinking alias",
 			requestedModel: "claude-sonnet-4-5-thinking",
 			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
+			expected:       "",
 		},
 		{
 			name:           "账户显式目标只映射一步 - custom-sonnet → claude-sonnet-4-5",
@@ -237,13 +207,11 @@ func TestAntigravityGatewayService_IsModelSupported(t *testing.T) {
 		{"直接支持 - claude-sonnet-4-5", "claude-sonnet-4-5", true},
 		{"直接支持 - gemini-3-flash", "gemini-3-flash", true},
 
-		// 可映射（有明确前缀映射）
-		{"可映射 - claude-opus-4-8", "claude-opus-4-8", true},
-		{"可映射 - claude-opus-4-6", "claude-opus-4-6", true},
-
-		// 前缀透传（claude 和 gemini 前缀）
-		{"Gemini前缀", "gemini-unknown", true},
-		{"Claude前缀", "claude-unknown", true},
+		// Defaults contain canonical models, not retired aliases or prefix claims.
+		{"canonical opus", "claude-opus-4-8", true},
+		{"retired opus alias", "claude-opus-4-6", false},
+		{"unconfigured Gemini prefix", "gemini-unknown", false},
+		{"unconfigured Claude prefix", "claude-unknown", false},
 
 		// 不支持
 		{"不支持 - gpt-4", "gpt-4", false},

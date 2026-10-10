@@ -1166,6 +1166,31 @@ export default {
           max: 'Max（最高）'
         }
       },
+      antigravityModelEffort: {
+        title: 'Antigravity 模型推理档位名称',
+        description: '管理 Antigravity 模型基础目标在请求推理档位后缀时可用的档位名称。保存后新请求立即使用新的名称。',
+        levels: '允许的档位名称',
+        levelsHint: '每行一个名称，也可以用逗号分隔。名称统一按小写保存且不可重复；后续新增的档位（如 ultra、extra-low）可直接在此添加。',
+        levelsPlaceholder: 'none、minimal、low、medium、high、xhigh、max',
+        levelsSummary: '已配置 {count} 个名称，最多 {max} 个。',
+        defaultEffort: '默认档位',
+        defaultEffortHint: '请求未指定档位时使用。只能选择上方已列出的名称。',
+        defaultPlaceholder: '请选择默认档位',
+        save: '保存档位名称',
+        saved: 'Antigravity 模型推理档位名称已保存',
+        loadFailed: '加载 Antigravity 模型推理档位名称失败',
+        saveFailed: '保存 Antigravity 模型推理档位名称失败',
+        validationFailed: '保存前请先修正档位名称。',
+        affectsHint: '保存只作用于新请求；已开始处理的请求仍使用原先的档位名称。',
+        validation: {
+          required: '请至少添加一个档位名称。',
+          invalid: '无效的档位名称：{names}。请使用小写字母、数字与单个连字符，并以字母开头。',
+          duplicate: '档位名称重复：{names}。',
+          tooMany: '最多只能配置 {max} 个档位名称。',
+          defaultRequired: '请选择默认档位。',
+          defaultNotInLevels: '默认档位必须是允许的档位名称之一。'
+        }
+      },
       codexSessionAffinity: {
         title: 'Codex 会话账号偏好',
         description: '选择允许新建显式 Codex 根会话记录当前账号偏好的分组；符合条件的账号失败时可切换到其他合适账号。',

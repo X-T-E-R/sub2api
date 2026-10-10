@@ -991,6 +991,9 @@ func (s *GatewayService) isUpstreamModelRestrictedByChannel(ctx context.Context,
 		return false
 	}
 	upstreamModel := resolveAccountUpstreamModel(account, requestedModel)
+	if account.Platform == PlatformAntigravity {
+		upstreamModel = resolveFinalAntigravityModelKey(ctx, account, requestedModel)
+	}
 	if upstreamModel == "" {
 		return false
 	}

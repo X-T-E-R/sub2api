@@ -1172,6 +1172,31 @@ export default {
           max: 'Max'
         }
       },
+      antigravityModelEffort: {
+        title: 'Antigravity model effort names',
+        description: 'Manage the reasoning effort names available to Antigravity model base targets that request an effort suffix. Saved names apply to new requests immediately.',
+        levels: 'Allowed effort names',
+        levelsHint: 'One name per line, or separate names with commas. Names are stored in lowercase and must be unique. Future names such as ultra or extra-low can be added here directly.',
+        levelsPlaceholder: 'none, minimal, low, medium, high, xhigh, max',
+        levelsSummary: '{count} of up to {max} names configured.',
+        defaultEffort: 'Default effort',
+        defaultEffortHint: 'Used when a request does not ask for a specific effort name. Only the names listed above can be selected.',
+        defaultPlaceholder: 'Select a default effort',
+        save: 'Save effort names',
+        saved: 'Antigravity model effort names saved',
+        loadFailed: 'Failed to load Antigravity model effort names',
+        saveFailed: 'Failed to save Antigravity model effort names',
+        validationFailed: 'Fix the effort names before saving.',
+        affectsHint: 'Saving applies to new requests only; requests already in flight keep the names they started with.',
+        validation: {
+          required: 'Add at least one effort name.',
+          invalid: 'Invalid effort name(s): {names}. Use lowercase letters, digits and single hyphens, starting with a letter.',
+          duplicate: 'Duplicate effort name(s): {names}.',
+          tooMany: 'Use at most {max} effort names.',
+          defaultRequired: 'Select a default effort.',
+          defaultNotInLevels: 'The default effort must be one of the allowed effort names.'
+        }
+      },
       codexSessionAffinity: {
         title: 'Codex session account preference',
         description: 'Choose groups where new explicit Codex root sessions record a preferred current account; eligible account failures may move them to another suitable account.',

@@ -222,6 +222,11 @@ func NewAccountService(accountRepo AccountRepository, groupRepo GroupRepository)
 
 // Create 创建账号
 func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (*Account, error) {
+	if req.Platform == PlatformAntigravity {
+		if err := ValidateAntigravityEffortModelMapping(req.Credentials); err != nil {
+			return nil, err
+		}
+	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
 		if err := s.validateGroupIDsExist(ctx, req.GroupIDs); err != nil {
@@ -320,6 +325,11 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get account: %w", err)
+	}
+	if account.Platform == PlatformAntigravity && req.Credentials != nil {
+		if err := ValidateAntigravityEffortModelMapping(*req.Credentials); err != nil {
+			return nil, err
+		}
 	}
 	previousDailyPolicy := codexDailySessionUpdatedAccount(account, nil, nil)
 

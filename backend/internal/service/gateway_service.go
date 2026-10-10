@@ -1504,11 +1504,30 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 }
 
 func explicitModelMappingClaims(account Account, model string) bool {
+	return explicitModelMappingClaimsWithContext(context.Background(), account, model)
+}
+
+func explicitModelMappingClaimsWithContext(ctx context.Context, account Account, model string) bool {
 	if account.Credentials == nil || model == "" {
 		return false
 	}
-	mapped, ok := stringMappingFromRaw(account.Credentials["model_mapping"])[model]
-	return ok && strings.TrimSpace(mapped) != ""
+	mapping := stringMappingFromRaw(account.Credentials["model_mapping"])
+	if mapped, ok := mapping[model]; ok {
+		return strings.TrimSpace(mapped) != ""
+	}
+	if account.Platform == PlatformAntigravity {
+		// Only exact template base rules claim variants; wildcard ownership keeps
+		// the composite router's existing explicit-claim contract.
+		templates := map[string]string{}
+		for base, target := range mapping {
+			if _, valid := parseAntigravityEffortTemplate(target); valid && !strings.Contains(base, "*") {
+				templates[base] = target
+			}
+		}
+		mapped, matched := resolveAntigravityEffortMappingWithPolicy(templates, model, "", antigravityEffortPolicyFromContext(ctx))
+		return matched && mapped != ""
+	}
+	return false
 }
 
 // GetSchedulablePlatforms returns the concrete platforms that currently have

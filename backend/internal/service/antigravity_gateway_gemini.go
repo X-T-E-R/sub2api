@@ -86,7 +86,11 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
 	}
 
-	mappedModel := s.getMappedModel(account, originalModel)
+	ctx = WithAntigravityRequestEffort(ctx, body)
+	if message := antigravityEffortRequestError(ctx, account, originalModel); message != "" {
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, message)
+	}
+	mappedModel := resolveFinalAntigravityModelKey(ctx, account, originalModel)
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		return nil, s.writeGoogleError(c, http.StatusForbidden, fmt.Sprintf("model %s not in whitelist", originalModel))

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -79,9 +80,7 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	keys := []string{modelKey}
 	switch a.Platform {
 	case PlatformAntigravity:
-		if isAntigravityGeminiModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
-			keys = append(keys, antigravityGeminiModelRateLimitKey)
-		}
+		keys = antigravityModelRateLimitKeysForAccount(ctx, a, modelKey)
 	case PlatformOpenAI:
 		if openAIImageGenerationRateLimitApplies(ctx, requestedModel, modelKey) && modelKey != openAIImageGenerationRateLimitKey {
 			keys = append(keys, openAIImageGenerationRateLimitKey)
@@ -139,7 +138,7 @@ func OpenAIImagesEndpointFromContext(ctx context.Context) bool {
 }
 
 func resolveFinalAntigravityModelKey(ctx context.Context, account *Account, requestedModel string) string {
-	modelKey := mapAntigravityModel(account, requestedModel)
+	modelKey := mapAntigravityModelWithContext(ctx, account, requestedModel)
 	if modelKey == "" {
 		return ""
 	}
@@ -154,12 +153,28 @@ func isAntigravityGeminiModel(model string) bool {
 	return strings.HasPrefix(normalizeAntigravityModelName(model), "gemini-")
 }
 
-func antigravityModelRateLimitKeys(model string) []string {
+func antigravityModelRateLimitKeysForAccount(ctx context.Context, account *Account, model string) []string {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return nil
 	}
 	keys := []string{model}
+	if account != nil {
+		bases := []string{}
+		policy := antigravityEffortPolicyFromContext(ctx)
+		for base, target := range account.GetModelMapping() {
+			if rule, valid := parseAntigravityEffortTemplate(target); valid && base != model {
+				for _, level := range policy.Levels {
+					if model == rule.model(level, policy) {
+						bases = append(bases, base)
+						break
+					}
+				}
+			}
+		}
+		sort.Strings(bases)
+		keys = append(keys, bases...)
+	}
 	if isAntigravityGeminiModel(model) && model != antigravityGeminiModelRateLimitKey {
 		keys = append(keys, antigravityGeminiModelRateLimitKey)
 	}

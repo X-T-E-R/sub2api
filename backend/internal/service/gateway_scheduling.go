@@ -2619,7 +2619,7 @@ func summarizeSelectionFailureStats(stats selectionFailureStats) string {
 // 对于 Antigravity 平台，会先获取映射后的最终模型名（包括 thinking 后缀）再检查支持
 func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Context, account *Account, requestedModel string) bool {
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
-		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaimsWithContext(ctx, *account, publicModel) {
 			return false
 		}
 	}
@@ -2628,7 +2628,7 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 			return true
 		}
 		// 使用与转发阶段一致的映射逻辑：自定义映射优先 → 默认映射兜底
-		mapped := mapAntigravityModel(account, requestedModel)
+		mapped := mapAntigravityModelWithContext(ctx, account, requestedModel)
 		if mapped == "" {
 			return false
 		}

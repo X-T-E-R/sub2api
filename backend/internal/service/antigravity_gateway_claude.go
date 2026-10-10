@@ -50,7 +50,11 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	}
 
 	originalModel := claudeReq.Model
-	mappedModel := s.getMappedModel(account, claudeReq.Model)
+	ctx = WithAntigravityRequestEffort(ctx, body)
+	if message := antigravityEffortRequestError(ctx, account, originalModel); message != "" {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", message)
+	}
+	mappedModel := resolveFinalAntigravityModelKey(ctx, account, claudeReq.Model)
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", fmt.Sprintf("model %s not in whitelist", claudeReq.Model))

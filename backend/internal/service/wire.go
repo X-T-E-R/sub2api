@@ -769,6 +769,9 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	if err := svc.LoadModelReasoningFloorSettings(context.Background()); err != nil {
 		return nil, fmt.Errorf("load model reasoning floors: %w", err)
 	}
+	if err := svc.LoadAntigravityModelEffortSettings(context.Background()); err != nil {
+		return nil, fmt.Errorf("load Antigravity model effort settings: %w", err)
+	}
 	if err := svc.LoadCodexSessionAffinitySettings(context.Background()); err != nil {
 		return nil, fmt.Errorf("load Codex session affinity settings: %w", err)
 	}

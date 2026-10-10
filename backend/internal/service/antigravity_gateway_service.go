@@ -259,35 +259,25 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 // 完全依赖映射配置：账户映射（通配符）→ 默认映射兜底（DefaultAntigravityModelMapping）
 // 注意：返回空字符串表示模型不被支持，调度时会过滤掉该账号
 func mapAntigravityModel(account *Account, requestedModel string) string {
+	return mapAntigravityModelWithContext(context.Background(), account, requestedModel)
+}
+
+func mapAntigravityModelWithContext(ctx context.Context, account *Account, requestedModel string) string {
 	if account == nil {
 		return ""
 	}
-	requestedModel = strings.TrimPrefix(requestedModel, "models/")
-
-	// 获取映射表（未配置时自动使用 DefaultAntigravityModelMapping）
+	requestedModel = strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/")
 	mapping := account.GetModelMapping()
-	if len(mapping) == 0 {
-		return "" // 无映射配置（非 Antigravity 平台）
+	policy := antigravityEffortPolicyFromContext(ctx)
+	if model, matched := resolveAntigravityEffortMappingWithPolicy(mapping, requestedModel, antigravityRequestEffort(ctx), policy); matched {
+		return model
 	}
-
-	// 通过映射表查询（支持精确匹配 + 通配符）
-	mapped := account.GetMappedModel(requestedModel)
-
-	// 判断是否映射成功（mapped != requestedModel 说明找到了映射规则）
-	if mapped != requestedModel {
-		return mapped
+	normalized := normalizeRequestedModelForLookup(account.Platform, requestedModel)
+	if normalized != requestedModel {
+		if model, matched := resolveAntigravityEffortMappingWithPolicy(mapping, normalized, antigravityRequestEffort(ctx), policy); matched {
+			return model
+		}
 	}
-
-	// 如果 mapped == requestedModel，检查是否在映射表中配置（精确或通配符）
-	// 这区分两种情况：
-	// 1. 映射表中有 "model-a": "model-a"（显式透传）→ 返回 model-a
-	// 2. 通配符匹配 "claude-*": "claude-sonnet-4-5" 恰好目标等于请求名 → 返回 model-a
-	// 3. 映射表中没有 model-a 的配置 → 返回空（不支持）
-	if account.IsModelSupported(requestedModel) {
-		return requestedModel
-	}
-
-	// 未在映射表中配置的模型，返回空字符串（不支持）
 	return ""
 }
 
@@ -325,11 +315,14 @@ func applyThinkingModelSuffix(mappedModel string, thinkingEnabled bool) string {
 	return mappedModel
 }
 
-// IsModelSupported 检查模型是否被支持
-// 所有 claude- 和 gemini- 前缀的模型都能通过映射或透传支持
-func (s *AntigravityGatewayService) IsModelSupported(requestedModel string) bool {
-	return strings.HasPrefix(requestedModel, "claude-") ||
-		strings.HasPrefix(requestedModel, "gemini-")
+// IsModelSupported uses the configured account or the default catalog, never a
+// vendor-prefix admission rule.
+func (s *AntigravityGatewayService) IsModelSupported(requestedModel string, accounts ...*Account) bool {
+	account := &Account{Platform: PlatformAntigravity}
+	if len(accounts) > 0 {
+		account = accounts[0]
+	}
+	return mapAntigravityModel(account, requestedModel) != ""
 }
 
 // TestConnectionResult 测试连接结果
