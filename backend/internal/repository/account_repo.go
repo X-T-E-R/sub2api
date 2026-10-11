@@ -641,7 +641,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'upstream_billing_probe',
 			extra -> 'ollama_cloud_usage_session',
 			extra -> 'ollama_cloud_usage_auto_refresh',
-			extra -> 'ollama_cloud_usage_snapshot'
+			extra -> 'ollama_cloud_usage_snapshot',
+			extra -> 'upstream_model_metadata'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -667,6 +668,7 @@ func lockAndMergeAccountProbeExtra(
 		currentOllamaSession         []byte
 		currentOllamaAutoRefresh     []byte
 		currentOllamaSnapshot        []byte
+		currentModelMetadata         []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -678,6 +680,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentOllamaSession,
 		&currentOllamaAutoRefresh,
 		&currentOllamaSnapshot,
+		&currentModelMetadata,
 	); err != nil {
 		return nil, err
 	}
@@ -693,8 +696,18 @@ func lockAndMergeAccountProbeExtra(
 		service.OllamaCloudUsageSessionExtraKey,
 		service.OllamaCloudUsageAutoRefreshExtraKey,
 		service.OllamaCloudUsageSnapshotExtraKey,
+		service.UpstreamModelMetadataExtraKey,
 	} {
 		delete(extra, key)
+	}
+	// Catalog evidence belongs to the sync service, not the edit payload. Read it
+	// under the same row lock as the full Extra write so a refresh after GetByID
+	// cannot be lost. Its stored identity digest handles credential/proxy changes;
+	// token rotation must not use the probe's full-credential equality condition.
+	if metadata, ok, err := decodeAccountExtraJSON(currentModelMetadata); err != nil {
+		return nil, err
+	} else if ok {
+		extra[service.UpstreamModelMetadataExtraKey] = metadata
 	}
 	probeAccount := service.IsUpstreamBillingProbeIdentity(account.Platform, account.Type)
 	probeEnabled := false
