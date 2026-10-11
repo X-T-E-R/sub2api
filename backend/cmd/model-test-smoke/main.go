@@ -454,6 +454,9 @@ func runGeneration(ctx context.Context, _ options, stats *eventStats) error {
 	if err := settingService.LoadAntigravityModelEffortSettings(ctx); err != nil {
 		return newStageError(stageSetting) // effort 策略是包级快照，必须在生成前加载
 	}
+	if err := settingService.LoadAntigravityThoughtPolicySettings(ctx); err != nil {
+		return newStageError(stageSetting)
+	}
 	accountRepo := repository.NewAccountRepository(entClient, db, repository.ProvideSchedulerCache(rdb, cfg))
 	tokenCache := repository.NewGeminiTokenCache(rdb)
 	// 该 service 内部有一个会话清理 ticker goroutine，退出前必须 Stop。
