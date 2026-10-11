@@ -91,7 +91,7 @@ func TestAccountTestRawTapErrorsAndCancellation(t *testing.T) {
 	cancel()
 	c.Request = c.Request.WithContext(ctx)
 	writer := &accountTestForwardWriter{ResponseWriter: c.Writer, service: service, admin: c, headers: make(http.Header)}
-	_, err := writer.Write([]byte(fmt.Sprintf("data: %s\n\n", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"after cancel"}}`)))
+	_, err := fmt.Fprintf(writer, "data: %s\n\n", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"after cancel"}}`)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, recorder.Body.String())
 }
@@ -114,7 +114,7 @@ func (r *accountTestIncrementalRecorder) Write(p []byte) (int, error) {
 func TestAccountTestAntigravityEmitsBeforeUpstreamCompletes(t *testing.T) {
 	effortTestSettings(t)
 	reader, writer := io.Pipe()
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	recorder := &accountTestIncrementalRecorder{ResponseRecorder: httptest.NewRecorder(), content: make(chan struct{}, 1)}
 	c, _ := gin.CreateTestContext(recorder)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -131,7 +131,7 @@ func TestAccountTestAntigravityEmitsBeforeUpstreamCompletes(t *testing.T) {
 	producerDone := make(chan struct{})
 	go func() {
 		defer close(producerDone)
-		defer writer.Close()
+		defer func() { _ = writer.Close() }()
 		_, _ = io.WriteString(writer, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"first delta\"}]}}]}}\n\n")
 		<-release
 		_, _ = io.WriteString(writer, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" second delta\"}]},\"finishReason\":\"STOP\"}]}}\n\n")

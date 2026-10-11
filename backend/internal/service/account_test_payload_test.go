@@ -111,7 +111,7 @@ func TestBedrockNativeResponseText(t *testing.T) {
 		{name: "missing stop_reason", body: `{"content":[{"type":"text","text":"pong"}]}`, want: "no stop_reason"},
 		{name: "null stop_reason", body: `{"content":[{"type":"text","text":"pong"}],"stop_reason":null}`, want: "no stop_reason"},
 		{name: "blank stop_reason", body: `{"content":[{"type":"text","text":"pong"}],"stop_reason":"  "}`, want: "no stop_reason"},
-		{name: "not json", body: `not json`, want: "Failed to parse response"},
+		{name: "not json", body: `not json`, want: "failed to parse response"},
 	}
 	for _, tc := range failures {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,7 +207,22 @@ func TestBedrockAccountTestSendsGlobalPromptAndReportsNativeMetadata(t *testing.
 	require.Contains(t, stream, `"upstream_sent_model":"`+echoedModelWithRegionPrefix+`"`, "the sent model is the resolved Bedrock model ID, not what the admin asked for")
 	require.Contains(t, stream, `"effective_prompt":"Say hello in one short sentence."`)
 	require.Contains(t, stream, `"upstream_response_model":"`+echoedModel+`"`, "the response model comes from the raw upstream body")
-	require.Contains(t, stream, `"upstream_response_model_conflict":false`)
+	// Conflict is optional on the wire: omitted means no conflict. Ordinary
+	// events must not emit false and clear an earlier observed conflict.
+	sawMetadata := false
+	for _, line := range strings.Split(stream, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event TestEvent
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event))
+		if event.Type == "test_metadata" {
+			sawMetadata = true
+			require.Equal(t, echoedModel, event.UpstreamResponseModel)
+			require.False(t, event.UpstreamResponseModelConflict)
+		}
+	}
+	require.True(t, sawMetadata, "the raw upstream declaration must be reported")
 	require.Contains(t, stream, "pong")
 	require.Contains(t, stream, `"success":true`)
 }

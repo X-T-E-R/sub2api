@@ -164,10 +164,10 @@ func fixture() string {
 	}
 	var builder strings.Builder
 	for _, frame := range frames {
-		builder.WriteString("data: " + frame + "\n\n")
+		_, _ = builder.WriteString("data: " + frame + "\n\n")
 	}
 	// 非 SSE 的原始响应体（正式代码在错误分支会直接写 writer）；半帧再补全，验证拼帧。
-	builder.WriteString(`{"error":{"message":"upstream body should-not-leak ya29.should-not-leak"}}` + "\n")
+	_, _ = builder.WriteString(`{"error":{"message":"upstream body should-not-leak ya29.should-not-leak"}}` + "\n")
 	return builder.String()
 }
 

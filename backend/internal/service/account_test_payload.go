@@ -60,10 +60,10 @@ func bedrockNativeResponseText(body []byte) (string, error) {
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("Failed to parse response: %s", err.Error())
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if result.StopReason == nil || strings.TrimSpace(*result.StopReason) == "" {
-		return "", errors.New("Bedrock response is incomplete: no stop_reason")
+		return "", errors.New("bedrock response is incomplete: no stop_reason")
 	}
 	var (
 		texts       []string
@@ -82,9 +82,9 @@ func bedrockNativeResponseText(body []byte) (string, error) {
 	}
 	if len(texts) == 0 {
 		if sawThinking {
-			return "", errors.New("Bedrock response contained only thinking content, no text")
+			return "", errors.New("bedrock response contained only thinking content, no text")
 		}
-		return "", errors.New("Bedrock response contained no text content")
+		return "", errors.New("bedrock response contained no text content")
 	}
 	return strings.Join(texts, ""), nil
 }

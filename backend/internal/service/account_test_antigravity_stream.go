@@ -189,7 +189,7 @@ func (u *accountTestObservedUpstream) observeRequest(req *http.Request) {
 	if err != nil {
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(body, 8<<20))
 	if err != nil {
 		return

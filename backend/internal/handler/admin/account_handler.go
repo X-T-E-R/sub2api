@@ -1106,8 +1106,8 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	}
 
 	opts := service.AccountTestOptions{
-		ImageDataURL: req.ImageDataURL,
-		AudioDataURL: req.AudioDataURL,
+		ImageDataURL:    req.ImageDataURL,
+		AudioDataURL:    req.AudioDataURL,
 		ReasoningEffort: req.ReasoningEffort,
 	}
 
