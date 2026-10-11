@@ -63,7 +63,7 @@ func (s *AccountTestService) prepareAccountTestRequest(c *gin.Context, account *
 	}
 	c.Set(accountTestEffortKey, effort)
 	if account.IsBedrock() && effort != "" {
-		return "", fmt.Errorf("This native Bedrock invoke test does not support reasoning_effort")
+		return "", fmt.Errorf("this native Bedrock invoke test does not support reasoning_effort")
 	}
 	if !isOrdinaryModelTest(account, model, mode) {
 		if effort != "" {
