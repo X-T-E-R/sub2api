@@ -269,12 +269,12 @@ func mapAntigravityModelWithContext(ctx context.Context, account *Account, reque
 	requestedModel = strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/")
 	mapping := account.GetModelMapping()
 	policy := antigravityEffortPolicyFromContext(ctx)
-	if model, matched := resolveAntigravityEffortMappingWithPolicy(mapping, requestedModel, antigravityRequestEffort(ctx), policy); matched {
+	if model, matched := account.resolveAntigravityCatalogMapping(mapping, requestedModel, antigravityRequestEffort(ctx), policy); matched {
 		return model
 	}
 	normalized := normalizeRequestedModelForLookup(account.Platform, requestedModel)
 	if normalized != requestedModel {
-		if model, matched := resolveAntigravityEffortMappingWithPolicy(mapping, normalized, antigravityRequestEffort(ctx), policy); matched {
+		if model, matched := account.resolveAntigravityCatalogMapping(mapping, normalized, antigravityRequestEffort(ctx), policy); matched {
 			return model
 		}
 	}

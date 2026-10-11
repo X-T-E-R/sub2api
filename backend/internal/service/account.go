@@ -769,10 +769,7 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 		return true // 无映射 = 允许所有
 	}
 	if a.Platform == PlatformAntigravity {
-		mapped, matched := resolveAntigravityEffortMapping(mapping, strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/"), "")
-		if matched {
-			return mapped != ""
-		}
+		return mapAntigravityModel(a, requestedModel) != ""
 	}
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
 		return true
@@ -796,9 +793,18 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 		return requestedModel, false
 	}
 	if a.Platform == PlatformAntigravity {
-		if mappedModel, matched := resolveAntigravityEffortMapping(mapping, strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/"), ""); matched {
+		trimmed := strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/")
+		p := currentAntigravityModelEffortSettings()
+		if mappedModel, matched := a.resolveAntigravityCatalogMapping(mapping, trimmed, "", p); matched {
 			return mappedModel, true
 		}
+		normalized := normalizeRequestedModelForLookup(a.Platform, trimmed)
+		if normalized != trimmed {
+			if mappedModel, matched := a.resolveAntigravityCatalogMapping(mapping, normalized, "", p); matched {
+				return mappedModel, true
+			}
+		}
+		return requestedModel, false
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
 		return mappedModel, true

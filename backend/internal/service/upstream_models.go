@@ -28,6 +28,8 @@ const (
 
 type UpstreamModelMetadata struct {
 	ID                       string   `json:"id"`
+	Source                   string   `json:"source,omitempty"`
+	ReasoningLevelsSource    string   `json:"reasoning_levels_source,omitempty"`
 	DisplayName              string   `json:"display_name,omitempty"`
 	Description              string   `json:"description,omitempty"`
 	Reasoning                *bool    `json:"reasoning,omitempty"`
@@ -42,12 +44,20 @@ type UpstreamModelMetadataSnapshot struct {
 	Source   string                           `json:"source"`
 	SyncedAt string                           `json:"synced_at"`
 	Models   map[string]UpstreamModelMetadata `json:"models"`
+	// List provenance is independent of optional registry capability enrichment.
+	Live           bool                `json:"live,omitempty"`
+	Identity       string              `json:"identity,omitempty"`
+	ModelIDs       []string            `json:"model_ids,omitempty"`
+	EffortFamilies map[string][]string `json:"effort_families,omitempty"`
 }
 
 type UpstreamModelCatalog struct {
-	Models   []string                         `json:"models"`
-	Metadata map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
-	Warnings []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
+	Models       []string                         `json:"models"`
+	Metadata     map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
+	Warnings     []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
+	Source       string                           `json:"source"`
+	Live         bool                             `json:"live"`
+	ModelMapping map[string]string                `json:"model_mapping"`
 }
 
 type UpstreamModelSyncWarning struct {
@@ -110,7 +120,7 @@ func (a *Account) GetUpstreamModelMetadataSnapshot() *UpstreamModelMetadataSnaps
 		return nil
 	}
 	var snapshot UpstreamModelMetadataSnapshot
-	if err := json.Unmarshal(body, &snapshot); err != nil || len(snapshot.Models) == 0 {
+	if err := json.Unmarshal(body, &snapshot); err != nil || (len(snapshot.Models) == 0 && len(snapshot.ModelIDs) == 0) {
 		return nil
 	}
 	return &snapshot
@@ -199,7 +209,9 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // missing capability fields from the provider registry used by the upstream,
 // and persists a normalized account snapshot when metadata is available.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	policy := currentAntigravityModelEffortSettings()
 	models, body, err := s.fetchUpstreamModelList(ctx, account)
+	live := err == nil
 	if err != nil {
 		configuredModels := configuredUpstreamModelsForCapabilitySync(account)
 		if !upstreamModelListEndpointUnsupported(err) || len(configuredModels) == 0 {
@@ -214,25 +226,54 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			"model_count", len(models),
 		)
 	}
-	catalog := &UpstreamModelCatalog{Models: models, Metadata: make(map[string]UpstreamModelMetadata)}
+	if live {
+		for _, id := range models {
+			if strings.ContainsAny(id, "{}* \t\r\n") {
+				return nil, newUpstreamModelSyncUpstreamError("Upstream returned an invalid model ID for model mapping", nil)
+			}
+		}
+	}
+	catalog := &UpstreamModelCatalog{Models: models, Live: live, Source: "upstream", Metadata: make(map[string]UpstreamModelMetadata), ModelMapping: map[string]string{}}
+	if !live {
+		catalog.Source = "configured"
+	}
 	if len(body) > 0 {
-		_, directMetadata, parseErr := extractUpstreamModelCatalog(body, account != nil && account.IsGrok())
-		if parseErr == nil {
+		if account != nil && account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
+			catalog.Metadata = extractAntigravityCatalogMetadata(body)
+		} else if _, directMetadata, parseErr := extractUpstreamModelCatalog(body, account != nil && account.IsGrok()); parseErr == nil {
 			catalog.Metadata = directMetadata
 		}
 	}
-
-	source := "upstream"
+	for id, entry := range catalog.Metadata {
+		entry.Source = "upstream"
+		if len(entry.SupportedReasoningLevels) > 0 {
+			entry.ReasoningLevelsSource = "upstream"
+		}
+		catalog.Metadata[id] = entry
+	}
+	// Projection uses the real list and direct metadata only, never registry guesses.
+	families := map[string][]string{}
+	if live {
+		catalog.ModelMapping, families = projectUpstreamModelMapping(account, models, catalog.Metadata, policy)
+	}
+	source := catalog.Source
 	metadataIncomplete := upstreamCatalogNeedsRegistry(models, catalog.Metadata)
 	if metadataIncomplete {
 		if registryMetadata, registryErr := s.fetchModelsDevMetadata(ctx, account, models); registryErr == nil {
 			for modelID, fallback := range registryMetadata {
 				current := catalog.Metadata[modelID]
 				merged, changed := mergeUpstreamModelMetadata(current, fallback)
-				catalog.Metadata[modelID] = merged
 				if changed {
 					source = "models.dev"
+					merged.Source = "models.dev"
+					if current.Source != "" {
+						merged.Source = current.Source + "+models.dev"
+					}
+					if len(current.SupportedReasoningLevels) == 0 && len(merged.SupportedReasoningLevels) > 0 {
+						merged.ReasoningLevelsSource = "models.dev"
+					}
 				}
+				catalog.Metadata[modelID] = merged
 			}
 		} else {
 			slog.Warn("upstream model capability metadata enrichment failed",
@@ -248,15 +289,26 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			Code:    UpstreamModelMetadataIncompleteCode,
 			Message: "Model IDs were synced, but capability metadata is incomplete.",
 		})
+		// AG list availability is authoritative even when optional capabilities are incomplete.
+		if account == nil || account.Platform != PlatformAntigravity {
+			return catalog, nil
+		}
+	}
+	if account == nil || account.ID <= 0 || s.accountRepo == nil || len(models) == 0 || (len(catalog.Metadata) == 0 && account.Platform != PlatformAntigravity) {
 		return catalog, nil
 	}
-	if len(catalog.Metadata) == 0 || account == nil || account.ID <= 0 || s.accountRepo == nil {
+	// A configured fallback must not erase a last-good live availability snapshot.
+	if !live && account.GetUpstreamModelMetadataSnapshot() != nil {
 		return catalog, nil
 	}
 	snapshot := UpstreamModelMetadataSnapshot{
-		Source:   source,
-		SyncedAt: time.Now().UTC().Format(time.RFC3339),
-		Models:   catalog.Metadata,
+		Source:         source,
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
+		Models:         catalog.Metadata,
+		Live:           live,
+		Identity:       upstreamCatalogIdentity(account),
+		ModelIDs:       models,
+		EffortFamilies: families,
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
 		return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
@@ -574,8 +626,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	}
 
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
-		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
-		return models, nil, err
+		return s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 	}
 
 	if s.httpUpstream == nil {
@@ -984,42 +1035,42 @@ func (s *AccountTestService) buildGeminiUpstreamModelsRequest(ctx context.Contex
 	return req, nil
 }
 
-func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
 	if s.antigravityGatewayService == nil || s.antigravityGatewayService.GetTokenProvider() == nil {
-		return nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
+		return nil, nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
 	}
 
 	accessToken, err := s.antigravityGatewayService.GetTokenProvider().GetAccessToken(ctx, account)
 	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
 	}
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
-		return nil, newUpstreamModelSyncConfigError("No Antigravity access token is available", nil)
+		return nil, nil, newUpstreamModelSyncConfigError("No Antigravity access token is available", nil)
 	}
 
 	client, err := antigravity.NewClient(upstreamModelsProxyURL(account))
 	if err != nil {
-		return nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
+		return nil, nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
 	}
-	modelsResp, _, err := client.FetchAvailableModels(
-		ctx,
-		accessToken,
-		strings.TrimSpace(account.GetCredential("project_id")),
-		resolveModelsListReadLimit(s.cfg),
-	)
+	modelsResp, raw, err := client.FetchAvailableModels(ctx, accessToken,
+		strings.TrimSpace(account.GetCredential("project_id")), resolveModelsListReadLimit(s.cfg))
 	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch Antigravity available models", err)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to fetch Antigravity available models", err)
 	}
-	if modelsResp == nil || len(modelsResp.Models) == 0 {
-		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+	if modelsResp == nil || modelsResp.Models == nil {
+		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned an invalid model catalog", nil)
 	}
 
 	models := make([]string, 0, len(modelsResp.Models))
 	for modelID := range modelsResp.Models {
 		models = append(models, strings.TrimSpace(modelID))
 	}
-	return dedupeAndSortModelIDs(models), nil
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to parse Antigravity model metadata", err)
+	}
+	return dedupeAndSortModelIDs(models), body, nil
 }
 
 func (s *AccountTestService) doUpstreamModelsRequest(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {

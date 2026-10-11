@@ -387,7 +387,12 @@ func TestAccountHandlerSyncUpstreamModelsReturnsCapabilityMetadata(t *testing.T)
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, []string{"custom-thinking-model"}, resp.Data.Models)
+	require.True(t, resp.Data.Live)
+	require.Equal(t, "upstream", resp.Data.Source)
+	require.Equal(t, map[string]string{"custom-thinking-model": "custom-thinking-model"}, resp.Data.ModelMapping)
 	metadata := resp.Data.Metadata["custom-thinking-model"]
+	require.Equal(t, "upstream", metadata.Source)
+	require.Equal(t, "upstream", metadata.ReasoningLevelsSource)
 	require.NotNil(t, metadata.Reasoning)
 	require.True(t, *metadata.Reasoning)
 	require.Equal(t, []string{"low", "high"}, metadata.SupportedReasoningLevels)
@@ -444,6 +449,10 @@ func TestAccountHandlerSyncUpstreamModelsPreviewUsesProvidedModelMapping(t *test
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, []string{"glm-5.3"}, resp.Data.Models)
+	require.False(t, resp.Data.Live)
+	require.Equal(t, "configured", resp.Data.Source)
+	require.Empty(t, resp.Data.ModelMapping)
+	require.Equal(t, "models.dev", resp.Data.Metadata["glm-5.3"].ReasoningLevelsSource)
 	require.Equal(t, []string{"low", "high"}, resp.Data.Metadata["glm-5.3"].SupportedReasoningLevels)
 }
 
@@ -525,4 +534,23 @@ func TestAccountHandlerSyncUpstreamModels_MetadataEnrichmentFailureReturnsWarnin
 	require.Equal(t, []string{"x-preview-f-free"}, resp.Data.Models)
 	require.Len(t, resp.Data.Warnings, 1)
 	require.Equal(t, "upstream_model_metadata_incomplete", resp.Data.Warnings[0].Code)
+}
+
+func TestAccountHandlerSyncUpstreamModelsReturnsAntigravityProjection(t *testing.T) {
+	svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: service.Account{ID: 48, Platform: service.PlatformAntigravity, Type: service.AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key", "base_url": "https://provider.example/antigravity"}}}
+	upstream := &syncUpstreamHTTPUpstream{resp: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"custom-low","reasoning":true,"supported_reasoning_levels":["low"],"input_modalities":["text"],"context_window":1000},{"id":"custom-high","reasoning":true,"supported_reasoning_levels":["high"],"input_modalities":["text"],"context_window":1000}]}`))}}
+	router := setupSyncUpstreamModelsRouter(svc, upstream)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/48/models/sync-upstream", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data service.UpstreamModelCatalog `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.True(t, resp.Data.Live)
+	require.Equal(t, "upstream", resp.Data.Source)
+	require.Equal(t, []string{"custom-high", "custom-low"}, resp.Data.Models)
+	require.Equal(t, map[string]string{"custom": "custom-{effort:high}"}, resp.Data.ModelMapping)
+	require.Equal(t, []string{"high", "low"}, resp.Data.Metadata["custom"].SupportedReasoningLevels)
+	require.Equal(t, "catalog_suffix", resp.Data.Metadata["custom"].ReasoningLevelsSource)
 }

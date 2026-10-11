@@ -109,31 +109,38 @@ func resolveAntigravityEffortMapping(mapping map[string]string, requested, effor
 // Exact suffixes/aliases and wildcards win. Match configured template base IDs
 // plus a complete enabled level, never an arbitrary last hyphen token.
 func resolveAntigravityEffortMappingWithPolicy(mapping map[string]string, requested, effort string, p *AntigravityModelEffortSettings) (string, bool) {
+	model, matched, _ := resolveAntigravityEffortMappingDetails(mapping, requested, effort, p)
+	return model, matched
+}
+
+// generated distinguishes template expansion from an explicit literal override.
+// Catalog availability may constrain expansion without rewriting custom aliases.
+func resolveAntigravityEffortMappingDetails(mapping map[string]string, requested, effort string, p *AntigravityModelEffortSettings) (model string, matched, generated bool) {
 	if target, matched := resolveRequestedModelInMapping(mapping, requested); matched {
 		if t, valid := parseAntigravityEffortTemplate(target); valid {
 			if _, exact := mapping[requested]; !exact {
-				return "", true
+				return "", true, true
 			}
 			if effort != "" {
 				if !p.supports(effort) {
-					return "", true
+					return "", true, true
 				}
 				if override, matched := resolveRequestedModelInMapping(mapping, requested+"-"+effort); matched {
 					if rule, valid := parseAntigravityEffortTemplate(override); valid {
-						return rule.model("", p), true
+						return rule.model("", p), true, true
 					}
 					if strings.Contains(override, "{effort") {
-						return "", true
+						return "", true, false
 					}
-					return override, true
+					return override, true, false
 				}
 			}
-			return t.model(effort, p), true
+			return t.model(effort, p), true, true
 		}
 		if strings.Contains(target, "{effort") {
-			return "", true
+			return "", true, false
 		}
-		return target, true
+		return target, true, false
 	}
 	// Complete level names are longest-first. An overlapping base must not
 	// turn extra-low into low; ties between bases remain deterministic.
@@ -153,11 +160,11 @@ func resolveAntigravityEffortMappingWithPolicy(mapping map[string]string, reques
 		for _, base := range bases {
 			if requested == base+"-"+level {
 				t, _ := parseAntigravityEffortTemplate(mapping[base])
-				return t.model(level, p), true
+				return t.model(level, p), true, true
 			}
 		}
 	}
-	return requested, false
+	return requested, false, false
 }
 
 func antigravityEffortRequestError(ctx context.Context, account *Account, requested string) string {
