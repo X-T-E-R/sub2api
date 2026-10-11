@@ -231,16 +231,9 @@ func (s *AccountTestService) streamAntigravityAccountTest(c *gin.Context, accoun
 	}
 	// Report the resolver's actual named level, including template defaults and
 	// complete-suffix precedence. Literal IDs are never split into fake levels.
-	effective := accountTestAntigravityNamedEffort(account, modelID, effort, antigravityEffortPolicyFromContext(ctx))
-	if effective == "" {
-		if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
-			return s.sendErrorAndEnd(c, err.Error())
-		}
-		v, _ := c.Get(accountTestEffectiveEffortKey)
-		effective, _ = v.(string)
-	} else if effort != "" {
-		// Keep the native request field consistent with the authoritative suffix.
-		payload["output_config"] = map[string]any{"effort": effective}
+	effective, err := s.applyAntigravityAccountTestEffort(c, account, payload, sent, antigravityEffortPolicyFromContext(ctx))
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 	body, _ = json.Marshal(payload)
 	c.Set(accountTestEffectiveEffortKey, effective)
@@ -289,7 +282,7 @@ func (s *AccountTestService) streamAntigravityAccountTest(c *gin.Context, accoun
 }
 
 // Match the resolver's explicit opt-in template contract, not ID typography.
-func accountTestAntigravityNamedEffort(account *Account, requested, effort string, policy *AntigravityModelEffortSettings) string {
+func accountTestAntigravityNamedEffort(account *Account, requested, effort, sent string, policy *AntigravityModelEffortSettings) string {
 	mapping := account.GetModelMapping()
 	if target, matched := resolveRequestedModelInMapping(mapping, requested); matched {
 		template, ok := parseAntigravityEffortTemplate(target)
@@ -313,9 +306,30 @@ func accountTestAntigravityNamedEffort(account *Account, requested, effort strin
 			continue
 		}
 		base := strings.TrimSuffix(requested, suffix)
-		if _, valid := parseAntigravityEffortTemplate(mapping[base]); valid {
+		// The formal resolver already chose the winning template (including
+		// longest suffix, aliases, wildcards and catalog constraints). Verify
+		// against that target, not a second ranking of the user level list.
+		if template, valid := parseAntigravityEffortTemplate(mapping[base]); valid && template.model(level, policy) == sent {
 			return level
 		}
 	}
 	return ""
+}
+
+// Shared by request construction and its caller regression: native request
+// effort and displayed metadata must follow the model selected by the resolver.
+func (s *AccountTestService) applyAntigravityAccountTestEffort(c *gin.Context, account *Account, payload map[string]any, sent string, policy *AntigravityModelEffortSettings) (string, error) {
+	requested, _ := payload["model"].(string)
+	effort := accountTestReasoningEffort(c)
+	effective := accountTestAntigravityNamedEffort(account, requested, effort, sent, policy)
+	if effective == "" {
+		if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
+			return "", err
+		}
+		value, _ := c.Get(accountTestEffectiveEffortKey)
+		effective, _ = value.(string)
+	} else if effort != "" {
+		payload["output_config"] = map[string]any{"effort": effective}
+	}
+	return effective, nil
 }
