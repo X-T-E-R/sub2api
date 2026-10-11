@@ -167,3 +167,51 @@ func TestAccountTestTerminalCannotMaskTransportError(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), `"type":"error"`)
 	require.NotContains(t, recorder.Body.String(), `"success":true`)
 }
+
+func TestAccountTestAntigravityWithThoughtContinuation(t *testing.T) {
+	effortTestSettings(t)
+	for _, failAppend := range []bool{false, true} {
+		t.Run(fmt.Sprintf("append_failure_%t", failAppend), func(t *testing.T) {
+			first := strings.Replace(antigravityThoughtGenerationOneLine, `"responseId":"resp_gen1"`, `"responseId":"resp_gen1","modelVersion":"runtime-first"`, 1)
+			second := antigravityThoughtStreamResponse(strings.Replace(antigravityThoughtGenerationTwoLine, `"responseId":"resp_gen2"`, `"responseId":"resp_gen2","modelVersion":"runtime-final"`, 1))
+			if failAppend {
+				second = &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"message":"fixture quota"}}`))}
+			}
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(first), second}}
+			gateway := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+			service := &AccountTestService{antigravityGatewayService: gateway}
+			account := effortTestAccount(map[string]string{"gemini-custom": "gemini-custom-{effort}"})
+			account.Extra = map[string]any{AntigravitySuppressThoughtOnlyStopExtraKey: true, AntigravityContinueThoughtOnlyExtraKey: true}
+			c, recorder := newAntigravityCompatContext(http.MethodPost, "/test", nil)
+			c.Set(accountTestPromptKey, "原词 exactly unchanged")
+			c.Set(accountTestRequestedKey, "gemini-custom")
+			c.Set(accountTestEffortKey, "medium")
+			err := service.testAntigravityAccountConnection(c, account, "gemini-custom")
+			if failAppend {
+				require.Error(t, err)
+				require.Contains(t, recorder.Body.String(), `"type":"error"`)
+				require.NotContains(t, recorder.Body.String(), `"success":true`)
+			} else {
+				require.NoError(t, err)
+				require.Contains(t, recorder.Body.String(), `"text":"answer"`)
+				require.Contains(t, recorder.Body.String(), `"success":true`)
+				require.Contains(t, recorder.Body.String(), `"upstream_response_model":"runtime-final"`)
+			}
+			require.Len(t, upstream.requestBodies, 2, "the admin stream uses the same single continuation budget")
+			require.NotContains(t, recorder.Body.String(), "sig-plan")
+			require.NotContains(t, recorder.Body.String(), `"text":"plan"`)
+			requests := upstreamBodies(t, upstream)
+			require.Equal(t, "gemini-custom-medium", requests[0].Model)
+			require.Equal(t, requests[0].Model, requests[1].Model)
+			require.Equal(t, requests[0].Request.GenerationConfig, requests[1].Request.GenerationConfig)
+			require.Equal(t, requests[0].Request.SystemInstruction, requests[1].Request.SystemInstruction)
+			n := len(requests[0].Request.Contents)
+			require.Len(t, requests[1].Request.Contents, n+1)
+			require.Equal(t, requests[0].Request.Contents, requests[1].Request.Contents[:n])
+			tail := gjson.GetBytes(upstream.requestBodies[1], "request.contents").Array()[n]
+			require.Equal(t, "model", tail.Get("role").String())
+			require.Equal(t, "plan", tail.Get("parts.0.text").String())
+			require.Equal(t, "sig-plan", tail.Get("parts.0.thoughtSignature").String())
+		})
+	}
+}
