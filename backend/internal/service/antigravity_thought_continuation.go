@@ -507,11 +507,6 @@ func (c *antigravityThoughtContinuation) effectiveGeneration() *antigravityThoug
 	return c.finishedGeneration
 }
 
-// continuationFailure reports whether the appended generation failed.
-func (c *antigravityThoughtContinuation) continuationFailure() bool {
-	return c != nil && c.continuationFailed
-}
-
 // canContinue reports whether the single appended generation is still available for this
 // response.
 func (c *antigravityThoughtContinuation) canContinue() bool {
