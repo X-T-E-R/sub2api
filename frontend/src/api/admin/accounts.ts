@@ -27,6 +27,7 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState
 } from '@/types'
+import type { AccountTestModelOption } from '@/types/accountTestStream'
 
 /**
  * List all accounts with pagination
@@ -579,6 +580,22 @@ export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
   return data
 }
 
+/**
+ * Get the models the account connectivity test can run.
+ *
+ * Same endpoint as `getAvailableModels`, but the test modal also reads the
+ * optional per-model reasoning capability metadata (`supported_reasoning_levels`
+ * / `default_reasoning_level`) so the effort selector is driven by the
+ * capability contract instead of a hardcoded level list. Those fields are
+ * optional and typed loosely while the backend contract is still rolling out.
+ * @param id - Account ID
+ * @returns Test-selectable models with optional capability metadata
+ */
+export async function getTestAvailableModels(id: number): Promise<AccountTestModelOption[]> {
+  const { data } = await apiClient.get<AccountTestModelOption[]>(`/admin/accounts/${id}/models`)
+  return data
+}
+
 export interface SyncUpstreamModelsResult {
   /** Live upstream raw model IDs, or the configured model IDs when source is 'configured'. */
   models: string[]
@@ -1083,6 +1100,7 @@ export const accountsAPI = {
   resetTempUnschedulable,
   setSchedulable,
   getAvailableModels,
+  getTestAvailableModels,
   syncUpstreamModels,
   syncUpstreamModelsPreview,
   generateAuthUrl,

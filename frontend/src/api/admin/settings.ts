@@ -15,6 +15,7 @@ import type {
 } from "@/types/modelReasoningFloor";
 import type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
 import type { AntigravityModelEffortSettings } from "@/types/antigravityModelEffort";
+import type { ModelTestPromptSettings } from "@/types/modelTestPrompt";
 
 export type {
   ModelReasoningFloorRule,
@@ -22,6 +23,7 @@ export type {
 } from "@/types/modelReasoningFloor";
 export type { CodexSessionAffinitySettings } from "@/types/codexSessionAffinity";
 export type { AntigravityModelEffortSettings } from "@/types/antigravityModelEffort";
+export type { ModelTestPromptSettings } from "@/types/modelTestPrompt";
 
 export interface DefaultSubscriptionSetting {
   group_id: number;
@@ -1528,6 +1530,26 @@ export async function updateAntigravityModelEffortSettings(
   return data;
 }
 
+// ==================== Account Test (Model Test) Prompt Settings ====================
+
+export async function getModelTestPromptSettings(): Promise<ModelTestPromptSettings> {
+  const { data } = await apiClient.get<ModelTestPromptSettings>(
+    "/admin/settings/model-test",
+  );
+  return data;
+}
+
+/** An empty prompt resets the setting to the built-in default prompt. */
+export async function updateModelTestPromptSettings(
+  prompt: string,
+): Promise<ModelTestPromptSettings> {
+  const { data } = await apiClient.put<ModelTestPromptSettings>(
+    "/admin/settings/model-test",
+    { prompt },
+  );
+  return data;
+}
+
 // ==================== Codex Session Affinity Settings ====================
 
 export async function getCodexSessionAffinitySettings(): Promise<CodexSessionAffinitySettings> {
@@ -1684,6 +1706,8 @@ export const settingsAPI = {
   updateModelReasoningFloorSettings,
   getAntigravityModelEffortSettings,
   updateAntigravityModelEffortSettings,
+  getModelTestPromptSettings,
+  updateModelTestPromptSettings,
   getCodexSessionAffinitySettings,
   updateCodexSessionAffinitySettings,
   getBetaPolicySettings,

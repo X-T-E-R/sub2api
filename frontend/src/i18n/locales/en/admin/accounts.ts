@@ -1447,6 +1447,7 @@ export default {
       selectTestModel: 'Select Test Model',
       testModel: 'Test model',
       testPrompt: 'Prompt: "hi"',
+      testPromptSummary: 'Prompt: "{prompt}"',
       imagePromptLabel: 'Image prompt',
       imagePromptPlaceholder: 'Example: Generate an orange cat astronaut sticker in pixel-art style on a solid background.',
       imagePromptDefault: 'Generate a cute orange cat astronaut sticker on a clean pastel background.',
@@ -1466,6 +1467,44 @@ export default {
       audioReceived: 'Received test audio #{count}',
       videoPreview: 'Generated video:',
       videoReceived: 'Received test video #{count}',
+      // Test modal: effort selector and run metadata
+      testEffort: {
+        label: 'Reasoning effort',
+        useDefault: 'Use default',
+        useDefaultWithLevel: 'Use default ({level})',
+        levelsUnavailable:
+          'The published reasoning levels of this account are empty for the selected model, so only its default can be used.',
+        levelsGloballyDisabled:
+          'This account publishes levels for the selected model, but none of them is enabled in the global effort settings, so none can be chosen here.',
+        levelsUnproven:
+          'The known reasoning levels come from the model registry fallback rather than from this account, so no level is offered here.',
+        suffixOverrides:
+          'This account maps the model ID to an effort template ending in "-{level}", so the suffix sets the reasoning effort and overrides this selection.',
+        hint: 'Choose a level to override the model default for this test.'
+      },
+      testMetadata: {
+        title: 'Request and response metadata',
+        subtitle:
+          'Reported by the test run as it progresses. Values a run does not report stay "not provided".',
+        requestedModel: 'Requested model',
+        upstreamSentModel: 'Upstream sent model',
+        upstreamResponseModel: 'Upstream response model',
+        responseConflictHint:
+          'The upstream response declared a different model than the one that was sent. Both values are kept so the mismatch is not hidden.',
+        effectiveEffort: 'Reasoning effort',
+        effortFromSuffix: 'from model ID suffix',
+        effectivePrompt: 'Effective prompt',
+        promptReported: 'reported by the test run',
+        promptCustom: 'custom input',
+        promptGlobal: 'global setting',
+        promptBuiltin: 'built-in default',
+        streamModeLabel: 'Response mode',
+        streamMode: {
+          stream: 'stream',
+          native_non_stream: 'native non-stream'
+        },
+        notProvided: 'not provided'
+      },
       // Stats Modal
       viewStats: 'View Stats',
       usageStatistics: 'Usage Statistics',

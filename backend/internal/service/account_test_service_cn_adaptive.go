@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -63,9 +62,12 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 	}
 	apiURL := strings.TrimRight(baseURL, "/") + "/v1/messages"
 
-	payload, err := createTestPayload(testModelID)
+	payload, err := createTestPayload(testModelID, accountTestEffectivePrompt(c))
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create adaptive Anthropic test payload")
+	}
+	if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -106,48 +108,9 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 }
 
 func (s *AccountTestService) processCNProviderAdaptiveAnthropicStream(c *gin.Context, body io.Reader) error {
-	reader := bufio.NewReader(body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				return s.sendErrorAndEnd(c, "Adaptive Anthropic stream ended before message_stop")
-			}
-			return s.sendErrorAndEnd(c, fmt.Sprintf("Adaptive Anthropic stream read error: %s", err.Error()))
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" || !sseDataPrefix.MatchString(line) {
-			continue
-		}
-		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
-		if jsonStr == "[DONE]" {
-			return nil
-		}
-
-		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			continue
-		}
-		switch eventType, _ := data["type"].(string); eventType {
-		case "content_block_delta":
-			if delta, ok := data["delta"].(map[string]any); ok {
-				if text, ok := delta["text"].(string); ok && text != "" {
-					s.sendEvent(c, TestEvent{Type: "content", Text: text})
-				}
-			}
-		case "message_stop":
-			return nil
-		case "error":
-			errorMsg := "Unknown error"
-			if errData, ok := data["error"].(map[string]any); ok {
-				if message, ok := errData["message"].(string); ok && message != "" {
-					errorMsg = message
-				}
-			}
-			return s.sendErrorAndEnd(c, fmt.Sprintf("Adaptive Anthropic endpoint error: %s", errorMsg))
-		}
-	}
+	// Shared parser retains the same usable-output/terminal and raw identity
+	// guarantees as the native Anthropic path; caller suppresses completion.
+	return s.processClaudeStream(c, body)
 }
 
 func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Context, account *Account, testModelID string, authToken string) error {
@@ -158,7 +121,10 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	}
 	apiURL := buildOpenAIResponsesURLForPlatform(account.Platform, baseURL)
 
-	payload := createOpenAITestPayload(testModelID, false)
+	payload := createOpenAITestPayload(testModelID, false, accountTestEffectivePrompt(c))
+	if err := s.applyAccountTestEffort(c, account, payload, "responses"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 	// DeepSeek's native Responses endpoint is stateless and does not need the
 	// OpenAI probe's synthetic instructions.
 	delete(payload, "instructions")
@@ -242,9 +208,12 @@ func (s *AccountTestService) testCNProviderAnthropicConnection(c *gin.Context, a
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	payload, err := createTestPayload(testModelID)
+	payload, err := createTestPayload(testModelID, accountTestEffectivePrompt(c))
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create Anthropic test payload")
+	}
+	if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 	payloadBytes, _ := json.Marshal(payload)
 

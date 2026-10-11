@@ -50,12 +50,19 @@ const (
 
 // TestEvent represents a SSE event for account testing
 type TestEvent struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Code     string `json:"code,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
+	Type                          string `json:"type"`
+	Text                          string `json:"text,omitempty"`
+	Model                         string `json:"model,omitempty"`
+	RequestedModel                string `json:"requested_model,omitempty"`
+	UpstreamSentModel             string `json:"upstream_sent_model,omitempty"`
+	UpstreamResponseModel         string `json:"upstream_response_model,omitempty"`
+	UpstreamResponseModelConflict bool   `json:"upstream_response_model_conflict,omitempty"`
+	EffectivePrompt               string `json:"effective_prompt,omitempty"`
+	EffectiveEffort               string `json:"effective_effort,omitempty"`
+	StreamMode                    string `json:"stream_mode,omitempty"`
+	Status                        string `json:"status,omitempty"`
+	Code                          string `json:"code,omitempty"`
+	ImageURL                      string `json:"image_url,omitempty"`
 	// AudioURL / VideoURL are data: or https URLs for in-browser media players.
 	AudioURL string `json:"audio_url,omitempty"`
 	VideoURL string `json:"video_url,omitempty"`
@@ -68,8 +75,9 @@ type TestEvent struct {
 // AccountTestOptions carries optional media for admin connectivity tests.
 // ImageDataURL / AudioDataURL are full data URLs (data:<mime>;base64,...).
 type AccountTestOptions struct {
-	ImageDataURL string
-	AudioDataURL string
+	ImageDataURL    string
+	AudioDataURL    string
+	ReasoningEffort string
 }
 
 func firstAccountTestOptions(opts []AccountTestOptions) AccountTestOptions {
@@ -225,8 +233,10 @@ func generateSessionString() (string, error) {
 	return FormatMetadataUserID(hex64, "", sessionUUID, uaVersion), nil
 }
 
-// createTestPayload creates a Claude Code style test request payload
-func createTestPayload(modelID string) (map[string]any, error) {
+// createTestPayload creates a Claude Code style test request payload.
+// The optional prompt overrides the probe text; callers that pass none keep the
+// legacy probe text so context-free callers stay unchanged.
+func createTestPayload(modelID string, prompt ...string) (map[string]any, error) {
 	sessionID, err := generateSessionString()
 	if err != nil {
 		return nil, err
@@ -240,7 +250,7 @@ func createTestPayload(modelID string) (map[string]any, error) {
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "hi",
+						"text": accountTestPayloadPrompt(prompt),
 						"cache_control": map[string]string{
 							"type": "ephemeral",
 						},
@@ -279,6 +289,11 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Account not found")
+	}
+
+	prompt, err = s.prepareAccountTestRequest(c, account, modelID, prompt, mode, testOpts)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 
 	// Synthetic UI load-test accounts exercise the real SSE parsing and modal
@@ -408,10 +423,15 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create Claude Code style payload (same for all account types)
-	payload, err := createTestPayload(testModelID)
+	// Create Claude Code style payload (same for all account types). An ordinary
+	// test sends the global model test prompt the routing layer published on the
+	// context; native media tests keep their own input.
+	payload, err := createTestPayload(testModelID, accountTestEffectivePrompt(c))
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
+	}
+	if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -485,9 +505,12 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	payload, err := createTestPayload(testModelID)
+	payload, err := createTestPayload(testModelID, accountTestEffectivePrompt(c))
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create test payload")
+	}
+	if err := s.applyAccountTestEffort(c, account, payload, "anthropic"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	vertexBody, err := buildVertexAnthropicRequestBody(payloadBytes)
@@ -556,7 +579,8 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create a minimal Bedrock-compatible payload (no stream, no cache_control)
+	// Create a minimal Bedrock-compatible payload (no stream, no cache_control).
+	// An ordinary test sends the global model test prompt.
 	bedrockPayload := map[string]any{
 		"anthropic_version": "bedrock-2023-05-31",
 		"messages": []map[string]any{
@@ -565,7 +589,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "hi",
+						"text": accountTestEffectivePrompt(c),
 					},
 				},
 			},
@@ -573,12 +597,19 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 		"max_tokens":  256,
 		"temperature": 1,
 	}
+	// Deliberate gap: the Bedrock Invoke body has no reasoning-effort field the
+	// shared payload helper can apply. Its anthropic mapping writes output_config,
+	// which Bedrock rejects — PrepareBedrockRequestBody deletes that field for
+	// every real forward (bedrock_request.go: "移除 output_config 字段（Bedrock
+	// Invoke 不支持）"). Sending it here would break the probe instead of making it
+	// more faithful, so an effort selected on this protocol stays unapplied and the
+	// stream therefore reports no effective effort rather than a fabricated one.
 	bedrockBody, _ := json.Marshal(bedrockPayload)
 
 	// Use non-streaming endpoint (response is standard Claude JSON)
 	apiURL := BuildBedrockURL(region, testModelID, false)
 
-	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID, StreamMode: accountTestNativeNonStreamMode})
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bedrockBody))
 	if err != nil {
@@ -616,26 +647,22 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 
 	body, _ := io.ReadAll(resp.Body)
 
+	// Publish the model the upstream actually echoed before judging the body, so
+	// the reported response model comes from the raw upstream bytes.
+	meta := newUpstreamModelMetadataState(c)
+	meta.observe(sseFrameClaude, "", body)
+	meta.emit(s, c)
+
 	if resp.StatusCode != http.StatusOK {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
-	// Bedrock non-streaming response is standard Claude JSON, extract the text
-	var result struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to parse response: %s", err.Error()))
-	}
-
-	text := ""
-	if len(result.Content) > 0 {
-		text = result.Content[0].Text
-	}
-	if text == "" {
-		text = "(empty response)"
+	// Bedrock answers with a complete Anthropic message, so an HTTP 200 is not a
+	// passing probe by itself: an incomplete or thought-only body fails the test
+	// instead of being reported as a placeholder success.
+	text, err := bedrockNativeResponseText(body)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
 
 	s.sendEvent(c, TestEvent{Type: "content", Text: text})
@@ -737,7 +764,10 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if isOAuth {
 		upstreamTestModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth)
+	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth, accountTestEffectivePrompt(c))
+	if err := s.applyAccountTestEffort(c, account, payload, "responses"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event once. A task-invalid Agent Identity response may
@@ -1125,7 +1155,13 @@ func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx con
 
 	s.prepareGrokTestSSE(c)
 
-	payloadBytes, err := buildGrokQuotaProbeBody(testModelID)
+	// Grok text tests ride the Responses wire, so they carry the same effective
+	// model test prompt as every other ordinary text test.
+	payload := grokTestResponsesPayload(testModelID, accountTestEffectivePrompt(c))
+	if err := s.applyAccountTestEffort(c, account, payload, "responses"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create Grok test payload")
 	}
@@ -2005,6 +2041,9 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	c.Writer.Flush()
 
 	payload := createOpenAIChatCompletionsTestPayload(testModelID, prompt)
+	if err := s.applyAccountTestEffort(c, account, payload, "chat"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
@@ -2276,6 +2315,14 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 
 	// Create test payload (Gemini format)
 	payload := createGeminiTestPayload(testModelID, prompt)
+	var requestPayload map[string]any
+	if err := json.Unmarshal(payload, &requestPayload); err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Gemini payload")
+	}
+	if err := s.applyAccountTestEffort(c, account, requestPayload, "gemini"); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	payload, _ = json.Marshal(requestPayload)
 
 	// Build request based on account type
 	var req *http.Request
@@ -2332,40 +2379,9 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 	return s.testAntigravityAccountConnection(c, account, modelID)
 }
 
-// testAntigravityAccountConnection tests an Antigravity account's connection
-// 支持 Claude 和 Gemini 两种协议，使用非流式请求
+// testAntigravityAccountConnection uses the real streaming Forward pipeline.
 func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, account *Account, modelID string) error {
-	ctx := c.Request.Context()
-
-	testModelID := antigravityConnectionTestModel(modelID)
-
-	if s.antigravityGatewayService == nil {
-		return s.sendErrorAndEnd(c, "Antigravity gateway service not configured")
-	}
-
-	// Set SSE headers
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.Flush()
-
-	// Send test_start event
-	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
-
-	// 调用 AntigravityGatewayService.TestConnection（复用协议转换逻辑）
-	result, err := s.antigravityGatewayService.TestConnection(ctx, account, testModelID)
-	if err != nil {
-		return s.sendErrorAndEnd(c, err.Error())
-	}
-
-	// 发送响应内容
-	if result.Text != "" {
-		s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
-	}
-
-	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-	return nil
+	return s.streamAntigravityAccountTest(c, account, modelID)
 }
 
 func antigravityConnectionTestModel(modelID string) string {
@@ -2531,8 +2547,11 @@ func createGeminiTestPayload(modelID string, prompt string) []byte {
 		return bytes
 	}
 
-	textPrompt := strings.TrimSpace(prompt)
-	if textPrompt == "" {
+	// Keep the caller's effective prompt verbatim so every protocol sends identical
+	// text; only a blank prompt falls back. The image path above keeps its legacy
+	// trim because image prompts have always been normalized.
+	textPrompt := prompt
+	if strings.TrimSpace(textPrompt) == "" {
 		textPrompt = defaultGeminiTextTestPrompt
 	}
 
@@ -2557,31 +2576,30 @@ func createGeminiTestPayload(modelID string, prompt string) []byte {
 
 // processGeminiStream processes SSE stream from Gemini API
 func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader) error {
-	reader := bufio.NewReader(body)
+	frames := newSSEDataFrameReader(bufio.NewReader(body))
+	meta := newUpstreamModelMetadataState(c)
+	sawOutput := false
 
 	for {
-		line, err := reader.ReadString('\n')
+		payload, ok, err := frames.next()
 		if err != nil {
-			if err == io.EOF {
-				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-				return nil
-			}
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Stream read error: %s", err.Error()))
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "data: ") {
-			continue
+		if !ok {
+			return s.finishGeminiStream(c, sawOutput, false)
 		}
 
-		jsonStr := strings.TrimPrefix(line, "data: ")
-		if jsonStr == "[DONE]" {
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+		// Observe the untouched upstream frame: the reported response model must be
+		// what the provider actually echoed.
+		meta.observe(sseFrameGemini, "", []byte(payload))
+		meta.emit(s, c)
+
+		if payload == "[DONE]" {
+			return s.finishGeminiStream(c, sawOutput, true)
 		}
 
 		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
 			continue
 		}
 
@@ -2598,8 +2616,16 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 					if parts, ok := content["parts"].([]any); ok {
 						for _, part := range parts {
 							if partMap, ok := part.(map[string]any); ok {
+								// A reasoning part is not the ordinary output a
+								// connectivity probe is checking for, so a
+								// thought-only response must not report success. Its
+								// text is not surfaced as content either.
+								if thought, _ := partMap["thought"].(bool); thought {
+									continue
+								}
 								if text, ok := partMap["text"].(string); ok && text != "" {
 									s.sendEvent(c, TestEvent{Type: "content", Text: text})
+									sawOutput = true
 								}
 								if inlineData, ok := partMap["inlineData"].(map[string]any); ok {
 									mimeType, _ := inlineData["mimeType"].(string)
@@ -2610,6 +2636,7 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 											ImageURL: fmt.Sprintf("data:%s;base64,%s", mimeType, data),
 											MimeType: mimeType,
 										})
+										sawOutput = true
 									}
 								}
 							}
@@ -2619,8 +2646,7 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 
 				// Check for completion after extracting content
 				if finishReason, ok := candidate["finishReason"].(string); ok && finishReason != "" {
-					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-					return nil
+					return s.finishGeminiStream(c, sawOutput, true)
 				}
 			}
 		}
@@ -2636,8 +2662,10 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 	}
 }
 
-// createOpenAITestPayload creates a test payload for OpenAI Responses API
-func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
+// createOpenAITestPayload creates a test payload for OpenAI Responses API.
+// The optional prompt overrides the probe text; callers that pass none keep the
+// legacy probe text so context-free callers stay unchanged.
+func createOpenAITestPayload(modelID string, isOAuth bool, prompt ...string) map[string]any {
 	payload := map[string]any{
 		"model": modelID,
 		"input": []map[string]any{
@@ -2646,7 +2674,7 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "hi",
+						"text": accountTestPayloadPrompt(prompt),
 					},
 				},
 			},
@@ -2666,8 +2694,10 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 }
 
 func createOpenAIChatCompletionsTestPayload(modelID string, prompt string) map[string]any {
-	testPrompt := strings.TrimSpace(prompt)
-	if testPrompt == "" {
+	// Keep the caller's effective prompt verbatim so every protocol sends identical
+	// text; only a blank prompt falls back.
+	testPrompt := prompt
+	if strings.TrimSpace(testPrompt) == "" {
 		testPrompt = "hi"
 	}
 
@@ -2685,31 +2715,33 @@ func createOpenAIChatCompletionsTestPayload(modelID string, prompt string) map[s
 
 // processClaudeStream processes the SSE stream from Claude API
 func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader) error {
-	reader := bufio.NewReader(body)
+	frames := newSSEDataFrameReader(bufio.NewReader(body))
+	meta := newUpstreamModelMetadataState(c)
+	sawOutput := false
 
 	for {
-		line, err := reader.ReadString('\n')
+		payload, ok, err := frames.next()
 		if err != nil {
-			if err == io.EOF {
-				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-				return nil
-			}
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Stream read error: %s", err.Error()))
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" || !sseDataPrefix.MatchString(line) {
-			continue
+		if !ok {
+			// No terminal event: a truncated stream is never a success, whether or
+			// not partial text arrived first.
+			if sawOutput {
+				return s.sendErrorAndEnd(c, "Claude stream ended before message_stop")
+			}
+			return s.sendErrorAndEnd(c, "Claude stream ended without any text output")
 		}
 
-		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
-		if jsonStr == "[DONE]" {
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+		meta.observe(sseFrameClaude, "", []byte(payload))
+		meta.emit(s, c)
+
+		if payload == "[DONE]" {
+			return s.finishClaudeStream(c, sawOutput)
 		}
 
 		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
 			continue
 		}
 
@@ -2718,13 +2750,35 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 		switch eventType {
 		case "content_block_delta":
 			if delta, ok := data["delta"].(map[string]any); ok {
-				if text, ok := delta["text"].(string); ok {
-					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+				// thinking_delta / signature_delta carry reasoning, not ordinary
+				// output, and must not be counted as testable content.
+				if deltaType, _ := delta["type"].(string); deltaType != "thinking_delta" && deltaType != "signature_delta" {
+					if text, ok := delta["text"].(string); ok && text != "" {
+						s.sendEvent(c, TestEvent{Type: "content", Text: text})
+						sawOutput = true
+					}
 				}
 			}
+		case "content_block_start":
+			// A tool_use block is usable output: the upstream produced a real,
+			// complete generation even though it carries no assistant text.
+			if block, ok := data["content_block"].(map[string]any); ok {
+				if blockType, _ := block["type"].(string); blockType == "tool_use" {
+					sawOutput = true
+					if raw, err := json.Marshal(block); err == nil {
+						s.sendEvent(c, TestEvent{Type: "content", Text: string(raw)})
+					}
+				}
+			}
+		case "message_delta":
+			// Anthropic declares the final stop_reason on message_delta, and some
+			// upstreams/proxies omit the trailing message_stop, so a non-empty
+			// stop_reason is itself a valid terminal.
+			if claudeStreamStopReason(data) != "" {
+				return s.finishClaudeStream(c, sawOutput)
+			}
 		case "message_stop":
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+			return s.finishClaudeStream(c, sawOutput)
 		case "error":
 			errorMsg := "Unknown error"
 			if errData, ok := data["error"].(map[string]any); ok {
@@ -2740,44 +2794,41 @@ func (s *AccountTestService) processClaudeStream(c *gin.Context, body io.Reader)
 // processOpenAIChatCompletionsStream processes SSE chunks from the
 // OpenAI-compatible Chat Completions API.
 func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, body io.Reader) error {
-	reader := bufio.NewReader(body)
+	frames := newSSEDataFrameReader(bufio.NewReader(body))
+	meta := newUpstreamModelMetadataState(c)
 	seenJSON := false
 	seenFinish := false
+	sawOutput := false
 
 	for {
-		line, err := reader.ReadString('\n')
+		payload, ok, err := frames.next()
 		if err != nil {
-			if err == io.EOF {
-				if seenFinish {
-					s.sendEvent(c, TestEvent{Type: "status", Text: "已通过 /v1/chat/completions 验证"})
-					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-					return nil
-				}
-				if seenJSON {
-					return s.sendErrorAndEnd(c, "Chat Completions stream from /v1/chat/completions ended before [DONE]")
-				}
-				return s.sendErrorAndEnd(c, "Invalid Chat Completions response from /v1/chat/completions: expected SSE JSON data")
-			}
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions stream read error from /v1/chat/completions: %s", err.Error()))
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" || !sseDataPrefix.MatchString(line) {
-			continue
+		if !ok {
+			if seenFinish {
+				return s.finishChatCompletionsStream(c, sawOutput, true)
+			}
+			if seenJSON {
+				return s.sendErrorAndEnd(c, "Chat Completions stream from /v1/chat/completions ended before [DONE]")
+			}
+			return s.sendErrorAndEnd(c, "Invalid Chat Completions response from /v1/chat/completions: expected SSE JSON data")
 		}
 
-		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
-		if jsonStr == "[DONE]" {
-			s.sendEvent(c, TestEvent{Type: "status", Text: "已通过 /v1/chat/completions 验证"})
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+		if payload == "[DONE]" {
+			return s.finishChatCompletionsStream(c, sawOutput, true)
 		}
 
 		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
 			return s.sendErrorAndEnd(c, "Invalid Chat Completions response from /v1/chat/completions: expected JSON data")
 		}
 		seenJSON = true
+
+		// Chat Completions chunks are untyped payloads (no event "type"); the
+		// observer reads their top-level "model" echo and processing tier.
+		meta.observe(sseFrameOpenAI, "", []byte(payload))
+		meta.emit(s, c)
 
 		if errData, ok := data["error"].(map[string]any); ok {
 			errorMsg := "Chat Completions API (/v1/chat/completions) returned an error"
@@ -2799,11 +2850,13 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 			if delta, ok := choice["delta"].(map[string]any); ok {
 				if text, ok := delta["content"].(string); ok && text != "" {
 					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+					sawOutput = true
 				}
 			}
 			if message, ok := choice["message"].(map[string]any); ok {
 				if text, ok := message["content"].(string); ok && text != "" {
 					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+					sawOutput = true
 				}
 			}
 			if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
@@ -2815,52 +2868,46 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 
 // processOpenAIStream processes the SSE stream from OpenAI Responses API
 func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader) error {
-	reader := bufio.NewReader(body)
-	seenCompleted := false
+	frames := newSSEDataFrameReader(bufio.NewReader(body))
+	meta := newUpstreamModelMetadataState(c)
+	sawOutput := false
 
 	for {
-		line, err := reader.ReadString('\n')
+		payload, ok, err := frames.next()
 		if err != nil {
-			if err == io.EOF {
-				if seenCompleted {
-					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-					return nil
-				}
-				return s.sendErrorAndEnd(c, "Stream ended before response.completed")
-			}
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Stream read error: %s", err.Error()))
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" || !sseDataPrefix.MatchString(line) {
-			continue
+		if !ok {
+			// The stream ended without response.completed / [DONE]: never a success.
+			return s.finishOpenAIStream(c, sawOutput, false)
 		}
 
-		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
-		if jsonStr == "[DONE]" {
-			if seenCompleted {
-				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-				return nil
-			}
-			return s.sendErrorAndEnd(c, "Stream ended before response.completed")
+		if payload == "[DONE]" {
+			return s.finishOpenAIStream(c, sawOutput, true)
 		}
 
 		var data map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
 			continue
 		}
 
 		eventType, _ := data["type"].(string)
+		meta.observe(sseFrameOpenAI, eventType, []byte(payload))
+		meta.emit(s, c)
 
 		switch eventType {
 		case "response.output_text.delta":
 			// OpenAI Responses API uses "delta" field for text content
 			if delta, ok := data["delta"].(string); ok && delta != "" {
 				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
+				sawOutput = true
 			}
 		case "response.completed", "response.done":
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+			return s.finishOpenAIStream(c, sawOutput, true)
+		case "response.incomplete", "response.cancelled", "response.canceled":
+			// A terminal event that reports the response did not finish normally
+			// is a failed probe, never a success.
+			return s.sendErrorAndEnd(c, openAIStreamAbnormalTerminalMessage(eventType, data))
 		case "response.failed":
 			errorMsg := "OpenAI response failed"
 			if responseData, ok := data["response"].(map[string]any); ok {
@@ -3108,11 +3155,38 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
+	if value, ok := c.Get("account_test_event_write_mutex"); ok {
+		if mutex, ok := value.(*sync.Mutex); ok {
+			mutex.Lock()
+			defer mutex.Unlock()
+		}
+	}
 	if event.Type == "test_complete" {
 		if suppress, ok := c.Get(accountTestSuppressCompletionContextKey); ok {
 			if suppressCompletion, _ := suppress.(bool); suppressCompletion {
 				return
 			}
+		}
+	}
+	if event.Type == "test_start" {
+		v, _ := c.Get(accountTestRequestedKey)
+		event.RequestedModel, _ = v.(string)
+		if event.RequestedModel == "" {
+			event.RequestedModel = event.Model
+		}
+		if event.UpstreamSentModel == "" {
+			event.UpstreamSentModel = event.Model
+		}
+		event.EffectivePrompt = accountTestEffectivePrompt(c)
+		v, _ = c.Get(accountTestEffectiveEffortKey)
+		event.EffectiveEffort, _ = v.(string)
+		if event.StreamMode == "" {
+			if v, ok := c.Get("account_test_stream_mode"); ok {
+				event.StreamMode, _ = v.(string)
+			}
+		}
+		if event.StreamMode == "" {
+			event.StreamMode = "stream"
 		}
 	}
 	eventJSON, _ := json.Marshal(event)

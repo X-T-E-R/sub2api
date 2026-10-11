@@ -66,6 +66,7 @@
           :disabled="loadingModels || status === 'connecting'"
           value-key="id"
           label-key="display_name"
+          data-testid="account-test-model"
           :placeholder="loadingModels ? t('common.loading') + '...' : t('admin.accounts.selectTestModel')"
         />
       </div>
@@ -79,6 +80,31 @@
           :options="openAITestModeOptions"
           :disabled="status === 'connecting'"
         />
+      </div>
+
+      <div v-if="showModelSelect && showEffortSelect" class="space-y-1.5">
+        <label
+          for="account-test-effort"
+          class="text-sm font-medium text-gray-700 dark:text-gray-300"
+        >
+          {{ t('admin.accounts.testEffort.label') }}
+        </label>
+        <Select
+          id="account-test-effort"
+          :model-value="effortSelectionValue"
+          :options="effortOptions"
+          :disabled="status === 'connecting' || Boolean(modelEffortSuffix)"
+          :searchable="false"
+          :aria-label="t('admin.accounts.testEffort.label')"
+          data-testid="account-test-effort"
+          @update:model-value="updateEffortSelection"
+        />
+        <p
+          class="text-xs text-gray-500 dark:text-gray-400"
+          data-testid="account-test-effort-hint"
+        >
+          {{ effortHint }}
+        </p>
       </div>
 
       <div v-if="supportsPromptInput" class="space-y-1.5">
@@ -170,46 +196,80 @@
         <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.grok.audioUploadHint') }}</p>
       </div>
 
+      <!-- Request / response metadata reported by the run -->
+      <AccountTestMetadataPanel
+        :metadata="testMetadata"
+        :requested-model="showModelSelect ? selectedModelId : ''"
+        :effort-fallback="effectiveEffortLabel"
+        :effort-source="effectiveEffortSource"
+        :prompt-fallback="effectivePromptFallback"
+        :prompt-source="effectivePromptSource"
+        :prompt-pending="effectivePromptPending"
+      />
+
       <!-- Terminal Output -->
       <div class="group relative">
         <div
-          ref="terminalRef"
-          class="max-h-[240px] min-h-[120px] overflow-y-auto rounded-xl border border-gray-700 bg-gray-900 p-4 font-mono text-sm dark:border-gray-800 dark:bg-black"
+          class="overflow-hidden rounded-xl border border-gray-700 bg-gray-900 dark:border-gray-800 dark:bg-black"
         >
-          <!-- Status Line -->
-          <div v-if="status === 'idle'" class="flex items-center gap-2 text-gray-500">
-            <Icon name="play" size="sm" :stroke-width="2" />
-            <span>{{ t('admin.accounts.readyToTest') }}</span>
-          </div>
-          <div v-else-if="status === 'connecting'" class="flex items-center gap-2 text-yellow-400">
-            <Icon name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
-            <span>{{ t('admin.accounts.connectingToApi') }}</span>
-          </div>
-
-          <!-- Output Lines -->
-          <div v-for="(line, index) in outputLines" :key="index" :class="line.class">
-            {{ line.text }}
-          </div>
-
-          <!-- Streaming Content -->
-          <div v-if="streamingContent" class="text-green-400">
-            {{ streamingContent }}<span class="animate-pulse">_</span>
-          </div>
-
-          <!-- Result Status -->
+          <!-- Response mode reported by the run; outside the scrolling area so
+               it never covers or gets covered by the streamed text. -->
           <div
-            v-if="status === 'success'"
-            class="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3 text-green-400"
+            v-if="streamModeBadge"
+            class="border-b border-white/10 px-4 py-1.5"
           >
-            <Icon name="check" size="sm" :stroke-width="2" />
-            <span>{{ t('admin.accounts.testCompleted') }}</span>
+            <span
+              class="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-400"
+              data-testid="account-test-terminal-mode"
+            >
+              {{ streamModeBadge }}
+            </span>
           </div>
           <div
-            v-else-if="status === 'error'"
-            class="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3 text-red-400"
+            ref="terminalRef"
+            data-testid="account-test-terminal"
+            class="max-h-[240px] min-h-[120px] overflow-y-auto p-4 font-mono text-sm"
           >
-            <Icon name="x" size="sm" :stroke-width="2" />
-            <span>{{ errorMessage }}</span>
+
+            <!-- Status Line -->
+            <div v-if="status === 'idle'" class="flex items-center gap-2 text-gray-500">
+              <Icon name="play" size="sm" :stroke-width="2" />
+              <span>{{ t('admin.accounts.readyToTest') }}</span>
+            </div>
+            <div v-else-if="status === 'connecting'" class="flex items-center gap-2 text-yellow-400">
+              <Icon name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
+              <span>{{ t('admin.accounts.connectingToApi') }}</span>
+            </div>
+
+            <!-- Output Lines -->
+            <div v-for="(line, index) in outputLines" :key="index" :class="line.class">
+              {{ line.text }}
+            </div>
+
+            <!-- Streaming Content -->
+            <div v-if="streamingContent" class="text-green-400">
+              {{ streamingContent }}<span class="animate-pulse">_</span>
+            </div>
+
+            <!-- Result Status -->
+            <div
+              v-if="status === 'success'"
+              data-testid="account-test-result"
+              data-status="success"
+              class="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3 text-green-400"
+            >
+              <Icon name="check" size="sm" :stroke-width="2" />
+              <span>{{ t('admin.accounts.testCompleted') }}</span>
+            </div>
+            <div
+              v-else-if="status === 'error'"
+              data-testid="account-test-result"
+              data-status="error"
+              class="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3 text-red-400"
+            >
+              <Icon name="x" size="sm" :stroke-width="2" />
+              <span>{{ errorMessage }}</span>
+            </div>
           </div>
         </div>
 
@@ -329,6 +389,7 @@
         <button
           @click="startTest"
           :disabled="!canStartTest"
+          data-testid="account-test-start"
           :class="[
             'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all',
             !canStartTest
@@ -370,12 +431,37 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import TextArea from '@/components/common/TextArea.vue'
+import AccountTestMetadataPanel from '@/components/account/AccountTestMetadataPanel.vue'
 import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildApiUrl } from '@/api/client'
-import { ADMIN_UI_REQUEST_HEADER } from '@/api/adminUIRequest'
 import { adminAPI } from '@/api/admin'
+import {
+  ACCOUNT_TEST_DEFAULT_EFFORT_VALUE,
+  intersectReasoningLevels,
+  normalizeReasoningDefaultLevel,
+  normalizeReasoningLevels,
+  readModelCapability,
+  readModelMapping,
+  readUpstreamCatalogMetadata,
+  resolveDefaultEffortLevel,
+  resolveEffectiveEffort,
+  resolveModelEffortFamily,
+  resolvePublishedDefaultLevel
+} from '@/utils/accountTestEffort'
+import {
+  accountTestStreamModeLabelKey,
+  consumeAccountTestStream,
+  mergeAccountTestMetadata
+} from '@/utils/accountTestStream'
+import type {
+  AccountTestMetadata,
+  AccountTestModelOption,
+  AccountTestStreamEvent,
+  AccountTestStreamRequest
+} from '@/types/accountTestStream'
 import type { Account, ClaudeModel } from '@/types'
+import type { AccountTestEffortSource } from '@/utils/accountTestEffort'
 
 const { t } = useI18n()
 const { copyToClipboard } = useClipboard()
@@ -404,10 +490,19 @@ const status = ref<'idle' | 'connecting' | 'success' | 'error'>('idle')
 const outputLines = ref<OutputLine[]>([])
 const streamingContent = ref('')
 const errorMessage = ref('')
-const availableModels = ref<ClaudeModel[]>([])
+const availableModels = ref<AccountTestModelOption[]>([])
 const selectedModelId = ref('')
 const testPrompt = ref('')
 const loadingModels = ref(false)
+const reasoningEffort = ref(ACCOUNT_TEST_DEFAULT_EFFORT_VALUE)
+/** Global enabled names and the shared default, re-read on every open. */
+const globalEffortLevels = ref<string[]>([])
+const globalEffortDefaultLevel = ref('')
+const globalEffortLoading = ref(false)
+const testMetadata = ref<AccountTestMetadata>({})
+const globalTestPrompt = ref('')
+const globalTestPromptDefault = ref('')
+const globalTestPromptLoading = ref(false)
 let abortController: AbortController | null = null
 const generatedImages = ref<PreviewMedia[]>([])
 const generatedAudios = ref<PreviewMedia[]>([])
@@ -483,15 +578,15 @@ const showModelSelect = computed(() => {
 })
 
 const modelOptionsForMode = computed(() => {
-  if (!isGrokAccount.value) return availableModels.value
+  if (!isGrokAccount.value) return selectableModels.value
   if (grokTestMode.value === 'image') {
-    return availableModels.value.filter((m) => isGrokImageModel(m.id))
+    return selectableModels.value.filter((m) => isGrokImageModel(m.id))
   }
   if (grokTestMode.value === 'video') {
-    return availableModels.value.filter((m) => isGrokVideoModel(m.id))
+    return selectableModels.value.filter((m) => isGrokVideoModel(m.id))
   }
   if (grokTestMode.value === 'text') {
-    return availableModels.value.filter((m) => isGrokTextModel(m.id))
+    return selectableModels.value.filter((m) => isGrokTextModel(m.id))
   }
   return []
 })
@@ -650,6 +745,24 @@ const promptInputHint = computed(() => {
   return ''
 })
 
+/** Footer summary length; the full value stays in the metadata panel. */
+const FOOTER_PROMPT_MAX_CHARS = 48
+
+const textPromptSummary = computed(() => {
+  const prompt = effectivePromptFallback.value
+  if (!prompt) {
+    return t('admin.accounts.testPromptSummary', {
+      prompt: t('admin.accounts.testMetadata.notProvided')
+    })
+  }
+  return t('admin.accounts.testPromptSummary', {
+    prompt:
+      prompt.length > FOOTER_PROMPT_MAX_CHARS
+        ? `${prompt.slice(0, FOOTER_PROMPT_MAX_CHARS)}…`
+        : prompt
+  })
+})
+
 const testModeSummary = computed(() => {
   if (isGrokAccount.value) {
     switch (grokTestMode.value) {
@@ -670,7 +783,229 @@ const testModeSummary = computed(() => {
     }
   }
   if (supportsImageTest.value) return t('admin.accounts.imageTestMode')
-  return t('admin.accounts.testPrompt')
+  return textPromptSummary.value
+})
+
+/**
+ * Antigravity OAuth/upstream tests resolve the model through the effort
+ * mapping policy; API-key accounts are routed to the native Gemini/Claude
+ * tests, which ignore it.
+ */
+const isAntigravityEffortAccount = computed(
+  () => props.account?.platform === 'antigravity' && props.account?.type !== 'apikey'
+)
+
+/**
+ * The account's own request→upstream mapping. When it exists, its keys are the
+ * models this account can actually be tested with, and an entry whose target is
+ * a formal effort template is the only thing that authorizes an effort level.
+ */
+const accountModelMapping = computed(() => readModelMapping(props.account?.credentials))
+const catalogMetadata = computed(() => readUpstreamCatalogMetadata(props.account?.extra))
+
+const selectableModels = computed<AccountTestModelOption[]>(() => {
+  const keys = Object.keys(accountModelMapping.value)
+  if (!isAntigravityEffortAccount.value || keys.length === 0) return availableModels.value
+  return keys.map((id) => ({
+    id,
+    type: 'model',
+    display_name: catalogMetadata.value[id]?.displayName || id,
+    created_at: ''
+  }))
+})
+
+const selectedModel = computed(() =>
+  selectableModels.value.find((model) => model.id === selectedModelId.value)
+)
+
+/**
+ * Capability of the selected model: the backend projection for the account's
+ * mapping when it exists, otherwise whatever the model list publishes. Levels
+ * are never derived from the globally configured names.
+ */
+const selectedCapability = computed(() =>
+  catalogMetadata.value[selectedModelId.value] ?? readModelCapability(selectedModel.value)
+)
+
+/** Levels the account itself publishes for the selected model. */
+const publishedEffortLevels = computed(() => selectedCapability.value.levels)
+
+/** Levels whose suffix the backend resolver can actually resolve. */
+const suffixEffortLevels = computed(() =>
+  isAntigravityEffortAccount.value ? globalEffortLevels.value : publishedEffortLevels.value
+)
+
+/** Formal effort family of the selected entry; `null` for literal variants. */
+const effortFamily = computed(() =>
+  isAntigravityEffortAccount.value
+    ? resolveModelEffortFamily(
+        selectedModelId.value,
+        suffixEffortLevels.value,
+        accountModelMapping.value
+      )
+    : null
+)
+
+/**
+ * Levels the selector offers. An effort family is limited to the names the
+ * global effort settings enable, because those are the only suffixes the
+ * backend resolver recognizes. A model whose own native levels are published
+ * keeps them as declared: native thinking is not a suffix policy. Anything else
+ * offers nothing rather than a fabricated level.
+ */
+const supportedEffortLevels = computed(() => {
+  if (!isAntigravityEffortAccount.value) return publishedEffortLevels.value
+  if (effortFamily.value) {
+    return intersectReasoningLevels(publishedEffortLevels.value, globalEffortLevels.value)
+  }
+  return selectedCapability.value.nativeLevels ? publishedEffortLevels.value : []
+})
+
+/** A model ID that names an enabled level decides the effort by itself. */
+const modelEffortSuffix = computed(() => effortFamily.value?.level ?? '')
+
+/**
+ * Level the selector names for "use default", or `''` when it cannot be
+ * resolved. An effort template's own default wins over the global one; a bare
+ * `{effort}` defers to the shared global default, which may have moved since
+ * the catalog snapshot was written, so metadata is not trusted for it. The run
+ * itself always leaves the default to the server.
+ */
+const defaultEffortLevel = computed(() => {
+  if (isAntigravityEffortAccount.value) {
+    const family = effortFamily.value
+    if (family) {
+      return resolvePublishedDefaultLevel(supportedEffortLevels.value, [
+        family.template.defaultEffort,
+        globalEffortDefaultLevel.value
+      ])
+    }
+    return resolvePublishedDefaultLevel(supportedEffortLevels.value, [
+      selectedCapability.value.defaultLevel
+    ])
+  }
+  return resolveDefaultEffortLevel({
+    levels: supportedEffortLevels.value,
+    metadataDefaultLevel: selectedCapability.value.defaultLevel
+  })
+})
+
+/**
+ * True when this selection can carry a reasoning effort at all: an authorized
+ * effort family, the model's own native thinking levels, or - for other
+ * providers - the levels the model list publishes.
+ */
+const effortApplies = computed(() => {
+  if (!isAntigravityEffortAccount.value) return supportedEffortLevels.value.length > 0
+  return effortFamily.value !== null || selectedCapability.value.nativeLevels
+})
+
+const showEffortSelect = computed(() => effortApplies.value)
+
+const effectiveEffort = computed(() =>
+  resolveEffectiveEffort({
+    selection: reasoningEffort.value,
+    modelSuffix: modelEffortSuffix.value
+  })
+)
+
+const effectiveEffortSource = computed<AccountTestEffortSource>(() => effectiveEffort.value.source)
+
+/**
+ * What the selector shows. A model ID suffix locks the control and displays the
+ * level that will actually be sent, so the visible value never disagrees with
+ * the request.
+ */
+const effortSelectionValue = computed(() =>
+  modelEffortSuffix.value || reasoningEffort.value
+)
+
+const updateEffortSelection = (value: string | number | boolean | null) => {
+  if (typeof value === 'string') reasoningEffort.value = value
+}
+
+const defaultEffortOptionLabel = computed(() =>
+  defaultEffortLevel.value
+    ? t('admin.accounts.testEffort.useDefaultWithLevel', { level: defaultEffortLevel.value })
+    : t('admin.accounts.testEffort.useDefault')
+)
+
+const effortOptions = computed(() => [
+  { value: ACCOUNT_TEST_DEFAULT_EFFORT_VALUE, label: defaultEffortOptionLabel.value },
+  ...supportedEffortLevels.value.map((level) => ({ value: level, label: level }))
+])
+
+const effortHint = computed(() => {
+  if (modelEffortSuffix.value) {
+    return t('admin.accounts.testEffort.suffixOverrides', { level: modelEffortSuffix.value })
+  }
+  if (supportedEffortLevels.value.length > 0) {
+    return t('admin.accounts.testEffort.hint')
+  }
+  if (publishedEffortLevels.value.length > 0) {
+    return t('admin.accounts.testEffort.levelsGloballyDisabled')
+  }
+  return selectedCapability.value.accountProven
+    ? t('admin.accounts.testEffort.levelsUnavailable')
+    : t('admin.accounts.testEffort.levelsUnproven')
+})
+
+/**
+ * Effort shown before the run reports the authoritative `effective_effort`.
+ * A literal variant applies no effort, so nothing is claimed for it.
+ */
+const effectiveEffortLabel = computed(() => {
+  if (!effortApplies.value) return ''
+  return effectiveEffort.value.source === 'default'
+    ? defaultEffortOptionLabel.value
+    : effectiveEffort.value.effort
+})
+
+/** Grok STT and realtime tests send no prompt text at all. */
+const promptlessTestMode = computed(
+  () => isGrokAccount.value && (grokTestMode.value === 'stt' || grokTestMode.value === 'realtime')
+)
+
+/** Ordinary text tests use the global test prompt; media keep their own input. */
+const usesGlobalPrompt = computed(() => !supportsPromptInput.value && !promptlessTestMode.value)
+
+const mediaPromptDefault = computed(() => {
+  if (!supportsPromptInput.value) return ''
+  if (grokTestMode.value === 'video') return t('admin.accounts.videoPromptDefault')
+  if (grokTestMode.value === 'image' || supportsImageTest.value) {
+    return t('admin.accounts.imagePromptDefault')
+  }
+  if (grokTestMode.value === 'search') return t('admin.accounts.grok.searchQueryDefault')
+  if (grokTestMode.value === 'tts') return t('admin.accounts.grok.ttsTextDefault')
+  return ''
+})
+
+const effectivePromptFallback = computed(() => {
+  if (supportsPromptInput.value) return testPrompt.value.trim()
+  if (!usesGlobalPrompt.value) return ''
+  return globalTestPrompt.value || globalTestPromptDefault.value
+})
+
+const effectivePromptSource = computed<'custom' | 'global' | 'builtin' | undefined>(() => {
+  if (supportsPromptInput.value) {
+    const value = testPrompt.value.trim()
+    if (!value) return undefined
+    return value === mediaPromptDefault.value.trim() ? 'builtin' : 'custom'
+  }
+  if (!usesGlobalPrompt.value) return undefined
+  if (globalTestPrompt.value) return 'global'
+  return globalTestPromptDefault.value ? 'builtin' : undefined
+})
+
+const effectivePromptPending = computed(
+  () => usesGlobalPrompt.value && globalTestPromptLoading.value
+)
+
+const streamModeBadge = computed(() => {
+  const mode = (testMetadata.value.stream_mode || '').trim()
+  if (!mode) return ''
+  const key = accountTestStreamModeLabelKey(mode)
+  return key ? t(key) : mode
 })
 
 const canStartTest = computed(() => {
@@ -689,7 +1024,8 @@ const canStartTest = computed(() => {
   return Boolean(selectedModelId.value)
 })
 
-const sortTestModels = (models: ClaudeModel[]) => {
+/** Keeps the caller's element type, which carries provider capability fields. */
+const sortTestModels = <T extends ClaudeModel>(models: T[]): T[] => {
   const priorityMap = new Map(prioritizedGeminiModels.map((id, index) => [id, index]))
 
   return [...models].sort((a, b) => {
@@ -733,6 +1069,44 @@ const pickDefaultModelForMode = () => {
   selectedModelId.value = opts[0].id
 }
 
+const loadGlobalTestPrompt = async () => {
+  globalTestPromptLoading.value = true
+  try {
+    const settings = await adminAPI.settings.getModelTestPromptSettings()
+    globalTestPrompt.value = typeof settings?.prompt === 'string' ? settings.prompt.trim() : ''
+    globalTestPromptDefault.value =
+      typeof settings?.default_prompt === 'string' ? settings.default_prompt.trim() : ''
+  } catch (error) {
+    // The modal still works: without the setting the backend keeps using its
+    // own default, and the panel does not claim a prompt it never read.
+    console.error('Failed to load the global test prompt:', error)
+    globalTestPrompt.value = ''
+    globalTestPromptDefault.value = ''
+  } finally {
+    globalTestPromptLoading.value = false
+  }
+}
+
+/**
+ * Picks a sane default from the entries this account can actually test: the
+ * projected mapping keys when they exist, otherwise the model list.
+ */
+const applyDefaultSelection = () => {
+  const options = selectableModels.value
+  if (options.length === 0) {
+    selectedModelId.value = ''
+    return
+  }
+  if (options.some((model) => model.id === selectedModelId.value)) return
+  if (props.account?.platform === 'gemini') {
+    selectedModelId.value = options[0].id
+    return
+  }
+  // Prefer Sonnet when the account serves it, otherwise use the first entry.
+  const sonnetModel = options.find((model) => model.id.includes('sonnet'))
+  selectedModelId.value = sonnetModel?.id || options[0].id
+}
+
 watch(
   () => props.show,
   async (newVal) => {
@@ -740,8 +1114,16 @@ watch(
       testPrompt.value = ''
       testMode.value = 'default'
       grokTestMode.value = 'text'
+      reasoningEffort.value = ACCOUNT_TEST_DEFAULT_EFFORT_VALUE
+      globalEffortLevels.value = []
+      globalEffortDefaultLevel.value = ''
       resetState()
-      await loadAvailableModels()
+      await Promise.all([
+        loadAvailableModels(),
+        loadGlobalTestPrompt(),
+        loadGlobalEffortSettings()
+      ])
+      applyDefaultSelection()
       if (isGrokAccount.value) {
         pickDefaultModelForMode()
         applyDefaultPromptForMode()
@@ -752,6 +1134,14 @@ watch(
   }
 )
 
+// A level the newly selected model does not publish must not stay selected.
+watch(supportedEffortLevels, (levels) => {
+  if (!reasoningEffort.value) return
+  if (!levels.includes(reasoningEffort.value)) {
+    reasoningEffort.value = ACCOUNT_TEST_DEFAULT_EFFORT_VALUE
+  }
+})
+
 watch(grokTestMode, () => {
   if (!isGrokAccount.value) return
   testPrompt.value = ''
@@ -760,26 +1150,41 @@ watch(grokTestMode, () => {
   applyDefaultPromptForMode()
 })
 
+/**
+ * Reads the global effort settings. They authorize which level names the
+ * backend resolver recognizes and supply the shared default of a bare
+ * `{effort}` template, so they must be read per open instead of cached: the
+ * operator can change them at runtime, while a synced catalog snapshot cannot.
+ */
+const loadGlobalEffortSettings = async () => {
+  if (!isAntigravityEffortAccount.value) return
+  globalEffortLoading.value = true
+  try {
+    const settings = await adminAPI.settings.getAntigravityModelEffortSettings()
+    globalEffortLevels.value = normalizeReasoningLevels(settings?.levels)
+    globalEffortDefaultLevel.value = normalizeReasoningDefaultLevel(
+      settings?.default_effort,
+      globalEffortLevels.value
+    )
+  } catch (error) {
+    console.error('Failed to load the global Antigravity effort settings:', error)
+    globalEffortLevels.value = []
+    globalEffortDefaultLevel.value = ''
+  } finally {
+    globalEffortLoading.value = false
+  }
+}
+
 const loadAvailableModels = async () => {
   if (!props.account) return
 
   loadingModels.value = true
   selectedModelId.value = '' // Reset selection before loading
   try {
-    const models = await adminAPI.accounts.getAvailableModels(props.account.id)
+    const models = await adminAPI.accounts.getTestAvailableModels(props.account.id)
     availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity'
       ? sortTestModels(models)
       : models
-    // Default selection by platform
-    if (availableModels.value.length > 0) {
-      if (props.account.platform === 'gemini') {
-        selectedModelId.value = availableModels.value[0].id
-      } else {
-        // Try to select Sonnet as default, otherwise use first model
-        const sonnetModel = availableModels.value.find((m) => m.id.includes('sonnet'))
-        selectedModelId.value = sonnetModel?.id || availableModels.value[0].id
-      }
-    }
   } catch (error) {
     console.error('Failed to load available models:', error)
     // Fallback to empty list
@@ -795,6 +1200,7 @@ const resetState = () => {
   outputLines.value = []
   streamingContent.value = ''
   errorMessage.value = ''
+  testMetadata.value = {}
   generatedImages.value = []
   generatedAudios.value = []
   generatedVideos.value = []
@@ -844,15 +1250,14 @@ const startTest = async () => {
   abortController = new AbortController()
 
   try {
-    const requestBody: {
-      model_id: string
-      prompt: string
-      mode?: string
-      image_data_url?: string
-      audio_data_url?: string
-    } = {
+    const requestBody: AccountTestStreamRequest = {
       model_id: showModelSelect.value ? selectedModelId.value : '',
       prompt: supportsPromptInput.value ? testPrompt.value.trim() : ''
+    }
+    // "Use default" sends no effort at all; a model ID suffix wins over the
+    // dropdown so the request always matches the level the UI shows.
+    if (effectiveEffort.value.effort) {
+      requestBody.reasoning_effort = effectiveEffort.value.effort
     }
     if (isOpenAIAccount.value) {
       requestBody.mode = testMode.value
@@ -881,51 +1286,13 @@ const startTest = async () => {
     const url = buildApiUrl(`/admin/accounts/${props.account.id}/test`)
 
     // Use fetch with streaming for SSE since EventSource doesn't support POST
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
-        'Content-Type': 'application/json',
-        [ADMIN_UI_REQUEST_HEADER]: '1'
-      },
-      body: JSON.stringify(requestBody),
-      signal: abortController.signal
+    await consumeAccountTestStream({
+      url,
+      body: requestBody,
+      signal: abortController.signal,
+      noResponseBodyMessage: t('admin.accounts.grok.noResponseBody'),
+      onEvent: handleEvent
     })
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`)
-    }
-
-    const reader = response.body?.getReader()
-    if (!reader) {
-      throw new Error(t('admin.accounts.grok.noResponseBody'))
-    }
-
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const jsonStr = line.slice(6).trim()
-          if (jsonStr) {
-            try {
-              const event = JSON.parse(jsonStr)
-              handleEvent(event)
-            } catch (e) {
-              console.error('Failed to parse SSE event:', e)
-            }
-          }
-        }
-      }
-    }
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       status.value = 'idle'
@@ -938,19 +1305,18 @@ const startTest = async () => {
   }
 }
 
-const handleEvent = (event: {
-  type: string
-  text?: string
-  model?: string
-  success?: boolean
-  error?: string
-  image_url?: string
-  audio_url?: string
-  video_url?: string
-  mime_type?: string
-}) => {
+const applyTestMetadata = (event: AccountTestStreamEvent) => {
+  testMetadata.value = mergeAccountTestMetadata(testMetadata.value, event)
+}
+
+const handleEvent = (event: AccountTestStreamEvent) => {
   switch (event.type) {
+    case 'test_metadata':
+      applyTestMetadata(event)
+      break
+
     case 'test_start':
+      applyTestMetadata(event)
       addLine(t('admin.accounts.connectedToApi'), 'text-green-400')
       if (event.model) {
         addLine(t('admin.accounts.usingModel', { model: event.model }), 'text-cyan-400')

@@ -1095,13 +1095,20 @@ func (h *AccountHandler) Test(c *gin.Context) {
 		return
 	}
 
-	var req TestAccountRequest
-	// Allow empty body, model_id is optional
-	_ = c.ShouldBindJSON(&req)
+	var req struct {
+		TestAccountRequest
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	// A genuinely empty body is allowed; malformed options are not ignored.
+	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
+		response.BadRequest(c, "Invalid test request: "+err.Error())
+		return
+	}
 
 	opts := service.AccountTestOptions{
 		ImageDataURL: req.ImageDataURL,
 		AudioDataURL: req.AudioDataURL,
+		ReasoningEffort: req.ReasoningEffort,
 	}
 
 	// Use AccountTestService to test the account with SSE streaming

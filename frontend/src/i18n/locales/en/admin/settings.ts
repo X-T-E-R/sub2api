@@ -1197,6 +1197,25 @@ export default {
           defaultNotInLevels: 'The default effort must be one of the allowed effort names.'
         }
       },
+      modelTestPrompt: {
+        title: 'Account test prompt',
+        description: 'Ordinary text connectivity tests send this prompt. Image, video, web search, TTS and STT tests keep their own specific input. Saving an empty prompt restores the built-in default.',
+        label: 'Test prompt',
+        hint: 'Sent as the text message of ordinary text tests, for example Anthropic, OpenAI or Gemini text probes.',
+        placeholder: 'Leave empty to use the built-in default prompt.',
+        counter: '{count} / {max} characters',
+        tooLong: 'Use at most {max} characters (currently {count}).',
+        defaultLabel: 'Built-in default',
+        defaultHint: 'Used instead of the test prompt while the field above is empty.',
+        defaultUnavailable: 'The backend does not report a built-in default prompt yet.',
+        save: 'Save prompt',
+        saved: 'Account test prompt saved',
+        reset: 'Reset to built-in default',
+        resetSaved: 'Account test prompt reset to the built-in default',
+        loadFailed: 'Failed to load the account test prompt',
+        saveFailed: 'Failed to save the account test prompt',
+        affectsHint: 'Saving applies to new tests only; a test that is already running keeps the prompt it started with.'
+      },
       codexSessionAffinity: {
         title: 'Codex session account preference',
         description: 'Choose groups where new explicit Codex root sessions record a preferred current account; eligible account failures may move them to another suitable account.',

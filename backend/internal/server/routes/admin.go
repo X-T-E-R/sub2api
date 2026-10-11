@@ -560,6 +560,9 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
 		adminSettings.GET("/model-reasoning-floor", h.Admin.Setting.GetModelReasoningFloor)
 		adminSettings.PUT("/model-reasoning-floor", h.Admin.Setting.UpdateModelReasoningFloor)
+		// 账号连通性测试的全局请求词（空值表示使用内置默认）
+		adminSettings.GET("/model-test", h.Admin.Setting.GetModelTestPrompt)
+		adminSettings.PUT("/model-test", h.Admin.Setting.UpdateModelTestPrompt)
 		adminSettings.GET("/antigravity-model-effort", h.Admin.Setting.GetAntigravityModelEffort)
 		adminSettings.PUT("/antigravity-model-effort", h.Admin.Setting.UpdateAntigravityModelEffort)
 		adminSettings.GET("/codex-session-affinity", h.Admin.Setting.GetCodexSessionAffinity)

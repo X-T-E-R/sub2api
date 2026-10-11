@@ -1521,6 +1521,7 @@ export default {
       selectTestModel: '选择测试模型',
       testModel: '测试模型',
       testPrompt: '提示词："hi"',
+      testPromptSummary: '提示词："{prompt}"',
       imagePromptLabel: '生图提示词',
       imagePromptPlaceholder: '例如：生成一只戴宇航员头盔的橘猫，像素插画风格，纯色背景。',
       imagePromptDefault: 'Generate a cute orange cat astronaut sticker on a clean pastel background.',
@@ -1540,6 +1541,41 @@ export default {
       audioReceived: '已收到第 {count} 段测试音频',
       videoPreview: '生成视频：',
       videoReceived: '已收到第 {count} 段测试视频',
+      // 测试弹窗：推理档位选择与运行元数据
+      testEffort: {
+        label: '推理档位',
+        useDefault: '使用默认',
+        useDefaultWithLevel: '使用默认（{level}）',
+        levelsUnavailable: '该账号下所选模型已公布的推理档位为空，只能使用其默认值。',
+        levelsGloballyDisabled:
+          '该账号为所选模型公布了档位，但这些档位在当前全局档位设置中均未启用，因此这里无法选择。',
+        levelsUnproven: '已知档位来自模型目录的兜底数据而非本账号，因此这里不提供档位选择。',
+        suffixOverrides:
+          '该账号已把模型 ID 映射为以“-{level}”结尾的 effort 模板，后缀决定推理档位并覆盖此处的选择。',
+        hint: '选择档位会在本次测试中覆盖该模型的默认档位。'
+      },
+      testMetadata: {
+        title: '请求与响应元数据',
+        subtitle: '测试运行过程中由后端上报；未上报的字段显示为“未提供”。',
+        requestedModel: '请求模型',
+        upstreamSentModel: '实际发送的上游模型',
+        upstreamResponseModel: '上游响应声明的模型',
+        responseConflictHint:
+          '上游响应声明的模型与实际发送的模型不一致。两个值都会保留，避免掩盖这种不一致。',
+        effectiveEffort: '推理档位',
+        effortFromSuffix: '来自模型 ID 后缀',
+        effectivePrompt: '实际提示词',
+        promptReported: '由测试运行上报',
+        promptCustom: '自定义输入',
+        promptGlobal: '全局设置',
+        promptBuiltin: '内置默认值',
+        streamModeLabel: '响应模式',
+        streamMode: {
+          stream: '流式',
+          native_non_stream: '原生非流式'
+        },
+        notProvided: '未提供'
+      },
       // Stats Modal
       viewStats: '查看统计',
       usageStatistics: '使用统计',

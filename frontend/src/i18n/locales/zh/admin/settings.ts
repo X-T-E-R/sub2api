@@ -1191,6 +1191,25 @@ export default {
           defaultNotInLevels: '默认档位必须是允许的档位名称之一。'
         }
       },
+      modelTestPrompt: {
+        title: '账号测试提示词',
+        description: '普通文本连通性测试会发送该提示词；图片、视频、联网搜索、TTS 与 STT 测试仍使用各自的专用输入。将提示词保存为空即恢复内置默认值。',
+        label: '测试提示词',
+        hint: '作为普通文本测试发送的文本内容，例如 Anthropic、OpenAI、Gemini 文本探测。',
+        placeholder: '留空则使用内置默认提示词。',
+        counter: '已输入 {count} / {max} 个字符',
+        tooLong: '最多 {max} 个字符（当前 {count} 个）。',
+        defaultLabel: '内置默认值',
+        defaultHint: '上方提示词为空时改用此内容。',
+        defaultUnavailable: '后端暂未提供内置默认提示词。',
+        save: '保存提示词',
+        saved: '账号测试提示词已保存',
+        reset: '恢复内置默认值',
+        resetSaved: '账号测试提示词已恢复为内置默认值',
+        loadFailed: '加载账号测试提示词失败',
+        saveFailed: '保存账号测试提示词失败',
+        affectsHint: '保存只作用于新测试；已开始运行的测试仍使用最初发送的提示词。'
+      },
       codexSessionAffinity: {
         title: 'Codex 会话账号偏好',
         description: '选择允许新建显式 Codex 根会话记录当前账号偏好的分组；符合条件的账号失败时可切换到其他合适账号。',
