@@ -3396,6 +3396,15 @@
           </div>
         </div>
 
+        <!-- Thought-only response policy overrides (only for antigravity accounts) -->
+        <div
+          v-if="form.platform === 'antigravity'"
+          class="mt-4"
+          data-testid="create-antigravity-thought-policy"
+        >
+          <AntigravityThoughtPolicyOverride v-model="antigravityThoughtPolicyExtra" />
+        </div>
+
         <!-- Group Selection - 仅标准模式显示 -->
         <GroupSelector
           v-if="!authStore.isSimpleMode"
@@ -3813,6 +3822,7 @@ import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
 import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import CodexDailySessionPoolFields from '@/components/account/CodexDailySessionPoolFields.vue'
+import AntigravityThoughtPolicyOverride from '@/components/account/AntigravityThoughtPolicyOverride.vue'
 import { isCodexDailySessionPoolValid, readCodexDailySessionPool, writeCodexDailySessionPool } from '@/components/account/codexDailySessionPool'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import {
@@ -4278,6 +4288,9 @@ adminAPI.settings.getWebSearchEmulationConfig().then(cfg => {
 loadQuotaNotifyGlobal()
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
+// Account-level tri-state for the two thought-only policy switches. Holds only the two
+// managed extra keys: present means an explicit override, absent means inherit.
+const antigravityThoughtPolicyExtra = ref<Record<string, unknown>>({})
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
 const antigravityProjectId = ref('')
 const upstreamBaseUrl = ref('') // For upstream type: base URL
@@ -4374,7 +4387,11 @@ const applyOpenAIEndpointCapabilities = (credentials: Record<string, unknown>) =
 }
 
 function buildAntigravityExtra(): Record<string, unknown> | undefined {
-  const extra: Record<string, unknown> = {}
+  // Start from the managed thought-policy map: explicit on/off keys must survive as-is
+  // (an explicit false is a real override, not "unset").
+  const extra: Record<string, unknown> = {
+    ...antigravityThoughtPolicyExtra.value
+  }
   if (mixedScheduling.value) extra.mixed_scheduling = true
   if (allowOverages.value) extra.allow_overages = true
   return Object.keys(extra).length > 0 ? extra : undefined
@@ -4666,6 +4683,7 @@ watch(
       antigravityAccountType.value = 'oauth'
     } else {
       allowOverages.value = false
+      antigravityThoughtPolicyExtra.value = {}
       antigravityProjectId.value = ''
       antigravityWhitelistModels.value = []
       antigravityModelMappings.value = []
@@ -5183,6 +5201,7 @@ const resetForm = () => {
   customBaseUrlEnabled.value = false
   customBaseUrl.value = ''
   allowOverages.value = false
+  antigravityThoughtPolicyExtra.value = {}
   antigravityAccountType.value = 'oauth'
   antigravityProjectId.value = ''
   upstreamBaseUrl.value = ''
@@ -6504,14 +6523,17 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
         // Generate account name with index for batch
         const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
 
-        // Note: Antigravity doesn't have buildExtraInfo, so we pass empty extra or rely on credentials
+        // Note: Antigravity doesn't have buildExtraInfo; the account-level
+        // thought-only policy overrides travel through the account extra.
         const createPayload = withAntigravityConfirmFlag({
           name: accountName,
           notes: form.notes,
           platform: 'antigravity',
           type: 'oauth',
           credentials,
-          extra: {},
+          // Only the thought-only policy overrides travel here; this batch-import path
+          // keeps its existing (unchanged) mixed_scheduling/allow_overages handling.
+          extra: { ...antigravityThoughtPolicyExtra.value },
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,

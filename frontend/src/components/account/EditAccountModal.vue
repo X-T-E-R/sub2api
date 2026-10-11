@@ -2811,6 +2811,15 @@
         </div>
       </div>
 
+      <!-- Thought-only response policy overrides (only for antigravity accounts) -->
+      <div
+        v-if="account?.platform === 'antigravity'"
+        class="mt-4"
+        data-testid="edit-antigravity-thought-policy"
+      >
+        <AntigravityThoughtPolicyOverride v-model="antigravityThoughtPolicyExtra" />
+      </div>
+
       <!-- Group Selection - 仅标准模式显示 -->
       <GroupSelector
         v-if="!authStore.isSimpleMode"
@@ -2908,6 +2917,11 @@ import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import CodexDailySessionPoolFields from '@/components/account/CodexDailySessionPoolFields.vue'
 import { isCodexDailySessionPoolValid, readCodexDailySessionPool, writeCodexDailySessionPool } from '@/components/account/codexDailySessionPool'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
+import AntigravityThoughtPolicyOverride from '@/components/account/AntigravityThoughtPolicyOverride.vue'
+import {
+  ANTIGRAVITY_THOUGHT_POLICY_EXTRA_KEYS,
+  readAntigravityThoughtPolicyOverride
+} from '@/types/antigravityThoughtPolicy'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
@@ -3215,6 +3229,9 @@ const upstreamBillingAutoProbeEnabled = ref(false)
 const upstreamBillingRateSyncEnabled = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
+// Account-level tri-state for the two thought-only policy switches. Holds only the two
+// managed extra keys: present means an explicit override, absent means inherit.
+const antigravityThoughtPolicyExtra = ref<Record<string, unknown>>({})
 const antigravityProjectId = ref('')
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
 const antigravityWhitelistModels = ref<string[]>([])
@@ -3690,6 +3707,24 @@ const applyOpenAIModelMappingCredentials = (credentials: Record<string, unknown>
   }
 }
 
+/**
+ * Extracts the account-level thought-only policy overrides from a stored extra map.
+ * Only values that parse to a real boolean are kept; anything else (missing, null or
+ * unparsable) means the account inherits the global switch and must not be written back.
+ */
+const readAntigravityThoughtPolicyAccountExtra = (
+  extra: Record<string, unknown> | null | undefined
+): Record<string, unknown> => {
+  const next: Record<string, unknown> = {}
+  for (const key of Object.keys(ANTIGRAVITY_THOUGHT_POLICY_EXTRA_KEYS) as (keyof typeof ANTIGRAVITY_THOUGHT_POLICY_EXTRA_KEYS)[]) {
+    const override = readAntigravityThoughtPolicyOverride(extra, key)
+    if (override !== 'inherit') {
+      next[ANTIGRAVITY_THOUGHT_POLICY_EXTRA_KEYS[key]] = override === 'on'
+    }
+  }
+  return next
+}
+
 const syncFormFromAccount = (newAccount: Account | null) => {
   if (!newAccount) {
     return
@@ -3737,6 +3772,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	const extra = newAccount.extra as Record<string, unknown> | undefined
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
+	antigravityThoughtPolicyExtra.value = readAntigravityThoughtPolicyAccountExtra(extra)
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
 	autoPause5hDisabled.value = extra?.auto_pause_5h_disabled === true
@@ -5100,6 +5136,17 @@ const handleSubmit = async () => {
         newExtra.allow_overages = true
       } else {
         delete newExtra.allow_overages
+      }
+      // Thought-only policy overrides are user-owned: an explicit on/off must reach the
+      // payload as a real boolean, while "inherit" must remove the key so the account
+      // keeps following the global switch (including a later global change).
+      const thoughtPolicyExtra = antigravityThoughtPolicyExtra.value
+      for (const key of Object.values(ANTIGRAVITY_THOUGHT_POLICY_EXTRA_KEYS)) {
+        if (Object.prototype.hasOwnProperty.call(thoughtPolicyExtra, key)) {
+          newExtra[key] = thoughtPolicyExtra[key]
+        } else {
+          delete newExtra[key]
+        }
       }
       updatePayload.extra = newExtra
     }

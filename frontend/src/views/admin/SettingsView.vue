@@ -4918,6 +4918,7 @@
 
           <ModelReasoningFloorSettings />
           <AntigravityModelEffortSettings />
+          <AntigravityThoughtPolicySettings />
           <ModelTestPromptSettings />
           <CodexSessionAffinitySettings />
 
@@ -8971,6 +8972,7 @@ import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue"
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
 import ModelReasoningFloorSettings from "@/views/admin/settings/ModelReasoningFloorSettings.vue";
 import AntigravityModelEffortSettings from "@/views/admin/settings/AntigravityModelEffortSettings.vue";
+import AntigravityThoughtPolicySettings from "@/views/admin/settings/AntigravityThoughtPolicySettings.vue";
 import ModelTestPromptSettings from "@/views/admin/settings/ModelTestPromptSettings.vue";
 import CodexSessionAffinitySettings from "@/views/admin/settings/CodexSessionAffinitySettings.vue";
 import { useClipboard } from "@/composables/useClipboard";

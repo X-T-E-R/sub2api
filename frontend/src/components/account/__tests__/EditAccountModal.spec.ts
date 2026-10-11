@@ -44,6 +44,16 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
+// The account-level override card asks for the global pair itself; keep that request
+// mocked so mounting an antigravity editor never reaches the network.
+vi.mock('@/api/admin/antigravityThoughtPolicy', () => ({
+  getAntigravityThoughtPolicySettings: vi.fn().mockResolvedValue({
+    suppress_thought_only_stop: false,
+    continue_thought_only: false
+  }),
+  updateAntigravityThoughtPolicySettings: vi.fn()
+}))
+
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -1520,5 +1530,88 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+})
+
+describe('EditAccountModal antigravity thought-only policy', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  const buildAccountWithOverrides = () => ({
+    ...buildAntigravityAccount(),
+    extra: {
+      mixed_scheduling: true,
+      quota_limit: 88,
+      antigravity_suppress_thought_only_stop: false
+    }
+  })
+
+  it('only antigravity accounts get the tri-state card', () => {
+    const wrapper = mountModal(buildAccount())
+    expect(wrapper.find('[data-testid="antigravity-thought-policy-override"]').exists()).toBe(false)
+
+    const antigravity = mountModal(buildAntigravityAccount())
+    expect(antigravity.find('[data-testid="antigravity-thought-policy-override"]').exists()).toBe(true)
+  })
+
+  it('loads the stored override and writes the real boolean back', async () => {
+    const account = buildAccountWithOverrides()
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+
+    expect(
+      wrapper
+        .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-off"]')
+        .attributes('aria-checked')
+    ).toBe('true')
+    expect(
+      wrapper
+        .get('[data-testid="antigravity-thought-policy-override-continue_thought_only-inherit"]')
+        .attributes('aria-checked')
+    ).toBe('true')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra.antigravity_suppress_thought_only_stop).toBe(false)
+    expect(extra).not.toHaveProperty('antigravity_continue_thought_only')
+    // user-owned flags must not disturb the other account extras
+    expect(extra.mixed_scheduling).toBe(true)
+    expect(extra.quota_limit).toBe(88)
+  })
+
+  it('deletes the stored key when the account goes back to inheriting', async () => {
+    const account = buildAccountWithOverrides()
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-inherit"]')
+      .trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).not.toHaveProperty('antigravity_suppress_thought_only_stop')
+    expect(extra.mixed_scheduling).toBe(true)
+    expect(extra.quota_limit).toBe(88)
+  })
+
+  it('writes true when forcing an inherited switch on', async () => {
+    const account = buildAntigravityAccount()
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-continue_thought_only-on"]')
+      .trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra.antigravity_continue_thought_only).toBe(true)
   })
 })

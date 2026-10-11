@@ -19,6 +19,12 @@ vi.mock("@/views/admin/settings/AntigravityModelEffortSettings.vue", () => ({
     template: '<div data-testid="antigravity-model-effort-card-stub"></div>',
   },
 }));
+vi.mock("@/views/admin/settings/AntigravityThoughtPolicySettings.vue", () => ({
+  default: {
+    name: "AntigravityThoughtPolicySettings",
+    template: '<div data-testid="antigravity-thought-policy-card-stub"></div>',
+  },
+}));
 
 const {
   getSettings,
@@ -644,6 +650,17 @@ async function openGatewayTab(wrapper: ReturnType<typeof mountView>) {
   await gatewayTabButton?.trigger("click");
   await flushPromises();
   expect(wrapper.find('[data-testid="antigravity-model-effort-card-stub"]').exists()).toBe(true);
+  // The thought-only policy card ships with the gateway settings next to the effort card.
+  expect(wrapper.find('[data-testid="antigravity-thought-policy-card-stub"]').exists()).toBe(true);
+  const antigravityCards = wrapper
+    .findAll(
+      '[data-testid="antigravity-model-effort-card-stub"], [data-testid="antigravity-thought-policy-card-stub"]',
+    )
+    .map((node) => node.attributes("data-testid"));
+  expect(antigravityCards).toEqual([
+    "antigravity-model-effort-card-stub",
+    "antigravity-thought-policy-card-stub",
+  ]);
 }
 
 async function openUsersTab(wrapper: ReturnType<typeof mountView>) {

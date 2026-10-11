@@ -52,10 +52,30 @@ vi.mock('@/api/admin', () => ({
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
       getSettings: vi.fn().mockResolvedValue({}),
     },
+    antigravity: {
+      refreshAntigravityToken: vi.fn().mockResolvedValue({
+        access_token: 'ag-access',
+        refresh_token: 'ag-refresh',
+        token_type: 'Bearer',
+        expires_at: 1790000000,
+        project_id: 'ag-project',
+        email: 'ag@example.com',
+      }),
+    },
     tlsFingerprintProfiles: {
       list: vi.fn().mockResolvedValue([]),
     },
   },
+}))
+
+// The account-level override card asks for the global pair itself; keep that request
+// mocked so mounting an antigravity form never reaches the network.
+vi.mock('@/api/admin/antigravityThoughtPolicy', () => ({
+  getAntigravityThoughtPolicySettings: vi.fn().mockResolvedValue({
+    suppress_thought_only_stop: false,
+    continue_thought_only: false,
+  }),
+  updateAntigravityThoughtPolicySettings: vi.fn(),
 }))
 
 vi.mock('@/api/admin/accounts', () => ({
@@ -93,11 +113,12 @@ const OAuthAuthorizationFlowStub = defineComponent({
     initialInputMethod: String,
   },
   data: () => ({ inputMethod: 'manual' }),
-  emits: ['import-codex-session', 'import-codex-pat'],
+  emits: ['import-codex-session', 'import-codex-pat', 'validate-refresh-token'],
   template: `
     <div>
       <button data-testid="import-codex-session" @click="$emit('import-codex-session', 'session-json')">session</button>
       <button data-testid="import-codex-pat" @click="$emit('import-codex-pat', 'pat-token')">pat</button>
+      <button data-testid="validate-refresh-token" @click="$emit('validate-refresh-token', 'rt-line-1')">rt</button>
     </div>
   `,
 })
@@ -622,5 +643,126 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     })
     // A live preview also drives the post-create capability sync.
     expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
+  })
+})
+
+describe('CreateAccountModal antigravity thought-only policy', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    createAccountMock.mockReset().mockResolvedValue({ id: 7, platform: 'antigravity', type: 'apikey' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    showWarningMock.mockReset()
+  })
+
+  const fillAntigravityUpstream = async (wrapper: ReturnType<typeof mountModal>, name = 'antigravity relay') => {
+    await wrapper.get('form#create-account-form input[type="text"]').setValue(name)
+    const baseInput = wrapper
+      .findAll('input')
+      .find((candidate) => candidate.attributes('placeholder') === 'https://cloudcode-pa.googleapis.com')
+    await baseInput?.setValue('https://relay.example')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-upstream')
+  }
+
+  const openAntigravityUpstream = async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Antigravity')
+    await selectButtonByText(wrapper, 'admin.accounts.types.antigravityApikey')
+    await fillAntigravityUpstream(wrapper)
+    return wrapper
+  }
+
+  const submitUpstream = async (wrapper: ReturnType<typeof mountModal>) => {
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    return createAccountMock.mock.calls[0]?.[0]
+  }
+
+  it('only antigravity accounts get the tri-state card', async () => {
+    const wrapper = mountModal()
+    expect(wrapper.find('[data-testid="antigravity-thought-policy-override"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'Antigravity')
+    expect(wrapper.find('[data-testid="antigravity-thought-policy-override"]').exists()).toBe(true)
+  })
+
+  it('sends real booleans for explicit on/off and omits inherited keys', async () => {
+    const wrapper = await openAntigravityUpstream()
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-on"]')
+      .trigger('click')
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-continue_thought_only-off"]')
+      .trigger('click')
+    await flushPromises()
+
+    const payload = await submitUpstream(wrapper)
+    expect(payload?.extra?.antigravity_suppress_thought_only_stop).toBe(true)
+    expect(payload?.extra?.antigravity_continue_thought_only).toBe(false)
+  })
+
+  it('keeps the managed pair alongside the existing antigravity extras', async () => {
+    const wrapper = await openAntigravityUpstream()
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-off"]')
+      .trigger('click')
+    const allowOveragesLabel = wrapper
+      .findAll('label')
+      .find((label) => label.text().includes('admin.accounts.allowOverages'))
+    await allowOveragesLabel?.find('input[type="checkbox"]').setValue(true)
+    await flushPromises()
+
+    const payload = await submitUpstream(wrapper)
+    expect(payload?.extra).toMatchObject({
+      allow_overages: true,
+      antigravity_suppress_thought_only_stop: false
+    })
+    expect(payload?.extra).not.toHaveProperty('antigravity_continue_thought_only')
+  })
+
+  it('writes neither key while both switches stay inherited', async () => {
+    const wrapper = await openAntigravityUpstream()
+    const payload = await submitUpstream(wrapper)
+    expect(payload?.extra ?? {}).not.toHaveProperty('antigravity_suppress_thought_only_stop')
+    expect(payload?.extra ?? {}).not.toHaveProperty('antigravity_continue_thought_only')
+  })
+
+  it('resets the overrides when the dialog is closed and reopened', async () => {
+    const wrapper = await openAntigravityUpstream()
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-on"]')
+      .trigger('click')
+    await flushPromises()
+
+    await wrapper.setProps({ show: false })
+    await flushPromises()
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await selectButtonByText(wrapper, 'Antigravity')
+    await selectButtonByText(wrapper, 'admin.accounts.types.antigravityApikey')
+    await fillAntigravityUpstream(wrapper, 'antigravity relay 2')
+
+    const payload = await submitUpstream(wrapper)
+    expect(payload?.extra ?? {}).not.toHaveProperty('antigravity_suppress_thought_only_stop')
+    expect(payload?.extra ?? {}).not.toHaveProperty('antigravity_continue_thought_only')
+  })
+
+  it('carries the overrides through the refresh-token batch import entry', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Antigravity')
+    await wrapper
+      .get('[data-testid="antigravity-thought-policy-override-suppress_thought_only_stop-on"]')
+      .trigger('click')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('antigravity rt import')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="validate-refresh-token"]').trigger('click')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).toMatchObject({
+      antigravity_suppress_thought_only_stop: true
+    })
   })
 })
