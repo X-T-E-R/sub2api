@@ -189,16 +189,33 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('gpt-5.3-codex')
   })
 
-  it('antigravity 映射预设包含图片映射并过滤 OpenAI 预设', async () => {
+  it('antigravity effort 预设提交短模板并过滤 OpenAI 预设', async () => {
     const wrapper = mountModal()
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
 
     const mappingTab = wrapper.findAll('button').find((btn) => btn.text().includes('admin.accounts.modelMapping'))
     expect(mappingTab).toBeTruthy()
     await mappingTab!.trigger('click')
 
-    expect(wrapper.text()).toContain('3.1-Flash-Image透传')
-    expect(wrapper.text()).toContain('3-Pro-Image→3.1')
+    for (const label of ['3.8 Flash · Effort', '3.6 Flash · Effort']) {
+      const preset = wrapper.findAll('button').find((btn) => btn.text().includes(label))
+      expect(preset).toBeTruthy()
+      await preset!.trigger('click')
+    }
     expect(wrapper.text()).not.toContain('GPT-5.3 Codex Spark')
+
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      credentials: {
+        model_mapping: {
+          'gemini-3.8-flash': 'gemini-3.8-flash-{effort}',
+          'gemini-3.6-flash': 'gemini-3.6-flash-{effort}'
+        }
+      }
+    })
   })
 
   it('仅勾选模型限制且白名单留空时，应提交空 model_mapping 以支持所有模型', async () => {
