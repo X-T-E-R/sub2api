@@ -580,9 +580,16 @@ export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
 }
 
 export interface SyncUpstreamModelsResult {
+  /** Live upstream raw model IDs, or the configured model IDs when source is 'configured'. */
   models: string[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
+  /** Where the model list came from: the live upstream endpoint or the configured fallback. */
+  source: 'upstream' | 'configured'
+  /** True only when the list was fetched from the upstream model-list endpoint. */
+  live: boolean
+  /** Request model → upstream model projection; empty unless the live list was usable. */
+  model_mapping: Record<string, string>
 }
 
 export interface UpstreamModelSyncWarning {
@@ -600,12 +607,16 @@ export interface UpstreamModelMetadata {
   input_modalities?: string[]
   context_window?: number
   max_output_tokens?: number
+  /** Capability provenance for this model. */
+  source?: 'upstream' | 'models.dev' | 'upstream+models.dev'
+  /** Provenance of supported_reasoning_levels. */
+  reasoning_levels_source?: 'upstream' | 'catalog_suffix' | 'models.dev'
 }
 
 /**
  * Sync live supported models from the account's upstream model-list endpoint
  * @param id - Account ID
- * @returns List of model IDs returned by the upstream
+ * @returns Catalog with live raw model IDs, provenance and the request→upstream mapping
  */
 export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
   const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
@@ -623,7 +634,7 @@ export interface SyncUpstreamPreviewParams {
 /**
  * Preview upstream models without a saved account (create-flow)
  * @param params - Connection credentials
- * @returns List of model IDs returned by the upstream
+ * @returns Catalog with live raw model IDs, provenance and the request→upstream mapping
  */
 export async function syncUpstreamModelsPreview(params: SyncUpstreamPreviewParams): Promise<SyncUpstreamModelsResult> {
   const { data } = await apiClient.post<SyncUpstreamModelsResult>('/admin/accounts/models/sync-upstream-preview', params)

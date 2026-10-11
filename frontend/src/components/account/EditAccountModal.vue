@@ -2875,7 +2875,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -2949,6 +2949,10 @@ import {
   splitModelMappingObject,
   isValidWildcardPattern
 } from '@/composables/useModelWhitelist'
+import {
+  isSameUpstreamCatalogMapping,
+  resolveUpstreamCatalogProjection
+} from '@/utils/upstreamModelCatalog'
 
 interface Props {
   show: boolean
@@ -4124,6 +4128,12 @@ watch(
   { immediate: true }
 )
 
+// 关闭弹窗或切换账号会让在途的上游同步结果失效，避免旧结果覆盖新的编辑状态。
+watch([() => props.show, () => props.account?.id], () => {
+  antigravitySyncEpoch += 1
+  isSyncingAntigravityUpstream.value = false
+})
+
 // Model mapping helpers
 const addModelMapping = () => {
   modelMappings.value.push({ from: '', to: '' })
@@ -4167,41 +4177,75 @@ const addAntigravityPresetMapping = (from: string, to: string) => {
   antigravityModelMappings.value.push({ from, to })
 }
 
-const syncAntigravityUpstreamModels = async () => {
-  if (!props.account?.id || isSyncingAntigravityUpstream.value) return
+/**
+ * Antigravity 的保存路径只从 antigravityModelMappings 生成 model_mapping，
+ * 因此实时投影必须整表替换（含 {effort} 等真实上游目标），不能追加自映射。
+ * AG 账号不渲染白名单选择器（API-key 区块已排除 antigravity），映射表是 AG 唯一入口。
+ */
+const replaceAntigravityModelMappings = (entries: Array<{ from: string; to: string }>) => {
+  antigravityModelMappings.value = entries.map((entry) => ({ from: entry.from, to: entry.to }))
+}
 
+// 关闭弹窗或切换账号后，在途同步的结果属于旧编辑状态，必须丢弃。
+let antigravitySyncEpoch = 0
+let isDisposed = false
+
+onBeforeUnmount(() => {
+  isDisposed = true
+  antigravitySyncEpoch += 1
+})
+
+const isStaleAntigravitySync = (epoch: number, accountId: number) => {
+  if (isDisposed || epoch !== antigravitySyncEpoch) return true
+  return props.account?.id !== accountId
+}
+
+const syncAntigravityUpstreamModels = async () => {
+  const accountId = props.account?.id
+  if (!accountId || isSyncingAntigravityUpstream.value) return
+
+  const epoch = ++antigravitySyncEpoch
   isSyncingAntigravityUpstream.value = true
   try {
-    const result = await adminAPI.accounts.syncUpstreamModels(props.account.id)
-    const upstreamModels = result.models.map((model) => model.trim()).filter(Boolean)
-    if (upstreamModels.length === 0) {
+    const result = await adminAPI.accounts.syncUpstreamModels(accountId)
+    if (isStaleAntigravitySync(epoch, accountId)) return
+
+    const projection = resolveUpstreamCatalogProjection(result)
+    if (projection.outcome === 'empty') {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
       return
     }
-
-    let addedCount = 0
-    for (const model of upstreamModels) {
-      const exists = antigravityModelMappings.value.some((mapping) => mapping.from === model)
-      if (!exists) {
-        antigravityModelMappings.value.push({ from: model, to: model })
-        addedCount += 1
-      }
-    }
-
-    if (result.warnings?.some((warning) => warning.code === 'upstream_model_metadata_incomplete')) {
-      appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
+    if (!projection.applied) {
+      // 配置回退或没有可用投影：保持当前映射表不变
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsConfiguredFallback'))
       return
     }
-    if (addedCount > 0) {
-      appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
+
+    // 整表替换：行内容即后端投影，禁止从 models 本地自映射
+    const unchanged = isSameUpstreamCatalogMapping(antigravityModelMappings.value, projection.entries)
+    replaceAntigravityModelMappings(projection.entries)
+
+    if (unchanged) {
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges'))
     } else {
-      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
+      appStore.showSuccess(
+        t('admin.accounts.syncUpstreamModelsSuccess', {
+          count: projection.entries.length,
+          total: projection.modelIds.length
+        })
+      )
+    }
+    if (result.warnings?.some((warning) => warning.code === 'upstream_model_metadata_incomplete')) {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
     }
   } catch (error) {
+    if (isStaleAntigravitySync(epoch, accountId)) return
     const message = error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed')
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
   } finally {
-    isSyncingAntigravityUpstream.value = false
+    if (!isDisposed && epoch === antigravitySyncEpoch) {
+      isSyncingAntigravityUpstream.value = false
+    }
   }
 }
 

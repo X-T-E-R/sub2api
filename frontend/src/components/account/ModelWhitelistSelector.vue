@@ -145,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { accountsAPI } from '@/api/admin/accounts'
@@ -154,6 +154,12 @@ import { useClipboard } from '@/composables/useClipboard'
 import ModelIcon from '@/components/common/ModelIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
+import {
+  isSameModelKeySet,
+  resolveUpstreamCatalogProjection,
+  upstreamCatalogMappingRecord,
+  type UpstreamCatalogApplied
+} from '@/utils/upstreamModelCatalog'
 
 const { t } = useI18n()
 
@@ -172,7 +178,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
-  'upstream-synced': []
+  'upstream-synced': [payload: UpstreamCatalogApplied]
 }>()
 
 const appStore = useAppStore()
@@ -292,10 +298,53 @@ const fillRelated = () => {
   emit('update:modelValue', newModels)
 }
 
+/**
+ * Connection snapshot taken when a sync starts. A completion is stale when the
+ * account or credentials changed, the modal was closed (unmounted), or a newer
+ * sync replaced this one — a stale answer must not rewrite editing state.
+ */
+interface SyncRequestContext {
+  accountId: number | null
+  platform: string | null
+  type: string | null
+  baseUrl: string | null
+  apiKey: string | null
+}
+
+let syncEpoch = 0
+let isDisposed = false
+
+onBeforeUnmount(() => {
+  isDisposed = true
+  syncEpoch += 1
+})
+
+const currentSyncContext = (): SyncRequestContext => ({
+  accountId: props.accountId ?? null,
+  platform: props.syncCredentials?.platform ?? null,
+  type: props.syncCredentials?.type ?? null,
+  baseUrl: props.syncCredentials?.base_url ?? null,
+  apiKey: props.syncCredentials?.api_key ?? null
+})
+
+const isStaleSyncCompletion = (epoch: number, started: SyncRequestContext) => {
+  if (isDisposed || epoch !== syncEpoch) return true
+  const current = currentSyncContext()
+  return (
+    started.accountId !== current.accountId ||
+    started.platform !== current.platform ||
+    started.type !== current.type ||
+    started.baseUrl !== current.baseUrl ||
+    started.apiKey !== current.apiKey
+  )
+}
+
 const syncUpstreamModels = async () => {
   if (isSyncingUpstream.value) return
   if (!props.accountId && !props.syncCredentials) return
 
+  const started = currentSyncContext()
+  const epoch = ++syncEpoch
   isSyncingUpstream.value = true
   try {
     let result
@@ -307,40 +356,48 @@ const syncUpstreamModels = async () => {
       return
     }
 
-    const upstreamModels = result.models.map(model => model.trim()).filter(Boolean)
-    if (upstreamModels.length === 0) {
+    if (isStaleSyncCompletion(epoch, started)) return
+
+    const projection = resolveUpstreamCatalogProjection(result)
+    if (projection.outcome === 'empty') {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
       return
     }
-
-    if (!props.accountId) {
-      emit('upstream-synced')
-    }
-
-    const newModels = [...props.modelValue]
-    let addedCount = 0
-    for (const model of upstreamModels) {
-      if (!newModels.includes(model)) {
-        newModels.push(model)
-        addedCount += 1
-      }
-    }
-
-    emit('update:modelValue', newModels)
-    if (result.warnings?.some(warning => warning.code === 'upstream_model_metadata_incomplete')) {
-      appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
+    if (!projection.applied) {
+      // Configured fallback or no usable mapping: keep the current selection.
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsConfiguredFallback'))
       return
     }
-    if (addedCount > 0) {
-      appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
+
+    const unchanged = isSameModelKeySet(props.modelValue, projection.keys)
+    // Replace, never append: the live keys are the request-side model names.
+    emit('update:modelValue', [...projection.keys])
+    emit('upstream-synced', {
+      models: [...projection.keys],
+      modelMapping: upstreamCatalogMappingRecord(projection.entries)
+    })
+
+    if (unchanged) {
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges'))
     } else {
-      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
+      appStore.showSuccess(
+        t('admin.accounts.syncUpstreamModelsSuccess', {
+          count: projection.entries.length,
+          total: projection.modelIds.length
+        })
+      )
+    }
+    if (result.warnings?.some(warning => warning.code === 'upstream_model_metadata_incomplete')) {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
     }
   } catch (error) {
+    if (isStaleSyncCompletion(epoch, started)) return
     const message = error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed')
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
   } finally {
-    isSyncingUpstream.value = false
+    if (!isDisposed && epoch === syncEpoch) {
+      isSyncingUpstream.value = false
+    }
   }
 }
 

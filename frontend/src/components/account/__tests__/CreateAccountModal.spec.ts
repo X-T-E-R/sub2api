@@ -6,6 +6,7 @@ const {
   createAccountMock,
   probeUpstreamBillingMock,
   syncUpstreamModelsMock,
+  previewCatalogMock,
   showWarningMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
@@ -14,6 +15,7 @@ const {
   createAccountMock: vi.fn(),
   probeUpstreamBillingMock: vi.fn(),
   syncUpstreamModelsMock: vi.fn(),
+  previewCatalogMock: vi.fn(),
   showWarningMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
@@ -58,6 +60,10 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn().mockResolvedValue([]),
+  accountsAPI: {
+    syncUpstreamModels: vi.fn(),
+    syncUpstreamModelsPreview: previewCatalogMock,
+  },
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -69,6 +75,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
+import ModelWhitelistSelector from '../ModelWhitelistSelector.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -133,7 +140,7 @@ const ModelWhitelistSelectorStub = defineComponent({
   >models</button>`,
 })
 
-function mountModal(groups: any[] = []) {
+function mountModal(groups: any[] = [], realSelector = false) {
   return mount(CreateAccountModal, {
     props: { show: true, proxies: [], groups },
     global: {
@@ -147,7 +154,7 @@ function mountModal(groups: any[] = []) {
         ProxySelector: true,
         ProxyAdBanner: true,
         GroupSelector: GroupSelectorStub,
-        ModelWhitelistSelector: ModelWhitelistSelectorStub,
+        ...(realSelector ? {} : { ModelWhitelistSelector: ModelWhitelistSelectorStub }),
         QuotaLimitCard: true,
       },
     },
@@ -569,5 +576,51 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await flushPromises()
 
     expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(false)
+  })
+
+  it('applies the live preview projection to the created account model mapping', async () => {
+    previewCatalogMock.mockReset().mockResolvedValue({
+      models: ['gpt-5.2', 'gpt-5.2-2025-12-11'],
+      source: 'upstream',
+      live: true,
+      model_mapping: {
+        'gpt-5.2': 'gpt-5.2',
+        'gpt-5.2-2025-12-11': 'gpt-5.2-2025-12-11'
+      }
+    })
+
+    const wrapper = mountModal([], true)
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Preview account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+
+    const selector = wrapper.findComponent(ModelWhitelistSelector)
+    expect(selector.exists()).toBe(true)
+    const syncButton = selector
+      .findAll('button')
+      .find((button) => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(previewCatalogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: 'openai',
+        type: 'apikey',
+        api_key: 'test-api-key'
+      })
+    )
+    expect(selector.props('modelValue')).toEqual(['gpt-5.2', 'gpt-5.2-2025-12-11'])
+
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_mapping).toEqual({
+      'gpt-5.2': 'gpt-5.2',
+      'gpt-5.2-2025-12-11': 'gpt-5.2-2025-12-11'
+    })
+    // A live preview also drives the post-create capability sync.
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
   })
 })
