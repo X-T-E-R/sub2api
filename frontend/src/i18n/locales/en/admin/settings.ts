@@ -1216,6 +1216,22 @@ export default {
         saveFailed: 'Failed to save the account test prompt',
         affectsHint: 'Saving applies to new tests only; a test that is already running keeps the prompt it started with.'
       },
+      antigravityThoughtPolicy: {
+        title: 'Antigravity thought-only responses',
+        description: 'Applies to Antigravity responses that end with thinking and no visible text or tool call. Two independent switches, both off by default.',
+        suppressLabel: 'Suppress the thinking-only completion signal',
+        suppressHint: 'Keeps thinking, signature and usage, but no longer reports a successful finish, so the client decides what to do next.',
+        continueLabel: 'Automatic gateway continuation',
+        continueHint: 'Resends the received thinking and signature once — at most one attempt, with no added prompt text.',
+        independenceHint: 'Suppression alone never triggers a continuation; with both off the current behavior is unchanged.',
+        stateOn: 'On',
+        stateOff: 'Off',
+        affectsHint: 'Saving applies to new requests; a request already in flight keeps the values it started with.',
+        save: 'Save thought-only handling',
+        saved: 'Antigravity thought-only handling saved',
+        loadFailed: 'Failed to load Antigravity thought-only handling',
+        saveFailed: 'Failed to save Antigravity thought-only handling'
+      },
       codexSessionAffinity: {
         title: 'Codex session account preference',
         description: 'Choose groups where new explicit Codex root sessions record a preferred current account; eligible account failures may move them to another suitable account.',

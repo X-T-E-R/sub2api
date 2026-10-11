@@ -1210,6 +1210,22 @@ export default {
         saveFailed: '保存账号测试提示词失败',
         affectsHint: '保存只作用于新测试；已开始运行的测试仍使用最初发送的提示词。'
       },
+      antigravityThoughtPolicy: {
+        title: 'Antigravity 纯思考响应',
+        description: '作用于只产出思考、没有正文和工具调用的 Antigravity 响应。两个开关独立，默认都关闭。',
+        suppressLabel: '抑制纯思考完成信号',
+        suppressHint: '保留思考、签名与用量，但不再报告成功完成，由客户端自行处理后续。',
+        continueLabel: '网关自动续写',
+        continueHint: '把收到的思考与签名补发一次：最多一次、不新增任何提示词文本。',
+        independenceHint: '只开启抑制不会触发续写；两个都关闭时保持现有行为。',
+        stateOn: '已开启',
+        stateOff: '已关闭',
+        affectsHint: '保存只作用于新请求；已开始处理的请求仍使用开始时的取值。',
+        save: '保存纯思考响应处理',
+        saved: 'Antigravity 纯思考响应处理已保存',
+        loadFailed: '加载 Antigravity 纯思考响应处理失败',
+        saveFailed: '保存 Antigravity 纯思考响应处理失败'
+      },
       codexSessionAffinity: {
         title: 'Codex 会话账号偏好',
         description: '选择允许新建显式 Codex 根会话记录当前账号偏好的分组；符合条件的账号失败时可切换到其他合适账号。',

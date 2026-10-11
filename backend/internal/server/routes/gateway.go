@@ -37,7 +37,7 @@ func RegisterGatewayRoutes(
 	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize)
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
-	endpointNorm := handler.InboundEndpointMiddleware()
+	endpointNorm := withAntigravityThoughtPolicySnapshot(handler.InboundEndpointMiddleware())
 	compositeTarget := compositeTargetPlatformMiddleware(compositeResolver)
 	compositeGeminiTarget := compositeGeminiTargetPlatformMiddleware(compositeResolver)
 

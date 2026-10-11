@@ -565,6 +565,8 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.PUT("/model-test", h.Admin.Setting.UpdateModelTestPrompt)
 		adminSettings.GET("/antigravity-model-effort", h.Admin.Setting.GetAntigravityModelEffort)
 		adminSettings.PUT("/antigravity-model-effort", h.Admin.Setting.UpdateAntigravityModelEffort)
+		adminSettings.GET("/antigravity-thought-policy", h.Admin.Setting.GetAntigravityThoughtPolicy)
+		adminSettings.PUT("/antigravity-thought-policy", h.Admin.Setting.UpdateAntigravityThoughtPolicy)
 		adminSettings.GET("/codex-session-affinity", h.Admin.Setting.GetCodexSessionAffinity)
 		adminSettings.PUT("/codex-session-affinity", h.Admin.Setting.UpdateCodexSessionAffinity)
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
