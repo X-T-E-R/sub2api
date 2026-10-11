@@ -485,7 +485,7 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	return opts
 }
 
-func (s *AntigravityGatewayService) getClaudeMessagesTransformOptions(ctx context.Context) antigravity.TransformOptions {
+func (s *AntigravityGatewayService) getClaudeMessagesTransformOptions(ctx context.Context, account *Account) antigravity.TransformOptions {
 	opts := s.getClaudeTransformOptions(ctx)
 	opts.GeminiMessages.Enabled = true
 	if s.settingService != nil && s.settingService.cfg != nil {
@@ -493,6 +493,12 @@ func (s *AntigravityGatewayService) getClaudeMessagesTransformOptions(ctx contex
 		opts.GeminiMessages.Enabled = !policy.Disabled
 		opts.GeminiMessages.Models = policy.Models
 	}
+	// Task24 B: with the continuation switch effective for this account, a signed
+	// thinking-only tail the caller sent back is kept as the final model turn instead of
+	// being trimmed at the user boundary and answered with a synthetic prefill
+	// instruction. The adapter still refuses an unsigned or otherwise unreplayable tail,
+	// so nothing is invented here.
+	opts.GeminiMessages.AllowThinkingTailContinuation = ResolveAntigravityThoughtPolicy(ctx, account).ContinueThoughtOnly
 	return opts
 }
 

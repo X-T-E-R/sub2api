@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 type antigravityStreamResult struct {
@@ -189,13 +191,12 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	}
 
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
-	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
 	}
-	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf[:0], maxLineSize)
+	// Task24: A/B state for this request, nil while both effective switches are off.
+	cont := antigravityThoughtContinuationFromGin(c)
 	usage := &ClaudeUsage{}
 	var firstTokenMs *int
 
@@ -203,33 +204,51 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 		line string
 		err  error
 	}
-	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理
-	events := make(chan scanEvent, 16)
-	done := make(chan struct{})
-	sendEvent := func(ev scanEvent) bool {
-		select {
-		case events <- ev:
-			return true
-		case <-done:
-			return false
-		}
-	}
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-	go func(scanBuf *sseScannerBuf64K) {
-		defer putSSEScannerBuf64K(scanBuf)
-		defer close(events)
-		for scanner.Scan() {
-			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
-				return
+	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理。每个 source 持有自己的 done，
+	// Task24 的追加生成为第二个上游响应再起一个 source。
+	startScanner := func(body io.Reader) (<-chan scanEvent, func()) {
+		scanner := bufio.NewScanner(body)
+		scanBuf := getSSEScannerBuf64K()
+		scanner.Buffer(scanBuf[:0], maxLineSize)
+		events := make(chan scanEvent, 16)
+		done := make(chan struct{})
+		sendEvent := func(ev scanEvent) bool {
+			select {
+			case events <- ev:
+				return true
+			case <-done:
+				return false
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			_ = sendEvent(scanEvent{err: err})
+		go func() {
+			defer putSSEScannerBuf64K(scanBuf)
+			defer close(events)
+			for scanner.Scan() {
+				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
+				if !sendEvent(scanEvent{line: scanner.Text()}) {
+					return
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				_ = sendEvent(scanEvent{err: err})
+			}
+		}()
+		return events, func() { close(done) }
+	}
+	events, stopScanner := startScanner(resp.Body)
+	var scannerStops []func()
+	var extraResp *http.Response
+	defer func() {
+		stopScanner()
+		for _, stop := range scannerStops {
+			stop()
 		}
-	}(scanBuf)
-	defer close(done)
+		if extraResp != nil && extraResp.Body != nil {
+			_ = extraResp.Body.Close()
+		}
+	}()
 
 	// 上游数据间隔超时保护（防止上游挂起长期占用连接）
 	streamInterval := time.Duration(0)
@@ -274,20 +293,105 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 
+	// Task24 A/B: a successful terminal (finishReason=STOP) is held back until the
+	// downstream decision is known, so that A can suppress only that completion signal and
+	// B can append its single generation before the client sees one terminal. Nothing is
+	// rewritten while the response keeps producing content: as soon as this generation
+	// stops being a thought-only completion the held frames are released verbatim.
+	type heldFrame struct {
+		frame   string
+		payload string
+	}
+	var heldFrames []heldFrame
+	holdTerminal := false
+	flushHeld := func(suppressSuccessfulTerminal bool) {
+		if len(heldFrames) == 0 {
+			holdTerminal = false
+			return
+		}
+		for _, held := range heldFrames {
+			frame := held.frame
+			if suppressSuccessfulTerminal && held.payload != "" {
+				if stripped, changed := antigravityStripSuccessfulFinishReason([]byte(held.payload)); changed {
+					frame = "data: " + string(stripped) + "\n\n"
+				}
+			}
+			cw.Write([]byte(frame))
+		}
+		heldFrames = nil
+		holdTerminal = false
+	}
+	emitFrame := func(frame, payload string) {
+		if holdTerminal {
+			heldFrames = append(heldFrames, heldFrame{frame: frame, payload: payload})
+			return
+		}
+		cw.Write([]byte(frame))
+	}
+	result := func(clientDisconnect bool) *antigravityStreamResult {
+		final := *usage
+		if cont != nil && cont.hasExtraGeneration() {
+			// 两次生成对下游是一条响应，usage 必须是两代累计值。
+			final = cont.cumulativeUsage(final)
+		}
+		return &antigravityStreamResult{usage: &final, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnect}
+	}
+	defer func() {
+		if holdTerminal {
+			// 任何提前退出的路径都要把暂存的终态按 A 的有效设置放行，绝不悬挂。
+			flushHeld(cont != nil && cont.suppressFinalTerminal())
+		}
+	}()
+
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A
+				// 的有效设置决定，第一代 usage 照常入账。
+				if cont != nil && cont.canContinue() && !cw.Disconnected() {
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					if continueErr != nil {
+						// 追加生成失败：第一代的成功完成信号一律不发，改为协议错误；已收到
+						// 的内容与累计 usage 照常下发。
+						cont.recordFailure(c, "gemini_stream", continueErr)
+						flushHeld(true)
+						if !errors.Is(continueErr, context.Canceled) && !errors.Is(continueErr, context.DeadlineExceeded) {
+							sendErrorEvent("thought_continuation_error")
+						}
+						return result(cw.Disconnected()), cont.failureError()
+					}
+					if nextResp != nil {
+						// 整条响应只出现一次终态：第一代的成功完成信号让位给追加生成。
+						flushHeld(true)
+						extraResp = nextResp
+						scannerStops = append(scannerStops, stopScanner)
+						events, stopScanner = startScanner(nextResp.Body)
+						continue
+					}
+				}
+				flushHeld(cont != nil && cont.suppressFinalTerminal())
+				return result(cw.Disconnected()), nil
 			}
 			if ev.err != nil {
+				if cont != nil && cont.hasExtraGeneration() {
+					// 追加生成的读取失败：不发第一代的成功终态，改为协议错误；已计量的
+					// usage 与已收到的内容照常下发。
+					cont.recordFailure(c, "gemini_stream_read", ev.err)
+					flushHeld(true)
+					if !errors.Is(ev.err, context.Canceled) && !errors.Is(ev.err, context.DeadlineExceeded) {
+						sendErrorEvent("thought_continuation_error")
+					}
+					return result(cw.Disconnected()), cont.failureError()
+				}
 				if disconnect, handled := handleStreamReadError(ev.err, cw.Disconnected(), "antigravity gemini"); handled {
-					return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: disconnect}, nil
+					flushHeld(cont != nil && cont.suppressFinalTerminal())
+					return result(disconnect), nil
 				}
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity): max_size=%d error=%v", maxLineSize, ev.err)
 					sendErrorEvent("response_too_large")
-					return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, ev.err
+					return result(false), ev.err
 				}
 				sendErrorEvent("stream_read_error")
 				return nil, ev.err
@@ -301,7 +405,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 				if payload == "" || payload == "[DONE]" {
-					cw.Fprintf("%s\n", line)
+					emitFrame(line+"\n", "")
 					continue
 				}
 
@@ -337,11 +441,28 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 					firstTokenMs = &ms
 				}
 
-				cw.Fprintf("data: %s\n\n", payload)
+				if cont != nil {
+					cont.observePayload(inner)
+					if holdTerminal && !cont.withholdSuccessfulTerminal() {
+						// 这一代不再是只有思考的正常完成：暂存帧原样放行，不误伤正文/工具。
+						flushHeld(false)
+					}
+					if !holdTerminal && cont.withholdSuccessfulTerminal() &&
+						antigravityPayloadHasSuccessfulFinishReason(inner) {
+						holdTerminal = true
+					}
+					if cont.hasExtraGeneration() {
+						if withBaseline, changed := antigravityAddUsageBaseline([]byte(payload), cont.baseRawUsage); changed {
+							payload = string(withBaseline)
+						}
+					}
+				}
+
+				emitFrame("data: "+payload+"\n\n", payload)
 				continue
 			}
 
-			cw.Fprintf("%s\n", line)
+			emitFrame(line+"\n", "")
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
@@ -350,14 +471,15 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			}
 			if cw.Disconnected() {
 				logger.LegacyPrintf("service.antigravity_gateway", "Upstream timeout after client disconnect (antigravity gemini), returning collected usage")
-				return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
+				flushHeld(cont != nil && cont.suppressFinalTerminal())
+				return result(true), nil
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity)")
 			if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
 				capture.MarkTimeout()
 			}
 			sendErrorEvent("stream_timeout")
-			return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
+			return result(false), fmt.Errorf("stream data interval timeout")
 
 		case <-keepaliveCh:
 			if cw.Disconnected() {
@@ -388,53 +510,73 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 		c.Writer = &geminiCaptureResponseWriter{ResponseWriter: originalWriter, capture: capture}
 		defer func() { c.Writer = originalWriter }()
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	// Task24: A/B state for this request, nil while both effective switches are off.
+	cont := antigravityThoughtContinuationFromGin(c)
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
 	}
-	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf[:0], maxLineSize)
 
 	usage := &ClaudeUsage{}
 	var firstTokenMs *int
 	var last map[string]any
 	var lastWithParts map[string]any
 	var collectedParts []map[string]any // 收集所有 parts，保留 thinking/tool/signature 顺序
+	// Task24 B：追加生成开始时第一代的响应体被移到快照里；只有追加生成真的产生了响应体时，
+	// 下游身体才属于第二代，第一代的用量只能累计一次。
+	var firstLast, firstLastWithParts map[string]any
+	lastFromAppended, lastWithPartsFromAppended := false, false
 
 	type scanEvent struct {
 		line string
 		err  error
 	}
 
-	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理
-	events := make(chan scanEvent, 16)
-	done := make(chan struct{})
-	sendEvent := func(ev scanEvent) bool {
-		select {
-		case events <- ev:
-			return true
-		case <-done:
-			return false
-		}
-	}
-
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-	go func(scanBuf *sseScannerBuf64K) {
-		defer putSSEScannerBuf64K(scanBuf)
-		defer close(events)
-		for scanner.Scan() {
-			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
-				return
+	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理；每个 source 持有自己的 done，
+	// Task24 的追加生成为第二个上游响应再起一个 source。
+	startScanner := func(body io.Reader) (<-chan scanEvent, func()) {
+		scanner := bufio.NewScanner(body)
+		scanBuf := getSSEScannerBuf64K()
+		scanner.Buffer(scanBuf[:0], maxLineSize)
+		events := make(chan scanEvent, 16)
+		done := make(chan struct{})
+		sendEvent := func(ev scanEvent) bool {
+			select {
+			case events <- ev:
+				return true
+			case <-done:
+				return false
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			_ = sendEvent(scanEvent{err: err})
+		go func() {
+			defer putSSEScannerBuf64K(scanBuf)
+			defer close(events)
+			for scanner.Scan() {
+				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
+				if !sendEvent(scanEvent{line: scanner.Text()}) {
+					return
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				_ = sendEvent(scanEvent{err: err})
+			}
+		}()
+		return events, func() { close(done) }
+	}
+	events, stopScanner := startScanner(resp.Body)
+	var scannerStops []func()
+	var extraResp *http.Response
+	defer func() {
+		stopScanner()
+		for _, stop := range scannerStops {
+			stop()
 		}
-	}(scanBuf)
-	defer close(done)
+		if extraResp != nil && extraResp.Body != nil {
+			_ = extraResp.Body.Close()
+		}
+	}()
 
 	// 上游数据间隔超时保护（防止上游挂起长期占用连接）
 	streamInterval := time.Duration(0)
@@ -455,12 +597,37 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				// Task24 B：第一代只有思考且正常完成时，追加一次生成（原样信封 + 实际
+				// 收到的思考/签名）。追加失败不变成硬错误：下游拿到第一代的合法响应，
+				// 终态由 A 的有效设置决定，第一代 usage 照常入账。
+				if cont != nil && cont.canContinue() {
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					if continueErr != nil {
+						// 追加生成失败：非流式响应以非成功终态结束（finishReason 被抑制），
+						// 内容与第一代 usage 照常返回，调用方正常计费。
+						cont.recordFailure(c, "gemini_collect", continueErr)
+					} else if nextResp != nil {
+						// 新的一代开始：第一代的响应体放入快照并清空当前代的收集状态，
+						// 避免只有第一代有内容时它的响应体与用量被累计两次。
+						firstLast, firstLastWithParts = last, lastWithParts
+						last, lastWithParts, usage = nil, nil, nil
+						extraResp = nextResp
+						scannerStops = append(scannerStops, stopScanner)
+						events, stopScanner = startScanner(nextResp.Body)
+						continue
+					}
+				}
 				// 流结束，返回收集的响应
 				goto returnResponse
 			}
 			if ev.err != nil {
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity non-stream): max_size=%d error=%v", maxLineSize, ev.err)
+				}
+				if cont != nil && cont.hasExtraGeneration() {
+					// 追加生成的读取失败照常返回第一代的合法响应，usage 累计入账。
+					cont.recordFailure(c, "gemini_collect_read", ev.err)
+					goto returnResponse
 				}
 				return nil, ev.err
 			}
@@ -496,6 +663,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			}
 
 			last = parsed
+			lastFromAppended = cont != nil && cont.hasExtraGeneration()
 
 			// 提取 usage
 			if u := extractGeminiUsage(inner); u != nil {
@@ -519,8 +687,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			// 保留最后一个有 parts 的响应
 			if parts := extractGeminiParts(parsed); len(parts) > 0 {
 				lastWithParts = parsed
+				lastWithPartsFromAppended = cont != nil && cont.hasExtraGeneration()
 				// 收集所有 parts，保留 thinking/tool/signature 的原始顺序
 				collectedParts = append(collectedParts, parts...)
+			}
+
+			if cont != nil {
+				cont.observePayload(inner)
 			}
 
 		case <-intervalCh:
@@ -534,6 +707,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	}
 
 returnResponse:
+	if cont != nil && cont.hasExtraGeneration() && last == nil && lastWithParts == nil {
+		// 追加生成没有产生任何可解析数据：下游看到的仍是第一代的合法响应，用量取第一代
+		// （它已经记入累计基数，这里不能再叠加一次）。
+		last, lastWithParts = firstLast, firstLastWithParts
+		usage = nil
+	}
+
 	// 选择最后一个有效响应
 	finalResponse := pickGeminiCollectResult(last, lastWithParts)
 
@@ -553,13 +733,41 @@ returnResponse:
 		finalResponse = mergeCollectedPartsToResponse(finalResponse, collectedParts)
 	}
 
+	if cont != nil {
+		// 只有最终响应体真的来自追加生成时，此前各代的原始用量才能叠加到它上面；否则身体
+		// 还是第一代的，叠加会把第一代算两次。
+		bodyFromAppendedGeneration := false
+		if lastWithParts != nil {
+			bodyFromAppendedGeneration = lastWithPartsFromAppended
+		} else if last != nil {
+			bodyFromAppendedGeneration = lastFromAppended
+		}
+		if cont.hasExtraGeneration() {
+			if bodyFromAppendedGeneration {
+				// 下游与计费必须看到两代上游用量的累计值。
+				antigravityAddUsageBaselineToResponse(finalResponse, cont.baseRawUsage)
+			}
+			finalUsage := ClaudeUsage{}
+			if usage != nil {
+				finalUsage = *usage
+			}
+			finalUsage = cont.cumulativeUsage(finalUsage)
+			usage = &finalUsage
+		}
+		if cont.suppressFinalTerminal() {
+			// Task24 A：只抑制成功终态，content/usageMetadata 原样保留。
+			antigravityStripSuccessfulFinishReasonFromResponse(finalResponse)
+		}
+	}
+
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
 	c.Data(http.StatusOK, "application/json", respBody)
 
-	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
+	// 追加生成失败时，第一代的合法响应体已经写出（非成功终态），结果与终态错误一起返回。
+	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, cont.failureError()
 }
 
 // getOrCreateGeminiParts 获取 Gemini 响应的 parts 结构，返回深拷贝和更新回调
@@ -788,53 +996,72 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	if upstreamResponseModelObserverFromContext(c) == nil {
 		beginUpstreamResponseModelObservation(c)
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	// Task24: A/B state for this request, nil while both effective switches are off.
+	cont := antigravityThoughtContinuationFromGin(c)
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
 	}
-	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf[:0], maxLineSize)
 
 	var firstTokenMs *int
 	var last map[string]any
 	var lastWithParts map[string]any
 	var collectedParts []map[string]any // 收集所有 parts（包括 text、thinking、functionCall、inlineData 等）
 	var meaningfulResponse bool
+	// Task24 B：追加生成开始时第一代的响应体被移到快照里；只有追加生成真的产生了响应体时，
+	// 最终身体才属于第二代，第一代的原始用量只能累计一次。
+	var firstLast, firstLastWithParts map[string]any
+	lastFromAppended, lastWithPartsFromAppended := false, false
 
 	type scanEvent struct {
 		line string
 		err  error
 	}
-
-	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理
-	events := make(chan scanEvent, 16)
-	done := make(chan struct{})
-	sendEvent := func(ev scanEvent) bool {
-		select {
-		case events <- ev:
-			return true
-		case <-done:
-			return false
-		}
-	}
-
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-	go func(scanBuf *sseScannerBuf64K) {
-		defer putSSEScannerBuf64K(scanBuf)
-		defer close(events)
-		for scanner.Scan() {
-			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
-				return
+	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理；每个 source 持有自己的 done，
+	// 因此 Task24 的追加生成可以在读完第一代之后换到第二代。
+	startScanner := func(body io.Reader) (<-chan scanEvent, func()) {
+		scanner := bufio.NewScanner(body)
+		scanBuf := getSSEScannerBuf64K()
+		scanner.Buffer(scanBuf[:0], maxLineSize)
+		events := make(chan scanEvent, 16)
+		done := make(chan struct{})
+		sendEvent := func(ev scanEvent) bool {
+			select {
+			case events <- ev:
+				return true
+			case <-done:
+				return false
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			_ = sendEvent(scanEvent{err: err})
+		go func() {
+			defer putSSEScannerBuf64K(scanBuf)
+			defer close(events)
+			for scanner.Scan() {
+				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
+				if !sendEvent(scanEvent{line: scanner.Text()}) {
+					return
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				_ = sendEvent(scanEvent{err: err})
+			}
+		}()
+		return events, func() { close(done) }
+	}
+	events, stopScanner := startScanner(resp.Body)
+	var scannerStops []func()
+	var extraResp *http.Response
+	defer func() {
+		stopScanner()
+		for _, stop := range scannerStops {
+			stop()
 		}
-	}(scanBuf)
-	defer close(done)
+		if extraResp != nil && extraResp.Body != nil {
+			_ = extraResp.Body.Close()
+		}
+	}()
 
 	// 上游数据间隔超时保护（防止上游挂起长期占用连接）
 	streamInterval := time.Duration(0)
@@ -855,12 +1082,35 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				// Task24 B：第一代只有思考且正常完成时，追加一次生成（复用原样上游信封
+				// 加实际收到的思考/签名）。追加失败不再变成硬错误：下游拿到第一代的
+				// 合法响应，终态由 A 的有效设置决定，usage 累计入账。
+				if cont != nil && cont.canContinue() {
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					if continueErr != nil {
+						cont.recordFailure(c, "claude_collect", continueErr)
+					} else if nextResp != nil {
+						// 新的一代开始：第一代的响应体放入快照并清空当前代的收集状态，
+						// 避免只有第一代有内容时它的响应体被累计两次。
+						firstLast, firstLastWithParts = last, lastWithParts
+						last, lastWithParts = nil, nil
+						extraResp = nextResp
+						scannerStops = append(scannerStops, stopScanner)
+						events, stopScanner = startScanner(nextResp.Body)
+						continue
+					}
+				}
 				// 流结束，转换并返回响应
 				goto returnResponse
 			}
 			if ev.err != nil {
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity claude non-stream): max_size=%d error=%v", maxLineSize, ev.err)
+				}
+				if cont != nil && cont.hasExtraGeneration() {
+					// 追加生成的读取失败照常返回第一代的合法响应，usage 累计入账。
+					cont.recordFailure(c, "claude_collect_read", ev.err)
+					goto returnResponse
 				}
 				return nil, nil, ev.err
 			}
@@ -883,6 +1133,9 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				continue
 			}
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(inner)
+			if cont != nil {
+				cont.observePayload(inner)
+			}
 
 			var parsed map[string]any
 			if err := json.Unmarshal(inner, &parsed); err != nil {
@@ -890,11 +1143,13 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 			}
 
 			last = parsed
+			lastFromAppended = cont != nil && cont.hasExtraGeneration()
 
 			// 保留最后一个有 parts 的响应，并收集所有 parts
 			parts := extractGeminiParts(parsed)
 			if len(parts) > 0 {
 				lastWithParts = parsed
+				lastWithPartsFromAppended = cont != nil && cont.hasExtraGeneration()
 
 				// 收集所有 parts（text、thinking、functionCall、inlineData 等）
 				collectedParts = append(collectedParts, parts...)
@@ -918,6 +1173,12 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	}
 
 returnResponse:
+	// 追加生成没有产生任何可解析数据时，下游身体仍是第一代的合法响应；它已经在累计基数
+	// 里，所以不能再把第一代的原始用量叠加一次。
+	if cont != nil && cont.hasExtraGeneration() && last == nil && lastWithParts == nil {
+		last, lastWithParts = firstLast, firstLastWithParts
+	}
+
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
 	if !meaningfulResponse {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (claude non-stream), triggering failover")
@@ -936,6 +1197,20 @@ returnResponse:
 		finalResponse = mergeCollectedPartsToResponse(finalResponse, collectedParts)
 	}
 
+	// Task24: 只有最终响应体真的来自追加生成时，下游与计费才能看到两代上游用量的累计值；
+	// 身体还是第一代时叠加会把第一代算两次。
+	if cont != nil && cont.hasExtraGeneration() {
+		bodyFromAppendedGeneration := false
+		if lastWithParts != nil {
+			bodyFromAppendedGeneration = lastWithPartsFromAppended
+		} else if last != nil {
+			bodyFromAppendedGeneration = lastFromAppended
+		}
+		if bodyFromAppendedGeneration {
+			antigravityAddUsageBaselineToResponse(finalResponse, cont.baseRawUsage)
+		}
+	}
+
 	// 序列化为 JSON（Gemini 格式）
 	geminiBody, err := json.Marshal(finalResponse)
 	if err != nil {
@@ -949,6 +1224,14 @@ returnResponse:
 		return nil, nil, fmt.Errorf("failed to parse upstream response: %w", err)
 	}
 
+	// Task24 A：只思考且上游正常完成时，抑制成功终态；思考、签名与 usage 保留。
+	if cont != nil && cont.suppressFinalTerminal() {
+		claudeResp, err = withClaudeSuccessfulTerminalSuppressed(claudeResp)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// 转换为 service.ClaudeUsage
 	usage := &ClaudeUsage{
 		InputTokens:              agUsage.InputTokens,
@@ -958,7 +1241,18 @@ returnResponse:
 		ImageOutputTokens:        agUsage.ImageOutputTokens,
 	}
 
-	return claudeResp, &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
+	return claudeResp, &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, cont.failureError()
+}
+
+// withClaudeSuccessfulTerminalSuppressed replaces the successful stop reason of a
+// non-streaming Anthropic body with null, keeping the content, signatures and usage. The
+// caller keeps the request's effective A/B policy, so the terminal is decided in one place.
+func withClaudeSuccessfulTerminalSuppressed(claudeBody []byte) ([]byte, error) {
+	updated, err := sjson.SetBytes(claudeBody, "stop_reason", nil)
+	if err != nil {
+		return claudeBody, err
+	}
+	return updated, nil
 }
 
 // handleClaudeStreamToNonStreaming 收集上游流式响应，转换为 Claude 非流式格式返回
@@ -966,6 +1260,14 @@ returnResponse:
 func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
 	if err != nil {
+		if IsAntigravityThoughtContinuationError(err) {
+			// Task24：追加生成的终态错误。第一代的合法响应体照常下发（非成功终态），可计费
+			// 结果与错误一起返回；调用方先入账，不 failover，也不再补写错误响应。
+			if claudeResp != nil {
+				writeClaudeNonStreamingResponse(c, claudeResp)
+			}
+			return streamRes, err
+		}
 		var failoverErr *UpstreamFailoverError
 		if errors.As(err, &failoverErr) {
 			return nil, err
@@ -1005,15 +1307,15 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	}
 
 	processor := antigravity.NewStreamingProcessor(originalModel)
+	// Task24: A/B state for this request. It is nil while both effective switches are
+	// off, in which case this loop keeps its exact pre-Task24 behavior and cost.
+	cont := antigravityThoughtContinuationFromGin(c)
 	var firstTokenMs *int
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
-	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
 	}
-	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf[:0], maxLineSize)
 
 	// 辅助函数：转换 antigravity.ClaudeUsage 到 service.ClaudeUsage
 	convertUsage := func(agUsage *antigravity.ClaudeUsage) *ClaudeUsage {
@@ -1032,33 +1334,52 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		line string
 		err  error
 	}
-	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理
-	events := make(chan scanEvent, 16)
-	done := make(chan struct{})
-	sendEvent := func(ev scanEvent) bool {
-		select {
-		case events <- ev:
-			return true
-		case <-done:
-			return false
-		}
-	}
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-	go func(scanBuf *sseScannerBuf64K) {
-		defer putSSEScannerBuf64K(scanBuf)
-		defer close(events)
-		for scanner.Scan() {
-			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
-				return
+	// 独立 goroutine 读取上游，避免读取阻塞影响超时处理。
+	// 每个 source 持有自己的 done，所以 stop 只能调用一次；Task24 的追加生成会为
+	// 第二个上游响应再起一个 source，并在函数退出时统一收尾。
+	startScanner := func(body io.Reader) (<-chan scanEvent, func()) {
+		scanner := bufio.NewScanner(body)
+		scanBuf := getSSEScannerBuf64K()
+		scanner.Buffer(scanBuf[:0], maxLineSize)
+		events := make(chan scanEvent, 16)
+		done := make(chan struct{})
+		sendEvent := func(ev scanEvent) bool {
+			select {
+			case events <- ev:
+				return true
+			case <-done:
+				return false
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			_ = sendEvent(scanEvent{err: err})
+		go func() {
+			defer putSSEScannerBuf64K(scanBuf)
+			defer close(events)
+			for scanner.Scan() {
+				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
+				if !sendEvent(scanEvent{line: scanner.Text()}) {
+					return
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				_ = sendEvent(scanEvent{err: err})
+			}
+		}()
+		return events, func() { close(done) }
+	}
+	events, stopScanner := startScanner(resp.Body)
+	var scannerStops []func()
+	var extraResp *http.Response
+	defer func() {
+		stopScanner()
+		for _, stop := range scannerStops {
+			stop()
 		}
-	}(scanBuf)
-	defer close(done)
+		if extraResp != nil && extraResp.Body != nil {
+			_ = extraResp.Body.Close()
+		}
+	}()
 
 	streamInterval := time.Duration(0)
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamDataIntervalTimeout > 0 {
@@ -1106,33 +1427,86 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 
+	// finalizeFailure 结束一条「已收到的思考 + 累计 usage + 协议错误」的响应：追加生成
+	// 失败绝不能伪装成第一代的成功，但已产生的计费结果必须保留（返回 nil Go error，
+	// 调用方照常入账，也不会触发 failover/新请求）。
+	finalizeFailure := func(contErr error) (*antigravityStreamResult, error) {
+		processor.SetWithholdSuccessfulTerminal(true)
+		processor.SetUsageOnlyTerminal(true)
+		finalEvents, agUsage := processor.Finish()
+		if len(finalEvents) > 0 {
+			cw.Write(finalEvents)
+		}
+		if !errors.Is(contErr, context.Canceled) && !errors.Is(contErr, context.DeadlineExceeded) {
+			sendErrorEvent("thought_continuation_error")
+		}
+		// 终态错误与第一代的可计费结果一起返回：调用方先入账再返回错误，且不做 failover、
+		// 不再写第二个错误响应（协议错误已经发出）。
+		return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, cont.failureError()
+	}
+
 	// finishUsage 是获取 processor 最终 usage 的辅助函数
 	finishUsage := func() *ClaudeUsage {
 		_, agUsage := processor.Finish()
 		return convertUsage(agUsage)
 	}
 
+	// finalize 发送结束事件并返回结果。
+	finalize := func() (*antigravityStreamResult, error) {
+		if cont != nil {
+			// A 的有效设置（或追加生成失败）决定最终终态：抑制成功终态，但仍下发累计
+			// usage，让下游拿到真实用量而不是被当成成功完成。
+			processor.SetWithholdSuccessfulTerminal(cont.suppressFinalTerminal())
+			processor.SetUsageOnlyTerminal(cont.suppressFinalTerminal())
+		}
+		finalEvents, agUsage := processor.Finish()
+		if len(finalEvents) > 0 {
+			cw.Write(finalEvents)
+		} else if !processor.MessageStartSent() && !cw.Disconnected() {
+			// 整个流未收到任何可解析的上游数据（全部 SSE 行均无法被 JSON 解析），
+			// 触发 failover 在同账号重试，避免向客户端发出缺少 message_start 的残缺流
+			logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Claude-Stream] empty stream response (no valid events parsed), triggering failover")
+			return nil, &UpstreamFailoverError{
+				StatusCode:             http.StatusBadGateway,
+				ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
+				RetryableOnSameAccount: true,
+			}
+		}
+		return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				// 上游完成，发送结束事件
-				finalEvents, agUsage := processor.Finish()
-				if len(finalEvents) > 0 {
-					cw.Write(finalEvents)
-				} else if !processor.MessageStartSent() && !cw.Disconnected() {
-					// 整个流未收到任何可解析的上游数据（全部 SSE 行均无法被 JSON 解析），
-					// 触发 failover 在同账号重试，避免向客户端发出缺少 message_start 的残缺流
-					logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Claude-Stream] empty stream response (no valid events parsed), triggering failover")
-					return nil, &UpstreamFailoverError{
-						StatusCode:             http.StatusBadGateway,
-						ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
-						RetryableOnSameAccount: true,
+				// Task24 B：上游正常完成、且本轮只有思考时，追加一次生成。请求复用原样
+				// 上游信封并接上实际收到的思考/签名；只追加一次，不重入重试循环，也不
+				// 重开调度/粘性身份/并发槽位。
+				if cont != nil && cont.canContinue() && !cw.Disconnected() {
+					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					if continueErr != nil {
+						cont.recordFailure(c, "claude_stream", continueErr)
+						return finalizeFailure(continueErr)
+					}
+					if nextResp != nil {
+						processor.AddUsageBaseline(toAntigravityUsage(finishedUsage))
+						processor.ResetGenerationUsage()
+						extraResp = nextResp
+						scannerStops = append(scannerStops, stopScanner)
+						events, stopScanner = startScanner(nextResp.Body)
+						continue
 					}
 				}
-				return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+				// 上游完成，发送结束事件
+				return finalize()
 			}
 			if ev.err != nil {
+				if cont != nil && cont.hasExtraGeneration() {
+					// 追加生成的读取失败：按缴协议错误结束（不发成功终态），保留已计量的
+					// usage 与已收到的思考。
+					cont.recordFailure(c, "claude_stream_read", ev.err)
+					return finalizeFailure(ev.err)
+				}
 				if disconnect, handled := handleStreamReadError(ev.err, cw.Disconnected(), "antigravity claude"); handled {
 					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs, clientDisconnect: disconnect}, nil
 				}
@@ -1147,6 +1521,13 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 			lastDataAt = time.Now()
 			s.observeAntigravityGeminiSSELine(c, ev.line)
+			if cont != nil {
+				// 观察这一代上游响应，并决定成功终态是否允许发往下游。追加生成之前的
+				// 暂扣不发 usage delta，那条 delta 只在响应真正结束时发出。
+				cont.observeLine(ev.line)
+				processor.SetWithholdSuccessfulTerminal(cont.withholdSuccessfulTerminal())
+				processor.SetUsageOnlyTerminal(false)
+			}
 
 			// 处理 SSE 行，转换为 Claude 格式
 			claudeEvents := processor.ProcessLine(strings.TrimRight(ev.line, "\r\n"))

@@ -147,6 +147,8 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	// Antigravity 上游只支持流式请求，统一使用 streamGenerateContent
 	// 如果客户端请求非流式，在响应处理阶段会收集完整流式响应后返回
 	upstreamAction := "streamGenerateContent"
+	// Task24：续写必须复用「这一代实际成功发出的上游请求信封」，因此跟踪最终 body。
+	finalBody := wrappedBody
 
 	// 执行带重试的请求
 	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
@@ -212,6 +214,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 							_ = resp.Body.Close()
 							resp = fallbackResp
 							forwardedModel = fallbackModel
+							finalBody = fallbackWrapped
 						} else if fallbackResp != nil {
 							_ = fallbackResp.Body.Close()
 						}
@@ -271,6 +274,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 					retryResp := retryResult.resp
 					if retryResp.StatusCode < 400 {
 						resp = retryResp
+						finalBody = retryWrappedBody
 					} else {
 						retryRespBody := s.readUpstreamErrorBody(retryResp)
 						_ = retryResp.Body.Close()
@@ -403,15 +407,59 @@ handleSuccess:
 		c.Header("x-request-id", requestID)
 	}
 
+	// Task24: resolve the effective A/B pair once for this request and publish it to the
+	// response path. Both switches off (the source default) returns nil, so nothing below
+	// changes behavior or cost.
+	s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, upstreamAction, finalBody).publish(c)
+
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	var clientDisconnect bool
+
+	// 判断是否为图片生成模型
+	imageCount := 0
+	if isImageGenerationModel(mappedModel) {
+		// Gemini 图片生成 API 每次请求只生成一张图片（API 限制）
+		imageCount = 1
+	}
+	// Task24：追加生成失败时第一代已经下发并已计量，结果必须与终态错误一起返回，供调用方
+	// 先入账再返回错误（不 failover，不补写错误响应）。
+	buildResult := func(streamRes *antigravityStreamResult, found bool) *ForwardResult {
+		streamUsage := &ClaudeUsage{}
+		var firstToken *int
+		disconnect := false
+		if found && streamRes != nil {
+			if streamRes.usage != nil {
+				streamUsage = streamRes.usage
+			}
+			firstToken = streamRes.firstTokenMs
+			disconnect = streamRes.clientDisconnect
+		}
+		return &ForwardResult{
+			RequestID:                     requestID,
+			Usage:                         *streamUsage,
+			Model:                         originalModel,
+			UpstreamModel:                 forwardedModel,
+			UpstreamResponseModel:         observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
+			Stream:                        stream,
+			Duration:                      time.Since(startTime),
+			FirstTokenMs:                  firstToken,
+			ClientDisconnect:              disconnect,
+			ImageCount:                    imageCount,
+			ImageSize:                     imageSize,
+			ImageInputSize:                imageInputSize,
+		}
+	}
 
 	if stream {
 		// 客户端要求流式，直接透传
 		streamRes, err := s.handleGeminiStreamingResponse(c, resp, startTime)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
+			if IsAntigravityThoughtContinuationError(err) {
+				return buildResult(streamRes, streamRes != nil), err
+			}
 			return nil, err
 		}
 		usage = streamRes.usage
@@ -422,6 +470,9 @@ handleSuccess:
 		streamRes, err := s.handleGeminiStreamToNonStreaming(c, resp, startTime)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
+			if IsAntigravityThoughtContinuationError(err) {
+				return buildResult(streamRes, streamRes != nil), err
+			}
 			return nil, err
 		}
 		usage = streamRes.usage
@@ -430,13 +481,6 @@ handleSuccess:
 
 	if usage == nil {
 		usage = &ClaudeUsage{}
-	}
-
-	// 判断是否为图片生成模型
-	imageCount := 0
-	if isImageGenerationModel(mappedModel) {
-		// Gemini 图片生成 API 每次请求只生成一张图片（API 限制）
-		imageCount = 1
 	}
 
 	return &ForwardResult{

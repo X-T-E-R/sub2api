@@ -90,7 +90,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 	// 获取转换选项
 	// Antigravity 上游要求必须包含身份提示词，否则会返回 429
-	transformOpts := s.getClaudeMessagesTransformOptions(ctx)
+	transformOpts := s.getClaudeMessagesTransformOptions(ctx, account)
 	transformOpts.EnableIdentityPatch = true // 强制启用，Antigravity 上游必需
 
 	// 转换 Claude 请求为 Gemini 格式
@@ -109,6 +109,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// Antigravity 上游只支持流式请求，统一使用 streamGenerateContent
 	// 如果客户端请求非流式，在响应处理阶段会收集完整流式响应后转换返回
 	action := "streamGenerateContent"
+	// Task24：续写必须复用「这一代实际成功发出的上游请求信封」，因此跟踪最终 body。
+	finalBody := geminiBody
 
 	// 执行带重试的请求
 	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
@@ -191,7 +193,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected signature-related 400, retrying once (%s)", account.ID, stage.name)
 
-				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, s.getClaudeMessagesTransformOptions(ctx))
+				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, s.getClaudeMessagesTransformOptions(ctx, account))
 				if txErr != nil {
 					continue
 				}
@@ -231,6 +233,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					_ = resp.Body.Close()
 					resp = retryResp
 					respBody = nil
+					finalBody = retryGeminiBody
 					break
 				}
 
@@ -341,6 +344,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 								_ = resp.Body.Close()
 								resp = retryResp
 								respBody = nil
+								finalBody = retryGeminiBody
 							} else {
 								retryBody := s.readUpstreamErrorBody(retryResp)
 								_ = retryResp.Body.Close()
@@ -436,14 +440,49 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		c.Header("x-request-id", requestID)
 	}
 
+	// Task24: resolve the effective A/B pair once for this request and publish it to the
+	// response path. Both switches off (the source default) returns nil, so nothing below
+	// changes behavior or cost.
+	s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody).publish(c)
+
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	var clientDisconnect bool
+	// Task24: the appended generation may fail after the first generation was already
+	// delivered. The terminal error is then returned together with the billable first-generation
+	// result, so the caller records the usage and returns without failover.
+	buildResult := func(streamRes *antigravityStreamResult, found bool) *ForwardResult {
+		usage := &ClaudeUsage{}
+		var firstToken *int
+		disconnect := false
+		if found && streamRes != nil {
+			if streamRes.usage != nil {
+				usage = streamRes.usage
+			}
+			firstToken = streamRes.firstTokenMs
+			disconnect = streamRes.clientDisconnect
+		}
+		return &ForwardResult{
+			RequestID:                     requestID,
+			Usage:                         *usage,
+			Model:                         originalModel,
+			UpstreamModel:                 billingModel,
+			UpstreamResponseModel:         observedUpstreamResponseModel(c),
+			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
+			Stream:                        claudeReq.Stream,
+			Duration:                      time.Since(startTime),
+			FirstTokenMs:                  firstToken,
+			ClientDisconnect:              disconnect,
+		}
+	}
 	if claudeReq.Stream {
 		// 客户端要求流式，直接透传转换
 		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
+			if IsAntigravityThoughtContinuationError(err) {
+				return buildResult(streamRes, streamRes != nil), err
+			}
 			return nil, err
 		}
 		usage = streamRes.usage
@@ -454,6 +493,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		streamRes, err := s.handleClaudeStreamToNonStreaming(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
+			if IsAntigravityThoughtContinuationError(err) {
+				return buildResult(streamRes, streamRes != nil), err
+			}
 			return nil, err
 		}
 		usage = streamRes.usage

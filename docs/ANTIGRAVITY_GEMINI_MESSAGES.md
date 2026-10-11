@@ -2,7 +2,29 @@
 
 Messages requests routed through native Antigravity accounts to Gemini models use turn compatibility by default. An assistant text prefill stays in the conversation, followed by a marked user instruction to continue it without repeating the existing text. A real final user message receives no continuation instruction.
 
-Continuation is instruction-based: a model can still repeat a prefix or change its formatting. For clients that require token-exact assistant-prefill completion, disable this policy or restrict it to models whose output you have checked.
+Text-prefill continuation is instruction-based: a model can still repeat a prefix or change its formatting. For clients that require token-exact assistant-prefill completion, disable this policy or restrict it to models whose output you have checked. Thinking-only continuation is a separate policy and adds no continuation instruction.
+
+## Configure Thinking-Only Responses
+
+Two independent switches apply to native Antigravity responses that successfully finish with actual thinking but no visible text or tool call:
+
+- `suppress_thought_only_stop`: retain thinking, signatures and usage, but omit the successful completion signal and close the response. The client decides how to recover; enabling this switch alone does not send another upstream request.
+- `continue_thought_only`: make at most one additional generation on the same account and resolved model. Append the received thinking/signature carriers as the final model turn of the original upstream request, without adding system/user text or blank turns. If it again produces only thinking, the suppression switch decides whether to report successful completion.
+
+Both switches default to `false`. Text, tools, genuinely empty responses, refusals, length limits, interruptions and errors do not trigger this continuation. Before relying on automatic continuation for a model, verify that its upstream accepts a thinking-only model tail with its real signatures; local fixtures establish request construction, not upstream acceptance.
+
+Administrators can `GET` or `PUT` `/api/v1/admin/settings/antigravity-thought-policy`. PUT requires the complete pair of booleans. The single persistent Settings key is `antigravity_thought_policy`:
+
+```json
+{
+  "suppress_thought_only_stop": true,
+  "continue_thought_only": true
+}
+```
+
+A successful PUT persists then publishes the pair for new requests. In-flight requests keep their initial snapshot. Startup loads the saved pair and logs `key=antigravity_thought_policy source=settings` (or `source=seed`) and both booleans; a GET reads persistent state, not the running snapshot. If changing the key directly in the database, restart the gateway to load it. Before enabling, preserve the key's existence and original JSON; restore that value and restart to roll back a direct database change.
+
+Accounts override each switch independently using boolean Extra fields `antigravity_suppress_thought_only_stop` and `antigravity_continue_thought_only`. Missing or `null` inherits the global value; explicit `false` overrides global `true`. Changing the global pair does not overwrite account overrides.
 
 ## Configure Models And Effort
 
@@ -71,4 +93,4 @@ Terminal URL images, documents, unknown content blocks, and unsupported tool-res
 
 Text tool results keep their call ID, function name, and output. Empty output stays empty, including image-only results without text; `is_error: true` is sent as an error in the Gemini function response.
 
-Before adding a synthetic continuation or empty-user turn, Sub2API requires complete tool results and supported history. Return each actual result under its original `tool_use_id`, resolve duplicate or mismatched IDs, and send a user message after a media-only or thinking-only assistant tail.
+Before adding a synthetic text-prefill continuation or empty-user turn, Sub2API requires complete tool results and supported history. Return each actual result under its original `tool_use_id` and resolve duplicate or mismatched IDs. A media-only assistant tail requires a user message. With automatic thinking-only continuation enabled, a nonempty thinking-only assistant tail retains its real carriers instead of being trimmed; without it, the existing user-boundary recovery remains.

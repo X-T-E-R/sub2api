@@ -13,6 +13,15 @@ import (
 type GeminiMessagesCompatibilityOptions struct {
 	Enabled bool
 	Models  []string
+	// AllowThinkingTailContinuation keeps a terminal assistant run that carries only
+	// received thinking as the final model turn of the Gemini request, instead of
+	// dropping it and requiring a user turn. Received thought chunks and signature
+	// carriers are forwarded in the received order, so a signature may arrive as its
+	// own carrier block and an unsigned thought stays unsigned; nothing is invented
+	// for either. A thinking tail without received thinking text cannot be continued
+	// and is reported instead of being trimmed away. Whether upstream accepts such a
+	// model tail is not asserted by this package.
+	AllowThinkingTailContinuation bool
 }
 
 type geminiMessagesConversionOptions struct {
@@ -20,6 +29,14 @@ type geminiMessagesConversionOptions struct {
 	toolResultImages      bool
 	terminalMessage       int
 	recoveredThinkingTail bool
+	// thinkingTailContinuation is set only for a terminal assistant run that is sent
+	// back as the received thinking tail. It suppresses the recovery trim and the
+	// synthetic user turn, so the model tail stays final with zero added text.
+	thinkingTailContinuation bool
+	// preserveThoughtCarrier is set per message by buildContents for that terminal
+	// tail only: the received signature, including an absent one, is forwarded
+	// verbatim instead of being replaced by the dummy sentinel or downgraded.
+	preserveThoughtCarrier bool
 }
 
 func supportsGeminiToolResultImages(model string) bool {
@@ -166,8 +183,74 @@ func emptyGeminiTextParts(parts []GeminiPart) bool {
 	return true
 }
 
-func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, toolResultImages bool) ([]GeminiContent, error) {
+// geminiThinkingTailContent collects the received thinking carriers of the terminal
+// assistant run, in order, and reports whether the run may be sent back as the model
+// tail.
+//
+// A block belongs to the tail when it is a thinking block that carries nonempty
+// thinking text or a signature. Blank text and empty unsigned thinking envelopes
+// carry nothing and are not part of the tail; any other block means the run is not a
+// thinking tail at all. The run is eligible when at least one block carries nonempty
+// thinking text: a run with only signature carriers holds no received thinking to
+// continue from, so it is reported as ineligible.
+//
+// Signature carriers may arrive as their own block after unsigned thought text, so a
+// signature is never required per text chunk. Every collected block is copied
+// verbatim: an unsigned thought stays unsigned and a dummy sentinel is forwarded as
+// the input carried it instead of being passed off as a received signature.
+func geminiThinkingTailContent(run []ClaudeMessage) (json.RawMessage, bool) {
+	var blocks []ContentBlock
+	for _, message := range run {
+		if message.Role != "assistant" {
+			return nil, false
+		}
+		var content []ContentBlock
+		if err := json.Unmarshal(message.Content, &content); err != nil {
+			// A dropped envelope may be a blank string; anything else is not a tail.
+			var text string
+			if json.Unmarshal(message.Content, &text) != nil || strings.TrimSpace(text) != "" {
+				return nil, false
+			}
+			continue
+		}
+		for _, block := range content {
+			switch {
+			case block.Type == "thinking":
+				if strings.TrimSpace(block.Thinking) == "" && block.Signature == "" {
+					continue
+				}
+			case block.Type == "text" && strings.TrimSpace(block.Text) == "":
+				continue
+			default:
+				return nil, false
+			}
+			blocks = append(blocks, block)
+		}
+	}
+	hasThinkingText := false
+	for _, block := range blocks {
+		if strings.TrimSpace(block.Thinking) != "" {
+			hasThinkingText = true
+			break
+		}
+	}
+	if !hasThinkingText {
+		return nil, false
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, options geminiMessagesConversionOptions) ([]GeminiContent, error) {
 	if len(contents) == 0 || contents[len(contents)-1].Role != "model" {
+		return contents, nil
+	}
+	if options.thinkingTailContinuation {
+		// The received thinking tail is the final turn: no user turn, no blank turn
+		// and no assistant-prefill instruction may be appended after it.
 		return contents, nil
 	}
 	last := len(messages) - 1
@@ -198,7 +281,7 @@ func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, 
 	if !hasText || !inputHasText {
 		return nil, geminiMessagesError(path, "send a user message or a nonempty assistant text prefill for Gemini continuation")
 	}
-	if err := validateGeminiContinuationHistory(messages, toolResultImages); err != nil {
+	if err := validateGeminiContinuationHistory(messages, options.toolResultImages); err != nil {
 		return nil, err
 	}
 	return append(contents, GeminiContent{Role: "user", Parts: []GeminiPart{{Text: geminiAssistantContinuation}}}), nil

@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 type antigravityCompatProtocol uint8
@@ -201,6 +202,10 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 
+	// Task24: resolve the effective A/B pair once for this request and publish it to the
+	// response path. Both switches off (the source default) returns nil.
+	s.newAntigravityThoughtContinuation(ctx, account, call.request.originalModel, call.prefix, call.proxyURL, call.accessToken, "streamGenerateContent", call.geminiBody).publish(c)
+
 	return s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp)
 }
 
@@ -362,13 +367,18 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 		c.Header("x-request-id", requestID)
 	}
 	streamResult, err := s.consumeAntigravityCompatSuccess(c, call, resp)
-	if err != nil {
+	if err != nil && !IsAntigravityThoughtContinuationError(err) {
+		return nil, err
+	}
+	if streamResult == nil {
 		return nil, err
 	}
 	if streamResult.usage == nil {
 		streamResult.usage = &ClaudeUsage{}
 	}
 
+	// err 为 Task24 的终态错误时，第一代的响应已经下发，可计费结果照常返回：调用方先入账，
+	// 不 failover，也不再补写错误响应。
 	return &ForwardResult{
 		RequestID:                     requestID,
 		Usage:                         *streamResult.usage,
@@ -381,7 +391,7 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 		FirstTokenMs:                  streamResult.firstTokenMs,
 		ReasoningEffort:               call.request.reasoningEffort,
 		ClientDisconnect:              streamResult.clientDisconnect,
-	}, nil
+	}, err
 }
 
 func (s *AntigravityGatewayService) consumeAntigravityCompatSuccess(
@@ -519,6 +529,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
 }
 
+// handleChatCompletionsNonStreamingFromAntigravity 收集上游流式响应并转换为 Chat Completions。
 func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigravity(
 	c *gin.Context,
 	resp *http.Response,
@@ -526,7 +537,7 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	originalModel string,
 ) (*antigravityStreamResult, error) {
 	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
-	if err != nil {
+	if err != nil && !IsAntigravityThoughtContinuationError(err) {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
 	var anthropicResponse apicompat.AnthropicResponse
@@ -534,8 +545,24 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
 	}
 	responsesResponse := apicompat.AnthropicToResponsesResponse(&anthropicResponse)
-	c.JSON(http.StatusOK, apicompat.ResponsesToChatCompletions(responsesResponse, originalModel))
-	return result, nil
+	chatResponse := apicompat.ResponsesToChatCompletions(responsesResponse, originalModel)
+	if s.antigravityCompatSuppressSuccessfulTerminal(c) {
+		// Task24 A：只抑制成功完成信号；内容、推理内容与 usage 原样保留。
+		encoded, encodeErr := json.Marshal(chatResponse)
+		if encodeErr != nil {
+			return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to encode upstream response")
+		}
+		encoded, encodeErr = antigravitySuppressChatCompletionTerminal(encoded)
+		if encodeErr != nil {
+			return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to encode upstream response")
+		}
+		// 与 Gin 的 c.JSON 使用同一 Content-Type，只有终态字段被替换。
+		c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
+		return result, err
+	}
+	c.JSON(http.StatusOK, chatResponse)
+	// err 为 Task24 的终态错误时，第一代的合法响应体已经写出，结果照常返回供调用方入账。
+	return result, err
 }
 
 func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
@@ -545,17 +572,39 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	originalModel string,
 ) (*antigravityStreamResult, error) {
 	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
-	if err != nil {
+	if err != nil && !IsAntigravityThoughtContinuationError(err) {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
 	var anthropicResponse apicompat.AnthropicResponse
 	if json.Unmarshal(claudeResponse, &anthropicResponse) != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
 	}
-	c.JSON(http.StatusOK, apicompat.AnthropicToResponsesResponseWithOptions(&anthropicResponse, apicompat.AnthropicToResponsesOptions{
+	responsesResponse := apicompat.AnthropicToResponsesResponseWithOptions(&anthropicResponse, apicompat.AnthropicToResponsesOptions{
 		PreserveThinkingSignatures: true,
-	}))
-	return result, nil
+	})
+	if s.antigravityCompatSuppressSuccessfulTerminal(c) {
+		// Task24 A：成功完成信号换成一个明确不完整的终态；输出项、思维签名与 usage
+		// 原样保留，下游据此自行决定是否接续。
+		responsesResponse.Status = "incomplete"
+		responsesResponse.IncompleteDetails = nil
+	}
+	c.JSON(http.StatusOK, responsesResponse)
+	// err 为 Task24 的终态错误时，第一代的合法响应体已经写出，结果照常返回供调用方入账。
+	return result, err
+}
+
+// antigravityCompatSuppressSuccessfulTerminal reports A's effective decision for this
+// compat response. The response path already collected or streamed the upstream
+// generation, so the pinned policy and the observed generations decide once.
+func (s *AntigravityGatewayService) antigravityCompatSuppressSuccessfulTerminal(c *gin.Context) bool {
+	cont := antigravityThoughtContinuationFromGin(c)
+	return cont.suppressFinalTerminal()
+}
+
+// antigravitySuppressChatCompletionTerminal replaces the successful Chat Completions
+// finish reason with null, the same "not final" representation the streaming chunks use.
+func antigravitySuppressChatCompletionTerminal(body []byte) ([]byte, error) {
+	return sjson.SetBytes(body, "choices.0.finish_reason", nil)
 }
 
 func (s *AntigravityGatewayService) mapAntigravityCompatCollectionError(c *gin.Context, err error) error {

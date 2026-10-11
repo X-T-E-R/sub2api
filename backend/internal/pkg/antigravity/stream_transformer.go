@@ -41,6 +41,17 @@ type StreamingProcessor struct {
 	cacheReadTokens   int
 	imageOutputTokens int
 	hasContent        bool
+
+	// usageBaseline 是此前已完成的上游生成（Task24 的单次续写）的累计用量；它只
+	// 参与下游 usage 上报与调用方计费，不会改变单个 chunk 的解析结果。
+	usageBaseline ClaudeUsage
+	// withholdSuccessfulTerminal 为 true 时，成功终态（stop_reason + message_stop）
+	// 不发给下游，内容块收尾与签名 carrier 照常发出。
+	withholdSuccessfulTerminal bool
+	// usageOnlyTerminal 在 withholdSuccessfulTerminal 之上再发一条只带 usage 的
+	// message_delta（stop_reason 为 null，且不发 message_stop）：下游仍能拿到真实用量，
+	// 但不会被当成成功完成。
+	usageOnlyTerminal bool
 }
 
 // NewStreamingProcessor 创建流式响应处理器
@@ -54,6 +65,74 @@ func NewStreamingProcessor(originalModel string) *StreamingProcessor {
 // SetUsageMapHook sets an optional hook that modifies usage maps before they are emitted.
 func (p *StreamingProcessor) SetUsageMapHook(fn UsageMapHook) {
 	p.usageMapHook = fn
+}
+
+// SetWithholdSuccessfulTerminal controls whether the successful terminal signal may
+// reach the downstream client. When withheld, the content blocks are still closed and
+// the trailing signature carrier is still emitted, but the successful message_delta
+// stop_reason and message_stop are dropped so the client applies its own policy.
+func (p *StreamingProcessor) SetWithholdSuccessfulTerminal(withhold bool) {
+	if p == nil {
+		return
+	}
+	p.withholdSuccessfulTerminal = withhold
+}
+
+// SetUsageOnlyTerminal makes a withheld terminal still report usage: a single
+// message_delta with a null stop_reason and the accumulated usage, never message_stop.
+func (p *StreamingProcessor) SetUsageOnlyTerminal(usageOnly bool) {
+	if p == nil {
+		return
+	}
+	p.usageOnlyTerminal = usageOnly
+}
+
+// AddUsageBaseline adds the usage of an earlier completed generation so the reported
+// usage of the continued response stays cumulative instead of dropping the bytes the
+// upstream already billed.
+func (p *StreamingProcessor) AddUsageBaseline(usage ClaudeUsage) {
+	if p == nil {
+		return
+	}
+	p.usageBaseline = addClaudeUsage(p.usageBaseline, usage)
+}
+
+// ResetGenerationUsage drops the usage counted for the generation that just finished. The
+// caller has already moved that usage into the baseline, so the next generation's metadata is
+// not counted twice when the appended generation reports no usage of its own.
+func (p *StreamingProcessor) ResetGenerationUsage() {
+	if p == nil {
+		return
+	}
+	p.inputTokens = 0
+	p.outputTokens = 0
+	p.cacheReadTokens = 0
+	p.imageOutputTokens = 0
+}
+
+// CurrentUsage reports the usage accumulated for the generation in flight plus any
+// baseline, without emitting anything.
+func (p *StreamingProcessor) CurrentUsage() ClaudeUsage {
+	if p == nil {
+		return ClaudeUsage{}
+	}
+	usage := ClaudeUsage{
+		InputTokens:          p.inputTokens,
+		OutputTokens:         p.outputTokens,
+		CacheReadInputTokens: p.cacheReadTokens,
+		ImageOutputTokens:    p.imageOutputTokens,
+	}
+	return addClaudeUsage(p.usageBaseline, usage)
+}
+
+func addClaudeUsage(a, b ClaudeUsage) ClaudeUsage {
+	return ClaudeUsage{
+		InputTokens:              a.InputTokens + b.InputTokens,
+		OutputTokens:             a.OutputTokens + b.OutputTokens,
+		CacheCreationInputTokens: a.CacheCreationInputTokens + b.CacheCreationInputTokens,
+		CacheReadInputTokens:     a.CacheReadInputTokens + b.CacheReadInputTokens,
+		ImageOutputTokens:        a.ImageOutputTokens + b.ImageOutputTokens,
+	}
 }
 
 func usageToMap(u ClaudeUsage) map[string]any {
@@ -152,15 +231,10 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 // 若整个流未收到任何可解析的上游数据（messageStartSent == false），
 // 则不补发任何结束事件，防止客户端收到没有 message_start 的残缺流。
 func (p *StreamingProcessor) Finish() ([]byte, *ClaudeUsage) {
-	usage := &ClaudeUsage{
-		InputTokens:          p.inputTokens,
-		OutputTokens:         p.outputTokens,
-		CacheReadInputTokens: p.cacheReadTokens,
-		ImageOutputTokens:    p.imageOutputTokens,
-	}
+	usage := p.CurrentUsage()
 
 	if !p.messageStartSent {
-		return nil, usage
+		return nil, &usage
 	}
 
 	var result bytes.Buffer
@@ -168,7 +242,7 @@ func (p *StreamingProcessor) Finish() ([]byte, *ClaudeUsage) {
 		_, _ = result.Write(p.emitFinish(""))
 	}
 
-	return result.Bytes(), usage
+	return result.Bytes(), &usage
 }
 
 // MessageStartSent 报告流中是否已发出过 message_start 事件（即是否收到过有效的上游数据）
@@ -526,6 +600,17 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	}
 
 	// 确定 stop_reason
+	if p.withholdSuccessfulTerminal {
+		// Task24: 下游需要自行决定是否接续，因此成功终态（成功 stop_reason 与
+		// message_stop）不发；内容块收尾、trailing signature 与 grounding 文本已在上方
+		// 发出，不受影响。
+		if p.usageOnlyTerminal {
+			// 只保留用量：stop_reason 为 null，客户端能看到真实 usage 而不会认为已成功。
+			_, _ = result.Write(p.emitUsageOnlyDelta())
+		}
+		return result.Bytes()
+	}
+
 	stopReason := "end_turn"
 	if p.usedTool {
 		stopReason = "tool_use"
@@ -533,12 +618,7 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 		stopReason = "max_tokens"
 	}
 
-	usage := ClaudeUsage{
-		InputTokens:          p.inputTokens,
-		OutputTokens:         p.outputTokens,
-		CacheReadInputTokens: p.cacheReadTokens,
-		ImageOutputTokens:    p.imageOutputTokens,
-	}
+	usage := p.CurrentUsage()
 
 	var usageValue any = usage
 	if p.usageMapHook != nil {
@@ -567,6 +647,29 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	}
 
 	return result.Bytes()
+}
+
+// emitUsageOnlyDelta 发送一条只带 usage 的 message_delta（stop_reason 为 null）。
+func (p *StreamingProcessor) emitUsageOnlyDelta() []byte {
+	usage := p.CurrentUsage()
+
+	var usageValue any = usage
+	if p.usageMapHook != nil {
+		usageMap := usageToMap(usage)
+		p.usageMapHook(usageMap)
+		usageValue = usageMap
+	}
+
+	deltaEvent := map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+		},
+		"usage": usageValue,
+	}
+
+	return p.formatSSE("message_delta", deltaEvent)
 }
 
 // formatSSE 格式化 SSE 事件

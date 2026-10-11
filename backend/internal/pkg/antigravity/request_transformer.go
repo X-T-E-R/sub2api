@@ -114,14 +114,28 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		geminiOptions.terminalMessage = effectiveGeminiTerminalMessage(messages, false)
 		boundary := effectiveGeminiTerminalMessage(messages, true)
 		if boundary >= 0 && boundary < geminiOptions.terminalMessage && messages[boundary].Role == "user" {
-			// Retry at the real user/tool-result boundary, without changing caller
-			// history or turning a failed partial thought into a visible prefill.
 			if err := validateGeminiContinuationHistory(messages[:boundary+1], geminiOptions.toolResultImages); err != nil {
 				return nil, err
 			}
-			messages = messages[:boundary+1]
-			geminiOptions.terminalMessage = boundary
-			geminiOptions.recoveredThinkingTail = true
+			if opts.GeminiMessages.AllowThinkingTailContinuation {
+				// The caller already received this assistant thinking: send it back as the
+				// final model turn, in order and verbatim, instead of trimming it and
+				// silently repeating the original request.
+				tail, ok := geminiThinkingTailContent(messages[boundary+1 : geminiOptions.terminalMessage+1])
+				if !ok {
+					return nil, geminiMessagesError(fmt.Sprintf("messages[%d]", geminiOptions.terminalMessage),
+						"send the received assistant thinking with its signature, a user message, or the real tool results for Gemini continuation")
+				}
+				messages = append(messages[:boundary+1:boundary+1], ClaudeMessage{Role: "assistant", Content: tail})
+				geminiOptions.terminalMessage = boundary + 1
+				geminiOptions.thinkingTailContinuation = true
+			} else {
+				// Retry at the real user/tool-result boundary, without changing caller
+				// history or turning a failed partial thought into a visible prefill.
+				messages = messages[:boundary+1]
+				geminiOptions.terminalMessage = boundary
+				geminiOptions.recoveredThinkingTail = true
+			}
 		}
 	}
 	if geminiOptions.enabled && geminiOptions.terminalMessage >= 0 {
@@ -137,7 +151,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		return nil, fmt.Errorf("build contents: %w", err)
 	}
 	if geminiOptions.enabled {
-		contents, err = finalizeGeminiMessages(messages, contents, geminiOptions.toolResultImages)
+		contents, err = finalizeGeminiMessages(messages, contents, geminiOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -417,7 +431,10 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			role = "model"
 		}
 
-		parts, strippedThisMsg, err := buildPartsWithCompatibility(msg.Content, toolIDToName, allowDummyThought, geminiOptions)
+		messageOptions := geminiOptions
+		// Only the terminal continuation tail keeps its received signature carriers verbatim.
+		messageOptions.preserveThoughtCarrier = geminiOptions.thinkingTailContinuation && i == geminiOptions.terminalMessage
+		parts, strippedThisMsg, err := buildPartsWithCompatibility(msg.Content, toolIDToName, allowDummyThought, messageOptions)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("build parts for message %d: %w", i, err)
 		}
@@ -534,6 +551,13 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			part := GeminiPart{
 				Text:    block.Thinking,
 				Thought: true,
+			}
+			// The opted-in continuation tail forwards the received carrier verbatim, so an
+			// unsigned thought stays unsigned and a dummy is not passed off as received.
+			if geminiOptions.preserveThoughtCarrier {
+				part.ThoughtSignature = block.Signature
+				parts = append(parts, part)
+				continue
 			}
 			// signature 处理：
 			// - Claude 模型（allowDummyThought=false）：必须是上游返回的真实 signature（dummy 视为缺失）

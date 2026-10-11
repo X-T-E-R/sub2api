@@ -18,8 +18,17 @@ import (
 
 type antigravityCompatStreamAdapter interface {
 	Emit(*apicompat.AnthropicStreamEvent, *antigravityClientWriter)
-	Finalize(*antigravityClientWriter)
+	// Finalize writes the protocol terminal. suppressSuccessfulTerminal withholds the
+	// successful completion frame; the close-out frames and usage are still written.
+	Finalize(*antigravityClientWriter, bool)
 	WriteError(*antigravityClientWriter, string)
+}
+
+// isResponsesTerminalEvent reports the Responses protocol's terminal frames. They carry
+// the successful completion signal together with the usage, which Task24 A withholds as
+// one unit so the downstream client applies its own continuation policy.
+func isResponsesTerminalEvent(eventType string) bool {
+	return eventType == "response.completed" || eventType == "response.incomplete"
 }
 
 type antigravityChatStreamAdapter struct {
@@ -45,14 +54,33 @@ func (a *antigravityChatStreamAdapter) Emit(event *apicompat.AnthropicStreamEven
 	}
 }
 
-func (a *antigravityChatStreamAdapter) Finalize(writer *antigravityClientWriter) {
+func (a *antigravityChatStreamAdapter) Finalize(writer *antigravityClientWriter, suppressSuccessfulTerminal bool) {
 	for _, responseEvent := range apicompat.FinalizeAnthropicResponsesStream(a.anthropicState) {
-		a.emitResponseEvent(&responseEvent, writer)
+		terminal := isResponsesTerminalEvent(responseEvent.Type)
+		for _, chunk := range apicompat.ResponsesEventToChatChunks(&responseEvent, a.chatState) {
+			if suppressSuccessfulTerminal && terminal && len(chunk.Choices) > 0 {
+				// Chat Completions 没有「不完整」终态：成功 finish 帧不生成，但终态事件里的
+				// usage 已经喂给 Chat 状态，下面那条 usage-only 帧（choices 为空）仍然下发，
+				// 客户端因此既不会把纯思考响应当成成功完成，也不会丢失真实用量。
+				continue
+			}
+			if data, err := apicompat.ChatChunkToSSE(chunk); err == nil {
+				writer.Write([]byte(data))
+			}
+		}
 	}
 	for _, chunk := range apicompat.FinalizeResponsesChatStream(a.chatState) {
+		if suppressSuccessfulTerminal && len(chunk.Choices) > 0 {
+			// finish_reason 帧是成功完成信号；usage-only 帧（choices 为空）保留。
+			continue
+		}
 		if data, err := apicompat.ChatChunkToSSE(chunk); err == nil {
 			writer.Write([]byte(data))
 		}
+	}
+	if suppressSuccessfulTerminal {
+		// 连同流终止标记一起抑制：只留下内容与 usage，客户端自行决定接续。
+		return
 	}
 	writer.Write([]byte("data: [DONE]\n\n"))
 }
@@ -87,8 +115,17 @@ func (a *antigravityResponsesStreamAdapter) Emit(event *apicompat.AnthropicStrea
 	}
 }
 
-func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWriter) {
+func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWriter, suppressSuccessfulTerminal bool) {
 	for _, responseEvent := range apicompat.FinalizeAnthropicResponsesStream(a.anthropicState) {
+		if suppressSuccessfulTerminal && isResponsesTerminalEvent(responseEvent.Type) {
+			// 成功完成信号换成一个明确不完整的终态：输出项收尾完整、usage 累计保留，
+			// 下游据此自行决定是否接续，而不会把纯思考响应当成成功完成。
+			responseEvent.Type = "response.incomplete"
+			if responseEvent.Response != nil {
+				responseEvent.Response.Status = "incomplete"
+				responseEvent.Response.IncompleteDetails = nil
+			}
+		}
 		a.emitResponseEvent(responseEvent, writer)
 	}
 }
@@ -119,6 +156,9 @@ type antigravityCompatStreamSession struct {
 	meaningfulData              bool
 	preContentKeepaliveSent     bool
 	preContentKeepaliveInterval time.Duration
+	// continuation is the Task24 A/B state of this request, nil while both effective
+	// switches are off.
+	continuation *antigravityThoughtContinuation
 }
 
 const (
@@ -144,11 +184,22 @@ func newAntigravityCompatStreamSession(
 }
 
 func (s *antigravityCompatStreamSession) consume(line string) {
+	if s.continuation != nil {
+		// 观察这一代上游响应，并决定成功终态是否允许发往下游。
+		s.continuation.observeLine(line)
+		s.processor.SetWithholdSuccessfulTerminal(s.continuation.withholdSuccessfulTerminal())
+	}
 	claudeEvents := s.processor.ProcessLine(strings.TrimRight(line, "\r\n"))
 	if len(claudeEvents) == 0 {
 		return
 	}
 	s.consumeClaudeEvents(claudeEvents)
+}
+
+// suppressSuccessfulTerminal reports A's effective decision for the response that is about
+// to be finalized.
+func (s *antigravityCompatStreamSession) suppressSuccessfulTerminal() bool {
+	return s.continuation.suppressFinalTerminal()
 }
 
 func (s *antigravityCompatStreamSession) hasMeaningfulData() bool {
@@ -167,6 +218,14 @@ func (s *antigravityCompatStreamSession) writePreContentKeepalive(now time.Time)
 }
 
 func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, error) {
+	if s.continuation != nil {
+		// A 的有效设置决定最终终态：抑制成功终态时，连 converter 的补发终态也不能出现。
+		s.processor.SetWithholdSuccessfulTerminal(s.suppressSuccessfulTerminal())
+		// 抑制时仍然补一条只带 usage 的 message_delta（stop_reason 为 null）：Chat
+		// Completions/Responses 的终态帧里带着这段真实用量，客户端不会把纯思考响应当成
+		// 成功完成，同时也不会丢失用量。
+		s.processor.SetUsageOnlyTerminal(s.suppressSuccessfulTerminal())
+	}
 	finalEvents, usage := s.processor.Finish()
 	mergeAntigravityCompatUsage(s.usage, usage)
 	s.consumeClaudeEvents(finalEvents)
@@ -177,7 +236,7 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 		}
 		return nil, antigravityCompatEmptyStreamError()
 	}
-	s.adapter.Finalize(s.writer)
+	s.adapter.Finalize(s.writer, s.suppressSuccessfulTerminal())
 	return s.result(s.writer.Disconnected()), nil
 }
 
@@ -306,8 +365,20 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 	session := newAntigravityCompatStreamSession(originalModel, startTime, adapter, writer)
 	session.preContentKeepaliveInterval = interval
+	// Task24: A/B state for this request, nil while both effective switches are off.
+	session.continuation = antigravityThoughtContinuationFromGin(c)
 	events, stopScanner, maxLineSize := s.startAntigravityCompatScanner(resp.Body)
-	defer stopScanner()
+	var scannerStops []func()
+	var extraResp *http.Response
+	defer func() {
+		stopScanner()
+		for _, stop := range scannerStops {
+			stop()
+		}
+		if extraResp != nil && extraResp.Body != nil {
+			_ = extraResp.Body.Close()
+		}
+	}()
 
 	timeout := s.antigravityCompatStreamTimeout()
 	timeoutTimer, timeoutCh := newAntigravityCompatTimer(timeout)
@@ -349,9 +420,44 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				if !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
 				}
+				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A
+				// 的有效设置决定，第一代 usage 照常入账。
+				if cont := session.continuation; cont != nil && cont.canContinue() && !writer.Disconnected() {
+					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					if continueErr != nil {
+						// 追加生成失败：以协议不成功终态 + 错误帧结束，保留内容与累计 usage。
+						// 可计费结果与 Task24 终态错误一起返回，调用方先入账再返回错误。
+						cont.recordFailure(c, "compat_stream", continueErr)
+						finishResult, finishErr := session.finish()
+						writeAntigravityCompatStreamError(c, session.adapter, session.writer, "thought_continuation_error")
+						if finishErr == nil {
+							finishErr = cont.failureError()
+						}
+						return finishResult, finishErr
+					}
+					if nextResp != nil {
+						session.processor.AddUsageBaseline(toAntigravityUsage(finishedUsage))
+						session.processor.ResetGenerationUsage()
+						extraResp = nextResp
+						scannerStops = append(scannerStops, stopScanner)
+						events, stopScanner, maxLineSize = s.startAntigravityCompatScanner(nextResp.Body)
+						continue
+					}
+				}
 				return session.finish()
 			}
 			if event.err != nil {
+				if session.continuation != nil && session.continuation.hasExtraGeneration() {
+					// 追加生成的读取失败：协议错误 + 非成功终态，保留已收到的内容与用量，
+					// 避免错误路径让调用方丢掉上游已经计量的 usage。
+					session.continuation.recordFailure(c, "compat_stream_read", event.err)
+					finishResult, finishErr := session.finish()
+					writeAntigravityCompatStreamError(c, session.adapter, session.writer, "thought_continuation_error")
+					if finishErr == nil {
+						finishErr = session.continuation.failureError()
+					}
+					return finishResult, finishErr
+				}
 				return s.handleAntigravityCompatReadError(c, session, event.err, maxLineSize, prefix)
 			}
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
