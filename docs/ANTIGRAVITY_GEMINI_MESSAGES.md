@@ -11,16 +11,18 @@ Two independent switches apply to native Antigravity responses that successfully
 - `suppress_thought_only_stop`: retain thinking, signatures and usage, but omit the successful completion signal and close the response. The client decides how to recover; enabling this switch alone does not send another upstream request.
 - `continue_thought_only`: make at most one additional generation on the same account and resolved model. Append the received thinking/signature carriers as the final model turn of the original upstream request, without adding system/user text or blank turns. If it again produces only thinking, the suppression switch decides whether to report successful completion.
 
-Both switches default to `false`. Text, tools, genuinely empty responses, refusals, length limits, interruptions and errors do not trigger this continuation. Before relying on automatic continuation for a model, verify that its upstream accepts a thinking-only model tail with its real signatures; local fixtures establish request construction, not upstream acceptance.
+Both switches default to `false`. Text, tools, genuinely empty responses, refusals, length limits, interruptions and errors do not trigger this continuation. Keep automatic continuation off on endpoints that return `Requests ending with a model turn are not supported.`: that rule rejects the final model turn required by zero-prompt continuation. Sub2API does not work around it by dropping thinking/signatures, repeating the original user request, or adding a user turn. Completion-signal suppression remains independent and can be used without automatic continuation. Local fixtures establish request construction, not upstream acceptance.
 
-Administrators can `GET` or `PUT` `/api/v1/admin/settings/antigravity-thought-policy`. PUT requires the complete pair of booleans. The single persistent Settings key is `antigravity_thought_policy`:
+Administrators can `GET` or `PUT` `/api/v1/admin/settings/antigravity-thought-policy`. PUT requires the complete pair of booleans. The single persistent Settings key is `antigravity_thought_policy`. For example, suppress successful thinking-only completion without issuing another generation:
 
 ```json
 {
   "suppress_thought_only_stop": true,
-  "continue_thought_only": true
+  "continue_thought_only": false
 }
 ```
+
+A rejected appended generation returns a non-success response and keeps its partial usage billable; it does not retry or switch accounts. Its Ops event is `thought_continuation_error`, with `stage`, HTTP `upstream_status_code`, bounded provider `message`/`reason` and `upstream_request_id` when the provider supplied one. These diagnostics do not record the raw body, headers, thinking or signature carriers. Use the gateway request ID to correlate the event; neighboring requests are not proof of the same failure.
 
 A successful PUT persists then publishes the pair for new requests. In-flight requests keep their initial snapshot. Startup loads the saved pair and logs `key=antigravity_thought_policy source=settings` (or `source=seed`) and both booleans; a GET reads persistent state, not the running snapshot. If changing the key directly in the database, restart the gateway to load it. Before enabling, preserve the key's existence and original JSON; restore that value and restart to roll back a direct database change.
 

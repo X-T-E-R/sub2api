@@ -46,12 +46,47 @@ var errAntigravityThoughtContinuationUnavailable = errors.New("antigravity thoug
 // generation. Only the appended request fails; the first generation stays billable.
 type antigravityThoughtContinuationStatusError struct {
 	StatusCode int
-	Body       []byte
-	Header     http.Header
+	Message    string
+	Code       string
+	RequestID  string
 }
 
 func (e *antigravityThoughtContinuationStatusError) Error() string {
-	return fmt.Sprintf("thought continuation upstream status=%d", e.StatusCode)
+	message := fmt.Sprintf("thought continuation upstream status=%d", e.StatusCode)
+	if e.Code != "" {
+		message += " code=" + e.Code
+	}
+	if e.Message != "" {
+		message += " message=" + e.Message
+	}
+	return message
+}
+
+// Keep only bounded diagnostic metadata, never the raw error body or headers.
+// The shared extractor handles a provider's nested JSON error message; any
+// remaining structured message is not safe to treat as a diagnostic leaf.
+func newAntigravityThoughtContinuationStatusError(status int, headers http.Header, body []byte) *antigravityThoughtContinuationStatusError {
+	message := strings.TrimSpace(extractUpstreamErrorMessage(body))
+	if strings.HasPrefix(message, "{") || strings.HasPrefix(message, "[") {
+		message = ""
+	}
+	message = truncateString(sanitizeUpstreamErrorMessage(strings.Join(strings.Fields(message), " ")), 512)
+	code := strings.TrimSpace(gjson.GetBytes(body, "error.status").String())
+	if code == "" {
+		code = extractUpstreamErrorCode(body)
+	}
+	if len(code) > 64 || strings.IndexFunc(code, func(r rune) bool {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			return false
+		default:
+			return true
+		}
+	}) >= 0 {
+		code = ""
+	}
+	requestID := truncateString(sanitizeUpstreamErrorMessage(strings.Join(strings.Fields(headers.Get("x-request-id")), " ")), 128)
+	return &antigravityThoughtContinuationStatusError{StatusCode: status, Message: message, Code: code, RequestID: requestID}
 }
 
 // AntigravityThoughtContinuationError is the Task24 terminal error of a failed appended
@@ -587,11 +622,7 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 		_ = resp.Body.Close()
 		c.service.handleUpstreamError(ctx, c.prefix, c.account, resp.StatusCode, resp.Header, body,
 			c.requestedModel, 0, "", false)
-		return nil, finished, &antigravityThoughtContinuationStatusError{
-			StatusCode: resp.StatusCode,
-			Body:       body,
-			Header:     resp.Header.Clone(),
-		}
+		return nil, finished, newAntigravityThoughtContinuationStatusError(resp.StatusCode, resp.Header, body)
 	}
 	c.extraObserved = true
 	return resp, finished, nil
@@ -616,22 +647,30 @@ func (c *antigravityThoughtContinuation) recordFailure(ginCtx *gin.Context, stag
 	if c == nil || err == nil {
 		return
 	}
-	message := sanitizeUpstreamErrorMessage(err.Error())
+	message := truncateString(sanitizeUpstreamErrorMessage(err.Error()), 512)
 	status := 0
+	code, requestID := "", ""
 	var statusErr *antigravityThoughtContinuationStatusError
 	if errors.As(err, &statusErr) {
 		status = statusErr.StatusCode
+		code, requestID = statusErr.Code, statusErr.RequestID
+		if statusErr.Message != "" {
+			message = statusErr.Message
+		}
 	}
 	c.continuationFailed = true
 	c.terminalErr = &AntigravityThoughtContinuationError{Stage: stage, StatusCode: status, Err: err}
-	logger.LegacyPrintf("service.antigravity_gateway", "%s thought_continuation_failed stage=%s status=%d account=%d error=%v",
-		c.prefix, stage, status, c.account.ID, err)
+	logger.LegacyPrintf("service.antigravity_gateway", "%s thought_continuation_failed stage=%s status=%d account=%d upstream_request_id=%q error=%v",
+		c.prefix, stage, status, c.account.ID, requestID, err)
 	appendOpsUpstreamError(ginCtx, OpsUpstreamErrorEvent{
 		Platform:           c.account.Platform,
 		AccountID:          c.account.ID,
 		AccountName:        c.account.Name,
 		UpstreamStatusCode: status,
+		UpstreamRequestID:  requestID,
 		Kind:               "thought_continuation_error",
+		Stage:              stage,
+		Reason:             code,
 		Message:            message,
 	})
 }
