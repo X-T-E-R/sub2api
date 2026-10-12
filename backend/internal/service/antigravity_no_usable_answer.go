@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const antigravityNoUsableAnswerMessage = "Upstream completed with thinking but no usable answer. Please retry the request."
+const antigravityNoUsableAnswerMessage = "Upstream completed without a usable answer. Please retry the request."
 
 // AntigravityNoUsableAnswerError is a billable partial response, already reported
 // downstream as a retryable provider error. It is not a gateway failover signal:
@@ -30,10 +30,10 @@ func IsAntigravityPartialResponseError(err error) bool {
 }
 
 // Called only at clean upstream EOF, never on refusal, length, read error or
-// cancellation. Keep A independent of B and classify only the original eligible
-// STOP + thinking-only shape; an empty or interrupted response is not this error.
+// cancellation. A includes thinking-only/empty STOP and actual thinking with
+// a missing terminal. B still requires thinking-only STOP and never appends either.
 func (c *antigravityThoughtContinuation) completeNoUsableAnswer(ginCtx *gin.Context, stage string) bool {
-	if c == nil || c.continuationFailed || !c.policy.SuppressThoughtOnlyStop || !c.effectiveGeneration().thoughtOnlySuccessful() {
+	if c == nil || c.continuationFailed || !c.policy.SuppressThoughtOnlyStop || !c.effectiveGeneration().noUsableAnswerEligible() {
 		return false
 	}
 	if ginCtx.Request.Context().Err() != nil {
@@ -41,10 +41,17 @@ func (c *antigravityThoughtContinuation) completeNoUsableAnswer(ginCtx *gin.Cont
 	}
 	if c.noUsableAnswerErr == nil {
 		c.noUsableAnswerErr = &AntigravityNoUsableAnswerError{Stage: stage}
+		reason := "empty"
+		generation := c.effectiveGeneration()
+		if generation.finishReason == "" {
+			reason = "missing_terminal"
+		} else if generation.thoughtOnlySuccessful() {
+			reason = "thinking_only"
+		}
 		appendOpsUpstreamError(ginCtx, OpsUpstreamErrorEvent{
 			Platform: c.account.Platform, AccountID: c.account.ID, AccountName: c.account.Name,
 			UpstreamStatusCode: http.StatusOK, Kind: "no_usable_answer", Stage: stage,
-			Reason: "thinking_only", Message: antigravityNoUsableAnswerMessage,
+			Reason: reason, Message: antigravityNoUsableAnswerMessage,
 		})
 	}
 	return true

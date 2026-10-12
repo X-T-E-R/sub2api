@@ -249,7 +249,17 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 	finalEvents, usage := s.processor.Finish()
 	mergeAntigravityCompatUsage(s.usage, usage)
 	s.consumeClaudeEvents(finalEvents)
-	if !s.hasMeaningfulData() && !s.writer.Disconnected() {
+	noAnswer := IsAntigravityNoUsableAnswerError(s.continuation.failureError())
+	if noAnswer {
+		// Empty STOP has no content event to release the buffered message/usage.
+		// Publish those real frames before the explicit failed terminal, without
+		// inventing content or treating the response as a successful empty stream.
+		for i := range s.pendingEvents {
+			s.adapter.Emit(&s.pendingEvents[i], s.writer)
+		}
+		s.pendingEvents = nil
+	}
+	if !noAnswer && !s.hasMeaningfulData() && !s.writer.Disconnected() {
 		if s.preContentKeepaliveSent {
 			s.adapter.WriteError(s.writer, "empty_stream")
 			return s.result(false), errors.New("empty Antigravity compatibility stream after keepalive")
@@ -441,7 +451,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				return preContentTimeout()
 			}
 			if !open {
-				if !session.hasMeaningfulData() && !writer.Disconnected() {
+				cont := session.continuation
+				eligibleNoAnswer := cont != nil && cont.policy.SuppressThoughtOnlyStop && cont.effectiveGeneration().noUsableAnswerEligible()
+				if !eligibleNoAnswer && !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
 				}
 				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A

@@ -392,6 +392,30 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 			wantStop:     `"stop_reason":"end_turn"`,
 		},
 		{
+			name:         "blocked thinking without terminal",
+			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `]},"safetyRatings":[{"blocked":true}]}]}}`,
+			wantUpstream: 1,
+			wantStop:     `"stop_reason":"end_turn"`,
+		},
+		{
+			name:         "grounded thinking without terminal",
+			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `]},"groundingMetadata":{"webSearchQueries":["query"]}}]}}`,
+			wantUpstream: 1,
+			wantStop:     `"stop_reason":"end_turn"`,
+		},
+		{
+			name:         "empty refusal",
+			body:         `data: {"response":{"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":4}}}`,
+			wantUpstream: 1,
+			wantStop:     `"stop_reason":"end_turn"`,
+		},
+		{
+			name:         "empty output limit",
+			body:         `data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":4}}}`,
+			wantUpstream: 1,
+			wantStop:     `"stop_reason":"max_tokens"`,
+		},
+		{
 			name:         "tool call",
 			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `,{"functionCall":{"id":"call-a","name":"echo","args":{}}}]},"finishReason":"STOP"}]}}`,
 			wantUpstream: 1,
@@ -400,18 +424,6 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 		{
 			name:         "visible text",
 			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `,{"text":"answer"}]},"finishReason":"STOP"}]}}`,
-			wantUpstream: 1,
-			wantStop:     `"stop_reason":"end_turn"`,
-		},
-		{
-			name:         "truly empty",
-			body:         `data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4}}}`,
-			wantUpstream: 1,
-			wantStop:     `"stop_reason":"end_turn"`,
-		},
-		{
-			name:         "truncated stream",
-			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `]},"finishReason":""}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}}`,
 			wantUpstream: 1,
 			wantStop:     `"stop_reason":"end_turn"`,
 		},

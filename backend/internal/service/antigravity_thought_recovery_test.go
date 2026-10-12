@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -78,5 +79,130 @@ func TestAntigravityThoughtSuppressionDoesNotReclassifyReadFailure(t *testing.T)
 			require.NotContains(t, recorder.Body.String(), `"type":"api_error"`)
 			require.NotContains(t, recorder.Body.String(), `"type":"message_stop"`)
 		})
+	}
+}
+
+const antigravityEmptyStopLine = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":0,"thoughtsTokenCount":0}}}`
+
+func TestAntigravityEmptyStopSignalsRetryOnClaudeForward(t *testing.T) {
+	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(antigravityEmptyStopLine)}}
+	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}, upstream)
+	body, c, recorder := newAntigravityThoughtClaudeRequest(true)
+	result, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
+	require.True(t, IsAntigravityNoUsableAnswerError(err), "empty normal STOP must not be successful EOF")
+	var failover *UpstreamFailoverError
+	require.False(t, errors.As(err, &failover))
+	require.NotNil(t, result)
+	require.Equal(t, 8, result.Usage.InputTokens)
+	require.Zero(t, result.Usage.OutputTokens)
+	require.Equal(t, 1, upstream.callCount)
+	wire := recorder.Body.String()
+	require.Contains(t, wire, `"type":"api_error"`)
+	require.Contains(t, wire, `"input_tokens":8`)
+	require.Contains(t, wire, `"output_tokens":0`)
+	require.NotContains(t, wire, `"stop_reason":"end_turn"`, "success cannot precede the error")
+	require.NotContains(t, wire, `"type":"message_stop"`)
+	events := SnapshotOpsUpstreamErrors(c)
+	require.Len(t, events, 1)
+	require.Equal(t, "empty", events[0].Reason)
+}
+
+func TestAntigravityEmptyStopProtocolsPreserveUsageWithoutSuccessfulTerminal(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		for _, protocol := range []string{"messages", "chat", "responses", "gemini"} {
+			name := protocol + "/collect"
+			if stream {
+				name = protocol + "/stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(antigravityEmptyStopLine)}}
+				svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}, upstream)
+				body := []byte(`{"model":"client-alias","stream":` + fmt.Sprint(stream) + `,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"question"}],"input":"question","contents":[{"role":"user","parts":[{"text":"question"}]}]}`)
+				c, recorder := newAntigravityCompatContext(http.MethodPost, "/fixture", body)
+				account := antigravityThoughtAccount(nil)
+				var result *ForwardResult
+				var err error
+				switch protocol {
+				case "messages":
+					result, err = svc.Forward(context.Background(), c, account, body, false)
+				case "chat":
+					result, err = svc.ForwardAsChatCompletions(context.Background(), c, account, body, nil)
+				case "responses":
+					result, err = svc.ForwardAsResponses(context.Background(), c, account, body, nil)
+				case "gemini":
+					action := "generateContent"
+					if stream {
+						action = "streamGenerateContent"
+					}
+					result, err = svc.ForwardGemini(context.Background(), c, account, "gemini-3.1-pro-high", action, stream, body, false)
+				}
+				require.True(t, IsAntigravityNoUsableAnswerError(err), "err=%v", err)
+				require.NotNil(t, result)
+				require.Equal(t, 8, result.Usage.InputTokens)
+				require.Zero(t, result.Usage.OutputTokens)
+				require.Equal(t, 1, upstream.callCount)
+				if !stream {
+					require.Equal(t, http.StatusBadGateway, recorder.Code)
+				}
+				wire := recorder.Body.String()
+				require.Contains(t, wire, antigravityNoUsableAnswerMessage)
+				for _, success := range []string{`"stop_reason":"end_turn"`, `"type":"message_stop"`, `"finish_reason":"stop"`, "data: [DONE]", "response.completed", `"finishReason":"STOP"`} {
+					require.NotContains(t, wire, success)
+				}
+				switch protocol {
+				case "messages":
+					require.Contains(t, wire, `"input_tokens":8`)
+				case "responses":
+					require.Contains(t, wire, `"input_tokens":8`)
+					if !stream {
+						require.Equal(t, "failed", gjson.Get(wire, "status").String(), "root response terminal, not the closed output item's status")
+					}
+				case "chat":
+					require.Contains(t, wire, `"prompt_tokens":8`)
+				case "gemini":
+					require.Contains(t, wire, `"promptTokenCount":8`)
+				}
+			})
+		}
+	}
+}
+
+func TestAntigravityThinkingMissingTerminalSignalsRetryOnClaudeForward(t *testing.T) {
+	line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true,"thoughtSignature":"sig-plan"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`
+	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(line)}}
+	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}, upstream)
+	body, c, recorder := newAntigravityThoughtClaudeRequest(true)
+	result, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
+	require.True(t, IsAntigravityNoUsableAnswerError(err), "missing terminal after actual thinking must not synthesize success")
+	require.NotNil(t, result)
+	require.Equal(t, 8, result.Usage.InputTokens)
+	require.Equal(t, 5, result.Usage.OutputTokens)
+	require.Equal(t, 1, upstream.callCount)
+	wire := recorder.Body.String()
+	require.Contains(t, wire, "sig-plan")
+	require.Contains(t, wire, `"type":"api_error"`)
+	require.NotContains(t, wire, `"stop_reason":"end_turn"`)
+	require.NotContains(t, wire, `"type":"message_stop"`)
+	events := SnapshotOpsUpstreamErrors(c)
+	require.Len(t, events, 1)
+	require.Equal(t, "missing_terminal", events[0].Reason)
+}
+
+func TestAntigravityEmptyOrMissingTerminalNeverAppendsThinkingContinuation(t *testing.T) {
+	missing := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"plan","thought":true,"thoughtSignature":"sig-plan"}]}}]}}`
+	for _, line := range []string{antigravityEmptyStopLine, missing} {
+		for _, suppress := range []bool{false, true} {
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(line)}}
+			svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: suppress, ContinueThoughtOnly: true}, upstream)
+			body, c, recorder := newAntigravityThoughtClaudeRequest(true)
+			_, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
+			if suppress {
+				require.True(t, IsAntigravityNoUsableAnswerError(err))
+			} else {
+				require.NoError(t, err)
+				require.Contains(t, recorder.Body.String(), `"type":"message_stop"`)
+			}
+			require.Equal(t, 1, upstream.callCount, "B still requires actual thinking with STOP")
+		}
 	}
 }

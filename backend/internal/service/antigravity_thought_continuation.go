@@ -30,12 +30,12 @@ import (
 //     appends the thinking and signature the upstream actually returned as the final
 //     model turn, with no added system/user text and no blank turn.
 //
-// Nothing here reacts to errors, cancellations, refusals, output-limit stops, empty
-// responses or truncated streams: those keep their own semantics.
+// A also reports empty STOP or thinking-only clean EOF without a terminal as
+// retryable failures. B never continues either shape. Read errors, cancellations,
+// refusals, grounding and output-limit stops retain their own semantics.
 
-// antigravitySuccessfulFinishReason is the only upstream finish reason that counts as a
-// normal completion. MAX_TOKENS, SAFETY, RECITATION, MALFORMED_FUNCTION_CALL, an absent
-// reason (truncated stream) and every other value are never suppressed or continued.
+// antigravitySuccessfulFinishReason is the only normal completion eligible for B.
+// A may instead report missing-terminal thinking at clean EOF as a partial failure.
 const antigravitySuccessfulFinishReason = "STOP"
 
 // errAntigravityThoughtContinuationUnavailable reports that the append-once budget is
@@ -172,6 +172,7 @@ type antigravityThoughtGeneration struct {
 	hasVisibleText   bool
 	hasToolCall      bool
 	hasGrounding     bool
+	hasRefusal       bool
 	claudeUsage      ClaudeUsage
 	rawUsageMetadata map[string]int64
 }
@@ -214,6 +215,14 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 
 	candidate := candidates.Array()[0]
 	g.sawResponse = true
+	if parsed.Get("promptFeedback.blockReason").String() != "" {
+		g.hasRefusal = true
+	}
+	for _, rating := range candidate.Get("safetyRatings").Array() {
+		if rating.Get("blocked").Bool() {
+			g.hasRefusal = true
+		}
+	}
 	if reason := candidate.Get("finishReason"); reason.Type == gjson.String && reason.String() != "" {
 		g.finishReason = reason.String()
 	}
@@ -299,13 +308,18 @@ func (g *antigravityThoughtGeneration) observeUsageMetadata(parsed gjson.Result)
 // thoughtOnlySuccessful reports the Task24 target shape: the upstream completed the
 // response normally and everything it produced is thinking.
 func (g *antigravityThoughtGeneration) thoughtOnlySuccessful() bool {
-	if g == nil || !g.sawResponse || g.finishReason != antigravitySuccessfulFinishReason {
+	return g.noUsableAnswerEligible() && g.finishReason == antigravitySuccessfulFinishReason && len(g.replayableTail()) > 0
+}
+
+// noUsableAnswerEligible is A's response shape, finalized only at clean EOF:
+// empty/thinking-only STOP, or actual thinking without an upstream terminal.
+// B still requires STOP and actual thinking, never an empty or missing-terminal turn.
+func (g *antigravityThoughtGeneration) noUsableAnswerEligible() bool {
+	if g == nil || !g.sawResponse || g.hasVisibleText || g.hasToolCall || g.hasGrounding || g.hasRefusal {
 		return false
 	}
-	if g.hasVisibleText || g.hasToolCall || g.hasGrounding {
-		return false
-	}
-	return len(g.replayableTail()) > 0
+	return g.finishReason == antigravitySuccessfulFinishReason ||
+		(g.finishReason == "" && len(g.replayableTail()) > 0)
 }
 
 // replayableTail returns the model tail for the appended generation, or nil when the
@@ -500,13 +514,13 @@ func (c *antigravityThoughtContinuation) observePayload(payload []byte) {
 // when B still intends to append the received thinking and therefore needs the stream to
 // stay open.
 func (c *antigravityThoughtContinuation) withholdSuccessfulTerminal() bool {
-	if c == nil || c.generation == nil || !c.generation.thoughtOnlySuccessful() {
+	if c == nil || c.generation == nil {
 		return false
 	}
-	if c.policy.SuppressThoughtOnlyStop {
+	if c.policy.SuppressThoughtOnlyStop && c.generation.noUsableAnswerEligible() {
 		return true
 	}
-	return c.policy.ContinueThoughtOnly && !c.extraUsed
+	return c.policy.ContinueThoughtOnly && !c.extraUsed && c.generation.thoughtOnlySuccessful()
 }
 
 // suppressFinalTerminal reports whether the response must end without a successful
@@ -527,7 +541,7 @@ func (c *antigravityThoughtContinuation) suppressFinalTerminal() bool {
 	if generation == nil {
 		return false
 	}
-	return generation.thoughtOnlySuccessful()
+	return generation.noUsableAnswerEligible()
 }
 
 // effectiveGeneration is the generation the downstream body describes: the appended
