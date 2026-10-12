@@ -598,7 +598,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			// ForwardNative already wrote the response
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			// Task24：该错误类型不是 failover 错误，第一代已经下发的部分结果必须先入账。
-			if service.IsAntigravityThoughtContinuationError(err) {
+			if service.IsAntigravityPartialResponseError(err) {
 				submitUsage(result)
 			}
 			return

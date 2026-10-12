@@ -2014,9 +2014,9 @@ func gatewayForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForw
 	if err == nil || c == nil || c.Writer == nil {
 		return false
 	}
-	// Task24：追加生成失败的终态错误表示"第一代已经下发、协议错误已经写出、上游只再发了一次
-	// 请求且不会 failover"。再补一个通用错误帧只会污染已经完整的响应，因此直接视为已告知。
-	if service.IsAntigravityThoughtContinuationError(err) {
+	// A no-usable-answer or B append failure already carries its protocol error and
+	// billable partial result. Do not fail over or append a second generic error.
+	if service.IsAntigravityPartialResponseError(err) {
 		return true
 	}
 	if c.Writer.Size() == writerSizeBeforeForward {

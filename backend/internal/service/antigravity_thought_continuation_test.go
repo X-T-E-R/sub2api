@@ -186,7 +186,12 @@ func TestAntigravityThoughtPolicyCombinationsOnClaudeForward(t *testing.T) {
 
 			result, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(tt.accountExtra), body, false)
 
-			require.NoError(t, err)
+			if tt.wantTerminal {
+				require.NoError(t, err)
+			} else {
+				require.True(t, IsAntigravityNoUsableAnswerError(err))
+				require.Contains(t, recorder.Body.String(), `"type":"api_error"`)
+			}
 			require.NotNil(t, result)
 			require.Equal(t, tt.wantUpstreamCall, upstream.callCount, "one appended generation at most")
 
@@ -196,7 +201,7 @@ func TestAntigravityThoughtPolicyCombinationsOnClaudeForward(t *testing.T) {
 			require.Equal(t, tt.wantTerminal, strings.Contains(wire, `"type":"message_stop"`),
 				"the successful terminal must be withheld only when A decides so")
 			require.Equal(t, tt.wantTerminal, strings.Contains(wire, `"stop_reason":"end_turn"`))
-			require.Equal(t, tt.wantText, strings.Contains(wire, "answer"))
+			require.Equal(t, tt.wantText, strings.Contains(wire, `"text":"answer"`))
 			require.Equal(t, 1, strings.Count(wire, "event: message_start"), "one legal downstream response")
 			if !tt.wantTerminal {
 				// A withheld terminal still reports the real usage with a null stop reason: the
@@ -345,7 +350,8 @@ func TestAntigravityThoughtSuppressionSkipsTerminalForThinkingOnly(t *testing.T)
 
 	result, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
 
-	require.NoError(t, err)
+	require.True(t, IsAntigravityNoUsableAnswerError(err))
+	require.Contains(t, recorder.Body.String(), `"type":"api_error"`)
 	require.NotNil(t, result)
 	require.Equal(t, 2, upstream.callCount, "the append budget is one")
 	wire := recorder.Body.String()
@@ -495,11 +501,17 @@ func TestAntigravityThoughtSuppressionOnClaudeNonStreamingClient(t *testing.T) {
 
 			result, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
 
-			require.NoError(t, err)
+			if tt.global.SuppressThoughtOnlyStop {
+				require.True(t, IsAntigravityNoUsableAnswerError(err))
+				require.Equal(t, http.StatusBadGateway, recorder.Code)
+				require.Equal(t, "api_error", gjson.Get(recorder.Body.String(), "error.type").String())
+			} else {
+				require.NoError(t, err)
+			}
 			require.NotNil(t, result)
 			require.Contains(t, recorder.Body.String(), tt.wantStop)
 			require.Contains(t, recorder.Body.String(), "sig-plan")
-			require.Equal(t, tt.appended, strings.Contains(recorder.Body.String(), "answer"))
+			require.Equal(t, tt.appended, strings.Contains(recorder.Body.String(), `"text":"answer"`))
 			if tt.appended {
 				require.Equal(t, 2, upstream.callCount)
 				require.Equal(t, antigravityThoughtGenerationOneInput+antigravityThoughtGenerationTwoInput, result.Usage.InputTokens)
@@ -584,7 +596,12 @@ func TestAntigravityThoughtPolicyOnNativeGeminiStreaming(t *testing.T) {
 
 			result, err := svc.ForwardGemini(context.Background(), c, antigravityThoughtAccount(nil), "gemini-3.1-pro-high", "streamGenerateContent", true, requestBody, false)
 
-			require.NoError(t, err)
+			if tt.global.SuppressThoughtOnlyStop {
+				require.True(t, IsAntigravityNoUsableAnswerError(err))
+				require.Contains(t, recorder.Body.String(), `"status":"UNAVAILABLE"`)
+			} else {
+				require.NoError(t, err)
+			}
 			require.NotNil(t, result)
 			require.Equal(t, tt.wantUpstream, upstream.callCount)
 			wire := recorder.Body.String()
@@ -627,7 +644,9 @@ func TestAntigravityThoughtPolicyOnNativeGeminiNonStreaming(t *testing.T) {
 
 	result, err := svc.ForwardGemini(context.Background(), c, antigravityThoughtAccount(nil), "gemini-3.1-pro-high", "generateContent", false, requestBody, false)
 
-	require.NoError(t, err)
+	require.True(t, IsAntigravityNoUsableAnswerError(err))
+	require.Equal(t, http.StatusBadGateway, recorder.Code)
+	require.Equal(t, "UNAVAILABLE", gjson.Get(recorder.Body.String(), "error.status").String())
 	require.NotNil(t, result)
 	require.Equal(t, 1, upstream.callCount)
 	require.NotContains(t, recorder.Body.String(), "finishReason", "the successful finish reason is suppressed")
@@ -670,10 +689,10 @@ func TestAntigravityThoughtSuppressionOnCompatStreams(t *testing.T) {
 			call: func(svc *AntigravityGatewayService, ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
 				return svc.ForwardAsResponses(ctx, c, account, body, nil)
 			},
-			// A suppressed response ends as an explicitly incomplete one that still carries
-			// the real cumulative usage, instead of a fabricated response.completed.
+			// A failure explicitly ends as response.failed and retains real usage,
+			// rather than allowing an intermediary to synthesize successful completion.
 			absent:    []string{"response.completed"},
-			expectOne: []string{"response.output_item.done", "response.created", "encrypted_content", "response.incomplete", `"status":"incomplete"`, `"input_tokens":8`},
+			expectOne: []string{"response.output_item.done", "response.created", "encrypted_content", "response.failed", `"status":"failed"`, `"input_tokens":8`, `"code":"server_error"`},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -685,7 +704,8 @@ func TestAntigravityThoughtSuppressionOnCompatStreams(t *testing.T) {
 
 			_, err := tt.call(svc, context.Background(), c, antigravityThoughtAccount(nil), tt.body)
 
-			require.NoError(t, err)
+			require.True(t, IsAntigravityNoUsableAnswerError(err))
+			require.Contains(t, recorder.Body.String(), antigravityNoUsableAnswerMessage)
 			require.Equal(t, 1, upstream.callCount)
 			wire := recorder.Body.String()
 			for _, absent := range tt.absent {
@@ -850,7 +870,7 @@ func TestAntigravityThoughtSuppressionOnCompatNonStreaming(t *testing.T) {
 			call: func(svc *AntigravityGatewayService, ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
 				return svc.ForwardAsResponses(ctx, c, account, body, nil)
 			},
-			expect:    `"status":"incomplete"`,
+			expect:    `"status":"failed"`,
 			notExpect: `"status":"completed"`,
 		},
 	} {
@@ -863,7 +883,9 @@ func TestAntigravityThoughtSuppressionOnCompatNonStreaming(t *testing.T) {
 
 			result, err := tt.call(svc, context.Background(), c, antigravityThoughtAccount(nil), tt.body)
 
-			require.NoError(t, err)
+			require.True(t, IsAntigravityNoUsableAnswerError(err))
+			require.Equal(t, http.StatusBadGateway, recorder.Code)
+			require.Contains(t, recorder.Body.String(), antigravityNoUsableAnswerMessage)
 			require.NotNil(t, result)
 			require.Equal(t, 1, upstream.callCount)
 			wire := recorder.Body.String()

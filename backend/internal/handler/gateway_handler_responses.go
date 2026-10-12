@@ -355,7 +355,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				zap.Error(err),
 			)
 			// Task24：该错误类型不是 failover 错误，第一代的用量必须先入账再返回。
-			if service.IsAntigravityThoughtContinuationError(err) {
+			if service.IsAntigravityPartialResponseError(err) {
 				submitUsage(result)
 			}
 			return

@@ -23,8 +23,8 @@ import (
 //
 //   - SuppressThoughtOnlyStop (A): a response that only ever produced thinking and that
 //     the upstream completed normally keeps its thinking, signature and usage, but the
-//     protocol's successful completion signal is withheld, so the downstream client
-//     applies its own continuation policy instead of accepting an empty answer.
+//     protocol's successful completion signal is replaced by an explicit retryable
+//     error. The partial result remains billable; only the client may retry.
 //   - ContinueThoughtOnly (B): the gateway itself issues exactly one extra upstream
 //     request. That request reuses the exact original upstream request envelope and
 //     appends the thinking and signature the upstream actually returned as the final
@@ -360,7 +360,8 @@ type antigravityThoughtContinuation struct {
 	continuationFailed bool
 	// terminalErr is the Task24 error the public entry points return together with the
 	// billable first-generation result once the appended generation failed.
-	terminalErr *AntigravityThoughtContinuationError
+	terminalErr       *AntigravityThoughtContinuationError
+	noUsableAnswerErr *AntigravityNoUsableAnswerError
 	// extraObserved is true once the appended generation's response was obtained, so the
 	// response under construction already contains parts of two generations.
 	extraObserved bool
@@ -675,14 +676,19 @@ func (c *antigravityThoughtContinuation) recordFailure(ginCtx *gin.Context, stag
 	})
 }
 
-// failureError is the Task24 terminal error of this response, or nil when no appended
-// generation failed. Public entry points return it together with the billable first-generation
-// result instead of pretending the response completed.
+// failureError returns an already-reported A or B failure with its billable
+// partial result, rather than pretending that an unusable response completed.
 func (c *antigravityThoughtContinuation) failureError() error {
-	if c == nil || c.terminalErr == nil {
+	if c == nil {
 		return nil
 	}
-	return c.terminalErr
+	if c.terminalErr != nil {
+		return c.terminalErr
+	}
+	if c.noUsableAnswerErr != nil {
+		return c.noUsableAnswerErr
+	}
+	return nil
 }
 
 // appendAntigravityThinkingTail appends the received thinking parts as the final model

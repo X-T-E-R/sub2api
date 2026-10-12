@@ -31,6 +31,15 @@ import (
 //   - 下游拿到第一代的非成功终态（finish_reason:null）与思考内容，而不是成功终态，也没有第二个
 //     错误响应体（gatewayForwardErrorAlreadyCommunicated 对 Task24 终态错误返回 true）。
 func TestGatewayChatCompletionsAntigravityThoughtAppendedFailureKeepsBillingAndSlots(t *testing.T) {
+	runGatewayThoughtPartialFailure(t, false)
+}
+
+func TestGatewayChatCompletionsAntigravityNoUsableAnswerKeepsBillingAndSlots(t *testing.T) {
+	runGatewayThoughtPartialFailure(t, true)
+}
+
+func runGatewayThoughtPartialFailure(t *testing.T, noAnswer bool) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	groupID := int64(9300)
@@ -38,6 +47,10 @@ func TestGatewayChatCompletionsAntigravityThoughtAppendedFailureKeepsBillingAndS
 		ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive,
 	}
 	account := handlerThoughtAccount()
+	if noAnswer {
+		account.Extra[service.AntigravitySuppressThoughtOnlyStopExtraKey] = true
+		account.Extra[service.AntigravityContinueThoughtOnlyExtraKey] = false
+	}
 	account.Status = service.StatusActive
 	account.Schedulable = true
 	account.Concurrency = 1
@@ -123,17 +136,30 @@ func TestGatewayChatCompletionsAntigravityThoughtAppendedFailureKeepsBillingAndS
 	h.ChatCompletions(c)
 
 	// 下游：第一代的合法内容 + 非成功终态，没有成功完成信号，也没有第二个错误响应体。
-	require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
+	wantStatus := http.StatusOK
+	wantCalls := 2
+	if noAnswer {
+		wantStatus = http.StatusBadGateway
+		wantCalls = 1
+	}
+	require.Equal(t, wantStatus, recorder.Code, "body=%s", recorder.Body.String())
 	wire := recorder.Body.String()
 	require.Contains(t, wire, "plan", "第一代已收到的思考仍然交付下游")
 	require.Contains(t, wire, `"finish_reason":null`, "追加生成失败不得伪装成成功完成")
 	require.NotContains(t, wire, `"finish_reason":"stop"`)
-	require.NotContains(t, wire, "answer")
-	require.NotContains(t, wire, `"error"`, "Task24 终态错误已被视为已告知，不再补写错误响应")
+	if noAnswer {
+		require.Contains(t, wire, `"code":"thought_only_response"`)
+		require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error"`)), "one protocol error, no generic duplicate")
+		require.Contains(t, wire, `"prompt_tokens":8`)
+		require.Contains(t, wire, `"completion_tokens":5`)
+	} else {
+		require.NotContains(t, wire, "answer")
+		require.NotContains(t, wire, `"error"`, "Task24 终态错误已被视为已告知，不再补写错误响应")
+	}
 
 	// 请求/slot：第一代 + 一次追加生成，用户与账号槽位各获取一次、各释放一次（无泄漏、无第二次
 	// 账号请求）。若错误分支被当成可 failover 错误，这里会出现第二轮槽位获取与第三次上游请求。
-	require.Equal(t, 2, upstream.calls, "只有第一代与一次追加生成：没有重试、没有新的账号请求")
+	require.Equal(t, wantCalls, upstream.calls, "no gateway retry/failover; B off makes no appended request")
 	require.Equal(t, int64(1), concurrencyCache.userAcquires.Load(), "用户槽位只获取一次")
 	require.Equal(t, int64(1), concurrencyCache.userReleases.Load(), "用户槽位必须释放一次")
 	require.Equal(t, int64(1), concurrencyCache.accountAcquires.Load(), "账号槽位只获取一次")

@@ -137,15 +137,19 @@ func (w *geminiCaptureResponseWriter) record(p []byte, n int, err error) {
 }
 
 func writeClaudeNonStreamingResponse(c *gin.Context, body []byte) {
+	writeClaudeResponse(c, body, http.StatusOK)
+}
+
+func writeClaudeResponse(c *gin.Context, body []byte, status int) {
 	capture := GeminiCaptureFromContext(c.Request.Context())
 	if capture == nil {
-		c.Data(http.StatusOK, "application/json", body)
+		c.Data(status, "application/json", body)
 		return
 	}
 	originalWriter := c.Writer
 	c.Writer = &geminiCaptureResponseWriter{ResponseWriter: originalWriter, capture: capture}
 	defer func() { c.Writer = originalWriter }()
-	c.Data(http.StatusOK, "application/json", body)
+	c.Data(status, "application/json", body)
 }
 
 // handleStreamReadError 处理上游读取错误的通用逻辑。
@@ -370,8 +374,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						continue
 					}
 				}
+				noAnswer := !cw.Disconnected() && cont.completeNoUsableAnswer(c, "gemini_stream")
 				flushHeld(cont != nil && cont.suppressFinalTerminal())
-				return result(cw.Disconnected()), nil
+				if noAnswer {
+					data, _ := json.Marshal(map[string]any{"error": antigravityNoUsableAnswerGoogleError()})
+					cw.Fprintf("event: error\ndata: %s\n\n", data)
+				}
+				return result(cw.Disconnected()), cont.failureError()
 			}
 			if ev.err != nil {
 				if cont != nil && cont.hasExtraGeneration() {
@@ -760,11 +769,16 @@ returnResponse:
 		}
 	}
 
+	status := http.StatusOK
+	if cont.completeNoUsableAnswer(c, "gemini_collect") {
+		status = http.StatusBadGateway
+		finalResponse["error"] = antigravityNoUsableAnswerGoogleError()
+	}
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
-	c.Data(http.StatusOK, "application/json", respBody)
+	c.Data(status, "application/json", respBody)
 
 	// 追加生成失败时，第一代的合法响应体已经写出（非成功终态），结果与终态错误一起返回。
 	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, cont.failureError()
@@ -1232,6 +1246,16 @@ returnResponse:
 		}
 	}
 
+	if cont.completeNoUsableAnswer(c, "claude_collect") {
+		claudeResp, err = sjson.SetBytes(claudeResp, "type", "error")
+		if err == nil {
+			claudeResp, err = sjson.SetBytes(claudeResp, "error", map[string]string{"type": "api_error", "message": antigravityNoUsableAnswerMessage})
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	// 转换为 service.ClaudeUsage
 	usage := &ClaudeUsage{
 		InputTokens:              agUsage.InputTokens,
@@ -1260,11 +1284,14 @@ func withClaudeSuccessfulTerminalSuppressed(claudeBody []byte) ([]byte, error) {
 func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
 	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
 	if err != nil {
-		if IsAntigravityThoughtContinuationError(err) {
-			// Task24：追加生成的终态错误。第一代的合法响应体照常下发（非成功终态），可计费
-			// 结果与错误一起返回；调用方先入账，不 failover，也不再补写错误响应。
+		if IsAntigravityPartialResponseError(err) {
+			// The protocol failure is already encoded; preserve partial content and billable usage.
 			if claudeResp != nil {
-				writeClaudeNonStreamingResponse(c, claudeResp)
+				status := http.StatusOK
+				if IsAntigravityNoUsableAnswerError(err) {
+					status = http.StatusBadGateway
+				}
+				writeClaudeResponse(c, claudeResp, status)
 			}
 			return streamRes, err
 		}
@@ -1453,6 +1480,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 	// finalize 发送结束事件并返回结果。
 	finalize := func() (*antigravityStreamResult, error) {
+		noAnswer := !cw.Disconnected() && cont.completeNoUsableAnswer(c, "claude_stream")
 		if cont != nil {
 			// A 的有效设置（或追加生成失败）决定最终终态：抑制成功终态，但仍下发累计
 			// usage，让下游拿到真实用量而不是被当成成功完成。
@@ -1472,7 +1500,10 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				RetryableOnSameAccount: true,
 			}
 		}
-		return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+		if noAnswer {
+			writeAntigravityNoUsableAnswerAnthropic(cw)
+		}
+		return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, cont.failureError()
 	}
 
 	for {

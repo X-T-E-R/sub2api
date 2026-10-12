@@ -367,7 +367,7 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 		c.Header("x-request-id", requestID)
 	}
 	streamResult, err := s.consumeAntigravityCompatSuccess(c, call, resp)
-	if err != nil && !IsAntigravityThoughtContinuationError(err) {
+	if err != nil && !IsAntigravityPartialResponseError(err) {
 		return nil, err
 	}
 	if streamResult == nil {
@@ -537,7 +537,7 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	originalModel string,
 ) (*antigravityStreamResult, error) {
 	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
-	if err != nil && !IsAntigravityThoughtContinuationError(err) {
+	if err != nil && !IsAntigravityPartialResponseError(err) {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
 	var anthropicResponse apicompat.AnthropicResponse
@@ -556,8 +556,15 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 		if encodeErr != nil {
 			return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to encode upstream response")
 		}
-		// 与 Gin 的 c.JSON 使用同一 Content-Type，只有终态字段被替换。
-		c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
+		status := http.StatusOK
+		if IsAntigravityNoUsableAnswerError(err) {
+			status = http.StatusBadGateway
+			encoded, encodeErr = sjson.SetBytes(encoded, "error", map[string]string{"type": "server_error", "code": "thought_only_response", "message": antigravityNoUsableAnswerMessage})
+			if encodeErr != nil {
+				return nil, encodeErr
+			}
+		}
+		c.Data(status, "application/json; charset=utf-8", encoded)
 		return result, err
 	}
 	c.JSON(http.StatusOK, chatResponse)
@@ -572,7 +579,7 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	originalModel string,
 ) (*antigravityStreamResult, error) {
 	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
-	if err != nil && !IsAntigravityThoughtContinuationError(err) {
+	if err != nil && !IsAntigravityPartialResponseError(err) {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
 	var anthropicResponse apicompat.AnthropicResponse
@@ -588,7 +595,14 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 		responsesResponse.Status = "incomplete"
 		responsesResponse.IncompleteDetails = nil
 	}
-	c.JSON(http.StatusOK, responsesResponse)
+	status := http.StatusOK
+	if IsAntigravityNoUsableAnswerError(err) {
+		status = http.StatusBadGateway
+		responsesResponse.Status = "failed"
+		responsesResponse.IncompleteDetails = nil
+		responsesResponse.Error = &apicompat.ResponsesError{Code: "server_error", Message: antigravityNoUsableAnswerMessage}
+	}
+	c.JSON(status, responsesResponse)
 	// err 为 Task24 的终态错误时，第一代的合法响应体已经写出，结果照常返回供调用方入账。
 	return result, err
 }

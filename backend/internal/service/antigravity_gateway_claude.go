@@ -480,7 +480,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
-			if IsAntigravityThoughtContinuationError(err) {
+			if IsAntigravityPartialResponseError(err) {
 				return buildResult(streamRes, streamRes != nil), err
 			}
 			return nil, err
@@ -493,7 +493,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		streamRes, err := s.handleClaudeStreamToNonStreaming(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
-			if IsAntigravityThoughtContinuationError(err) {
+			if IsAntigravityPartialResponseError(err) {
 				return buildResult(streamRes, streamRes != nil), err
 			}
 			return nil, err

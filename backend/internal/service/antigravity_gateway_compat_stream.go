@@ -22,6 +22,7 @@ type antigravityCompatStreamAdapter interface {
 	// successful completion frame; the close-out frames and usage are still written.
 	Finalize(*antigravityClientWriter, bool)
 	WriteError(*antigravityClientWriter, string)
+	FinalizeRetryableFailure(*antigravityClientWriter)
 }
 
 // isResponsesTerminalEvent reports the Responses protocol's terminal frames. They carry
@@ -85,6 +86,11 @@ func (a *antigravityChatStreamAdapter) Finalize(writer *antigravityClientWriter,
 	writer.Write([]byte("data: [DONE]\n\n"))
 }
 
+func (a *antigravityChatStreamAdapter) FinalizeRetryableFailure(writer *antigravityClientWriter) {
+	a.Finalize(writer, true)
+	writer.Fprintf("data: {\"error\":{\"type\":\"server_error\",\"code\":\"thought_only_response\",\"message\":%q}}\n\n", antigravityNoUsableAnswerMessage)
+}
+
 func (a *antigravityChatStreamAdapter) WriteError(writer *antigravityClientWriter, reason string) {
 	writer.Fprintf("data: {\"error\":{\"message\":%q,\"type\":\"upstream_error\"}}\n\n", reason)
 }
@@ -127,6 +133,20 @@ func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWr
 			}
 		}
 		a.emitResponseEvent(responseEvent, writer)
+	}
+}
+
+func (a *antigravityResponsesStreamAdapter) FinalizeRetryableFailure(writer *antigravityClientWriter) {
+	for _, event := range apicompat.FinalizeAnthropicResponsesStream(a.anthropicState) {
+		if isResponsesTerminalEvent(event.Type) {
+			event.Type = "response.failed"
+			if event.Response != nil {
+				event.Response.Status = "failed"
+				event.Response.IncompleteDetails = nil
+				event.Response.Error = &apicompat.ResponsesError{Code: "server_error", Message: antigravityNoUsableAnswerMessage}
+			}
+		}
+		a.emitResponseEvent(event, writer)
 	}
 }
 
@@ -236,8 +256,12 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 		}
 		return nil, antigravityCompatEmptyStreamError()
 	}
-	s.adapter.Finalize(s.writer, s.suppressSuccessfulTerminal())
-	return s.result(s.writer.Disconnected()), nil
+	if IsAntigravityNoUsableAnswerError(s.continuation.failureError()) {
+		s.adapter.FinalizeRetryableFailure(s.writer)
+	} else {
+		s.adapter.Finalize(s.writer, s.suppressSuccessfulTerminal())
+	}
+	return s.result(s.writer.Disconnected()), s.continuation.failureError()
 }
 
 func (s *antigravityCompatStreamSession) collectResult(clientDisconnect bool) *antigravityStreamResult {
@@ -443,6 +467,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 						events, stopScanner, maxLineSize = s.startAntigravityCompatScanner(nextResp.Body)
 						continue
 					}
+				}
+				if !writer.Disconnected() {
+					session.continuation.completeNoUsableAnswer(c, "compat_stream")
 				}
 				return session.finish()
 			}
