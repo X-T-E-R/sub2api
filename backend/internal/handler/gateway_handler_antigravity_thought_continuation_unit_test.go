@@ -63,6 +63,11 @@ func runGatewayThoughtPartialFailure(t *testing.T, noAnswer, empty bool) {
 
 	generation := handlerThoughtGenerationOneLine
 	wantOutput := 5
+	if noAnswer && !empty {
+		// Previously detector treated null as a tool and bypassed A; exercise the
+		// repaired shape through the real handler partial-usage error branch.
+		generation = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true,"thoughtSignature":"sig-plan","functionCall":null}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`
+	}
 	if empty {
 		generation = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":0}}}`
 		wantOutput = 0

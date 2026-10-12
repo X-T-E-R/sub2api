@@ -168,13 +168,15 @@ type antigravityThoughtGeneration struct {
 	// tail holds every received thinking part and signature carrier in the original order,
 	// verbatim: a signature is never moved onto another part, a carrier is never merged into
 	// the thinking before it, and the gateway never invents a thought or a signature.
-	tail             []antigravityThoughtTailPart
-	hasVisibleText   bool
-	hasToolCall      bool
-	hasGrounding     bool
-	hasRefusal       bool
-	claudeUsage      ClaudeUsage
-	rawUsageMetadata map[string]int64
+	tail                 []antigravityThoughtTailPart
+	hasVisibleText       bool
+	hasToolCall          bool
+	hasGrounding         bool
+	hasRenderedGrounding bool
+	nativeGemini         bool
+	hasRefusal           bool
+	claudeUsage          ClaudeUsage
+	rawUsageMetadata     map[string]int64
 }
 
 func newAntigravityThoughtGeneration() *antigravityThoughtGeneration {
@@ -237,7 +239,7 @@ func (g *antigravityThoughtGeneration) observePart(part gjson.Result) {
 	if !part.IsObject() {
 		return
 	}
-	if part.Get("functionCall").Exists() {
+	if part.Get("functionCall").IsObject() {
 		g.hasToolCall = true
 		return
 	}
@@ -281,7 +283,13 @@ func (g *antigravityThoughtGeneration) observeGrounding(grounding gjson.Result) 
 	if !grounding.IsObject() {
 		return
 	}
-	if len(grounding.Get("webSearchQueries").Array()) > 0 || len(grounding.Get("groundingChunks").Array()) > 0 {
+	var typed antigravity.GeminiGroundingMetadata
+	if json.Unmarshal([]byte(grounding.Raw), &typed) == nil && antigravity.HasRenderableGrounding(&typed) {
+		g.hasRenderedGrounding = true
+		g.hasGrounding = true
+	}
+	if g.nativeGemini && (len(grounding.Get("webSearchQueries").Array()) > 0 || len(grounding.Get("groundingChunks").Array()) > 0) {
+		// Native consumers receive this metadata verbatim, including non-Web chunks.
 		g.hasGrounding = true
 	}
 }
@@ -319,7 +327,7 @@ func (g *antigravityThoughtGeneration) noUsableAnswerEligible() bool {
 		return false
 	}
 	return g.finishReason == antigravitySuccessfulFinishReason ||
-		(g.finishReason == "" && len(g.replayableTail()) > 0)
+		((g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED") && len(g.replayableTail()) > 0)
 }
 
 // replayableTail returns the model tail for the appended generation, or nil when the
@@ -346,10 +354,11 @@ func (g *antigravityThoughtGeneration) replayableTail() []antigravityThoughtTail
 // forwarded request and stored on the Gin request context, so every retry inside the
 // response path sees one policy pair and one append budget.
 type antigravityThoughtContinuation struct {
-	service *AntigravityGatewayService
-	account *Account
-	policy  AntigravityThoughtPolicy
-	prefix  string
+	service  *AntigravityGatewayService
+	account  *Account
+	policy   AntigravityThoughtPolicy
+	prefix   string
+	delivery antigravityDeliverySummary
 
 	proxyURL    string
 	accessToken string
@@ -406,9 +415,9 @@ func toAntigravityUsage(usage ClaudeUsage) antigravity.ClaudeUsage {
 	}
 }
 
-// newAntigravityThoughtContinuation resolves the effective policy for this account and
-// returns the runtime state, or nil when both switches are off (the source default), so
-// the legacy response path keeps its exact behavior and cost.
+// newAntigravityThoughtContinuation resolves one effective account policy. The
+// state also observes policy-off responses for payload-free completion statistics;
+// disabled switches never change their response or issue an extra request.
 func (s *AntigravityGatewayService) newAntigravityThoughtContinuation(
 	ctx context.Context,
 	account *Account,
@@ -419,9 +428,6 @@ func (s *AntigravityGatewayService) newAntigravityThoughtContinuation(
 		return nil
 	}
 	policy := ResolveAntigravityThoughtPolicy(ctx, account)
-	if !policy.SuppressThoughtOnlyStop && !policy.ContinueThoughtOnly {
-		return nil
-	}
 	return &antigravityThoughtContinuation{
 		service:        s,
 		account:        account,
@@ -450,8 +456,8 @@ func WithAntigravityThoughtContinuation(ctx context.Context, cont *antigravityTh
 	return context.WithValue(ctx, antigravityThoughtContinuationKey{}, cont)
 }
 
-// antigravityThoughtContinuationFromContext returns the Task24 state of this request, or
-// nil when both switches were off when the request started.
+// antigravityThoughtContinuationFromContext returns the response state, or nil
+// for callers outside a native Antigravity response path.
 func antigravityThoughtContinuationFromContext(ctx context.Context) *antigravityThoughtContinuation {
 	if ctx == nil {
 		return nil
@@ -606,6 +612,7 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	c.extraUsed = true
 	c.finishedGeneration = c.generation
 	c.generation = newAntigravityThoughtGeneration()
+	c.generation.nativeGemini = c.delivery.Protocol == "gemini"
 	// The appended generation repeats the same envelope, so the request body becomes the
 	// envelope of the generation in flight as well.
 	c.body = body

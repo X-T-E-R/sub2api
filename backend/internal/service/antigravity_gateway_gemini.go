@@ -407,10 +407,8 @@ handleSuccess:
 		c.Header("x-request-id", requestID)
 	}
 
-	// Task24: resolve the effective A/B pair once for this request and publish it to the
-	// response path. Both switches off (the source default) returns nil, so nothing below
-	// changes behavior or cost.
-	s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, upstreamAction, finalBody).publish(c)
+	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, upstreamAction, finalBody)
+	defer cont.startResponse(c, "gemini", stream)()
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int

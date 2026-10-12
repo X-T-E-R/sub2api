@@ -440,10 +440,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		c.Header("x-request-id", requestID)
 	}
 
-	// Task24: resolve the effective A/B pair once for this request and publish it to the
-	// response path. Both switches off (the source default) returns nil, so nothing below
-	// changes behavior or cost.
-	s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody).publish(c)
+	// Pin policy and count only client-delivered structural events, including policy-off responses.
+	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)
+	defer cont.startResponse(c, "messages", claudeReq.Stream)()
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int

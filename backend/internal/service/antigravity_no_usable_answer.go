@@ -43,7 +43,7 @@ func (c *antigravityThoughtContinuation) completeNoUsableAnswer(ginCtx *gin.Cont
 		c.noUsableAnswerErr = &AntigravityNoUsableAnswerError{Stage: stage}
 		reason := "empty"
 		generation := c.effectiveGeneration()
-		if generation.finishReason == "" {
+		if generation.finishReason == "" || generation.finishReason == "FINISH_REASON_UNSPECIFIED" {
 			reason = "missing_terminal"
 		} else if generation.thoughtOnlySuccessful() {
 			reason = "thinking_only"

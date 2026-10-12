@@ -202,9 +202,12 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 
-	// Task24: resolve the effective A/B pair once for this request and publish it to the
-	// response path. Both switches off (the source default) returns nil.
-	s.newAntigravityThoughtContinuation(ctx, account, call.request.originalModel, call.prefix, call.proxyURL, call.accessToken, "streamGenerateContent", call.geminiBody).publish(c)
+	cont := s.newAntigravityThoughtContinuation(ctx, account, call.request.originalModel, call.prefix, call.proxyURL, call.accessToken, "streamGenerateContent", call.geminiBody)
+	protocol := "responses"
+	if call.request.protocol == antigravityCompatChatCompletions {
+		protocol = "chat_completions"
+	}
+	defer cont.startResponse(c, protocol, call.request.clientStream)()
 
 	return s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp)
 }

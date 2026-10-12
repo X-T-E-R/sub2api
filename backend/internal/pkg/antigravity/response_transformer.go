@@ -307,6 +307,12 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 	}
 }
 
+// HasRenderableGrounding reports whether the Messages renderer emits visible
+// text for this metadata. Native Gemini consumers can use other chunk types.
+func HasRenderableGrounding(grounding *GeminiGroundingMetadata) bool {
+	return buildGroundingText(grounding) != ""
+}
+
 func buildGroundingText(grounding *GeminiGroundingMetadata) string {
 	if grounding == nil {
 		return ""
