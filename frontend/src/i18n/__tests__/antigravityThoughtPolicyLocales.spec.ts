@@ -52,6 +52,13 @@ describe("antigravity thought policy locale copy", () => {
     expect(zhBlock().continueHint).not.toContain("补发两次");
   });
 
+  it("explains retryable failure and the upstream continuation requirement", () => {
+    expect(zhBlock().suppressHint).toContain("可重试错误");
+    expect(enBlock().suppressHint).toContain("retryable error");
+    expect(zhBlock().continueHint).toContain("上游须支持以 model 回合结尾");
+    expect(enBlock().continueHint).toContain("Requires upstream support for a final model turn");
+  });
+
   it("explains independence and the off default in one line", () => {
     expect(zhBlock().independenceHint).toBe("只开启抑制不会触发续写；两个都关闭时保持现有行为。");
     expect(enBlock().independenceHint).toContain(

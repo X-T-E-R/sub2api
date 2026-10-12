@@ -52,10 +52,10 @@ export const ANTIGRAVITY_THOUGHT_POLICY_MESSAGES: Record<
     },
     suppressLabel: "Suppress the thinking-only completion signal",
     suppressHint:
-      "Keeps thinking, signature and usage without reporting a successful finish.",
+      "Keeps thinking, signature and usage, then returns a retryable error for the client's normal retry policy.",
     continueLabel: "Automatic gateway continuation",
     continueHint:
-      "Resends the received thinking and signature once, with no added prompt text.",
+      "Resends the received thinking and signature once, with no added prompt text. Requires upstream support for a final model turn; rejection is returned as an error.",
   },
   zh: {
     title: "纯思考响应",
@@ -76,8 +76,8 @@ export const ANTIGRAVITY_THOUGHT_POLICY_MESSAGES: Record<
       unknown: "未知（未读取到全局值）",
     },
     suppressLabel: "抑制纯思考完成信号",
-    suppressHint: "保留思考、签名与用量，但不报告成功完成。",
+    suppressHint: "保留思考、签名与用量，返回可重试错误，让客户端按自身重试策略接续。",
     continueLabel: "网关自动续写",
-    continueHint: "把收到的思考与签名补发一次，不新增提示词文本。",
+    continueHint: "补发收到的思考与签名一次，不新增提示词。上游须支持以 model 回合结尾；拒绝时返回错误。",
   },
 };
