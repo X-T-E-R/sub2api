@@ -55,6 +55,10 @@ describe("antigravity thought policy locale copy", () => {
   it("explains retryable failure and the upstream continuation requirement", () => {
     expect(zhBlock().suppressHint).toContain("可重试错误");
     expect(enBlock().suppressHint).toContain("retryable error");
+    expect(zhBlock().description).toContain("空响应");
+    expect(enBlock().description).toContain("empty responses");
+    expect(zhBlock().description).toContain("缺结束标志");
+    expect(enBlock().description).toContain("without a finish reason");
     expect(zhBlock().continueHint).toContain("上游须支持以 model 回合结尾");
     expect(enBlock().continueHint).toContain("Requires upstream support for a final model turn");
   });

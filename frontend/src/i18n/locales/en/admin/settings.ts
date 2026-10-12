@@ -1218,7 +1218,7 @@ export default {
       },
       antigravityThoughtPolicy: {
         title: 'Antigravity thought-only responses',
-        description: 'Applies to Antigravity responses that end with thinking and no visible text or tool call. Two independent switches, both off by default.',
+        description: 'Handles Antigravity thinking-only or empty responses without visible text or tools. Suppression also covers thinking that reaches EOF without a finish reason. Both switches are independent and off by default.',
         suppressLabel: 'Suppress the thinking-only completion signal',
         suppressHint: 'Keeps thinking, signature and usage, then returns a retryable error instead of a successful finish. The client uses its normal retry policy.',
         continueLabel: 'Automatic gateway continuation',

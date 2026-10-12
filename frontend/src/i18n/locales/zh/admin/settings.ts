@@ -1212,7 +1212,7 @@ export default {
       },
       antigravityThoughtPolicy: {
         title: 'Antigravity 纯思考响应',
-        description: '作用于只产出思考、没有正文和工具调用的 Antigravity 响应。两个开关独立，默认都关闭。',
+        description: '处理没有正文或工具的纯思考、空响应。终态抑制也处理有思考却缺结束标志的 EOF；两个开关独立，默认都关闭。',
         suppressLabel: '抑制纯思考完成信号',
         suppressHint: '保留思考、签名与用量，返回可重试错误而非成功结束，让客户端按自身重试策略接续。',
         continueLabel: '网关自动续写',
