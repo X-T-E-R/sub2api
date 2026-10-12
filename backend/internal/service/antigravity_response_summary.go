@@ -246,6 +246,13 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 			fields[stringKey(key)] = truncateString(sanitizeUpstreamErrorMessage(strings.Join(strings.Fields(value), " ")), 128)
 		}
 	}
+	// setOpsRequestContext/setOpsSelectedAccount bind these typed context values,
+	// not necessarily logger.With fields. Carry only existing public metadata.
+	for key, name := range map[ctxkey.Key]string{ctxkey.Model: "model", ctxkey.Platform: "platform"} {
+		if value, ok := ginCtx.Request.Context().Value(key).(string); ok && strings.TrimSpace(value) != "" {
+			fields[name] = truncateString(sanitizeUpstreamErrorMessage(strings.TrimSpace(value)), 200)
+		}
+	}
 	return fields
 }
 func stringKey(key ctxkey.Key) string {

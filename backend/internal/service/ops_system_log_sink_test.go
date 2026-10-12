@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestOpsSystemLogSink_ShouldIndex(t *testing.T) {
@@ -68,6 +74,14 @@ func TestOpsSystemLogSink_ShouldIndex(t *testing.T) {
 			},
 			want: true,
 		},
+		{name: "exact summary Info", event: &logger.LogEvent{Level: "info", Component: "service.antigravity_gateway", Message: "antigravity.response_summary"}, want: true},
+		{name: "summary component from zap fields", event: &logger.LogEvent{Level: "info", Component: "slog", Message: "antigravity.response_summary", Fields: map[string]any{"component": "service.antigravity_gateway"}}, want: true},
+		{name: "unrelated service Info", event: &logger.LogEvent{Level: "info", Component: "service.antigravity_gateway", Message: "ordinary info"}},
+		{name: "wrong component summary Info", event: &logger.LogEvent{Level: "info", Component: "service.other", Message: "antigravity.response_summary"}},
+		{name: "near message prefix", event: &logger.LogEvent{Level: "info", Component: "service.antigravity_gateway", Message: "antigravity.response_summary.extra"}},
+		{name: "near component prefix", event: &logger.LogEvent{Level: "info", Component: "service.antigravity_gateway.extra", Message: "antigravity.response_summary"}},
+		{name: "summary debug still skipped", event: &logger.LogEvent{Level: "debug", Component: "service.antigravity_gateway", Message: "antigravity.response_summary"}},
+		{name: "explicit summary skip wins", event: &logger.LogEvent{Level: "info", Component: "service.antigravity_gateway", Message: "antigravity.response_summary", Fields: map[string]any{logger.OpsSystemLogSkipField: true}}},
 		{
 			name:  "plain info",
 			event: &logger.LogEvent{Level: "info", Component: "app"},
@@ -353,4 +367,105 @@ func TestNormalizeSystemLogHost(t *testing.T) {
 	if runeCount := len([]rune(got)); runeCount != maxSystemLogHostLength {
 		t.Fatalf("truncated host rune count = %d, want %d", runeCount, maxSystemLogHostLength)
 	}
+}
+
+func TestOpsSystemLogSink_AntigravitySummaryIndexAndFlushProjection(t *testing.T) {
+	var captured []*OpsInsertSystemLogInput
+	repo := &opsRepoMock{BatchInsertSystemLogsFn: func(_ context.Context, inputs []*OpsInsertSystemLogInput) (int64, error) {
+		captured = append(captured, inputs...)
+		return int64(len(inputs)), nil
+	}}
+	sink := NewOpsSystemLogSink(repo)
+	sink.flushInterval = time.Hour
+	for _, partial := range []bool{false, true} {
+		core, logs := observer.New(zapcore.InfoLevel)
+		// Production handlers bind model/platform through typed context keys;
+		// the ingress logger itself need not contain either field.
+		ctx := logger.IntoContext(context.Background(), zap.New(core))
+		ctx = context.WithValue(ctx, ctxkey.Model, "gemini-3.8-flash-high")
+		ctx = context.WithValue(ctx, ctxkey.Platform, PlatformAntigravity)
+		id := "success-public-id"
+		if partial {
+			id = "recovery-public-id"
+		}
+		ctx = context.WithValue(ctx, ctxkey.RequestID, id)
+		ctx = context.WithValue(ctx, ctxkey.ClientRequestID, "client-"+id)
+		part := `{"text":"private-body-sentinel"}`
+		if partial {
+			part = `{"text":"private-thinking-sentinel","thought":true,"thoughtSignature":"private-signature-sentinel","functionCall":null}`
+		}
+		line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` + part + `]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`
+		upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(line)}}
+		svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}, upstream)
+		body, c, _ := newAntigravityThoughtClaudeRequest(true)
+		c.Request = c.Request.WithContext(ctx)
+		_, err := svc.Forward(ctx, c, antigravityThoughtAccount(nil), body, false)
+		if partial {
+			require.True(t, IsAntigravityNoUsableAnswerError(err))
+		} else {
+			require.NoError(t, err)
+		}
+		entries := logs.FilterMessage("antigravity.response_summary").All()
+		require.Len(t, entries, 1)
+		entry := entries[0]
+		sink.WriteLogEvent(&logger.LogEvent{Time: entry.Time, Level: "info", Component: entry.LoggerName, Message: entry.Message, Fields: entry.ContextMap()})
+	}
+	sink.WriteLogEvent(&logger.LogEvent{Level: "info", Component: "service.antigravity_gateway", Message: "ordinary service info"})
+	require.Len(t, sink.queue, 2, "only the two exact summary Info events enter the index queue")
+	sink.Start()
+	sink.Stop() // synchronous shutdown flush; no timer or polling.
+	require.Len(t, captured, 2)
+	for i, row := range captured {
+		require.Equal(t, "info", row.Level)
+		require.Equal(t, "service.antigravity_gateway", row.Component)
+		require.Equal(t, "antigravity.response_summary", row.Message)
+		require.Equal(t, "gemini-3.8-flash-high", row.Model)
+		require.Equal(t, PlatformAntigravity, row.Platform)
+		require.NotNil(t, row.AccountID)
+		require.Equal(t, int64(3757), *row.AccountID)
+		id := "success-public-id"
+		decision := "skipped"
+		reason := "visible_content"
+		think, text := 0, 1
+		if i == 1 {
+			id = "recovery-public-id"
+			decision = "retryable_error"
+			reason = "thinking_only"
+			think, text = 1, 0
+		}
+		require.Equal(t, id, row.RequestID)
+		require.Equal(t, "client-"+id, row.ClientRequestID)
+		var extra map[string]any
+		require.NoError(t, json.Unmarshal([]byte(row.ExtraJSON), &extra))
+		require.Equal(t, decision, extra["a_decision"])
+		require.Equal(t, reason, extra["a_reason"])
+		require.EqualValues(t, think, extra["downstream_thinking_events"])
+		require.EqualValues(t, text, extra["downstream_text_events"])
+		require.EqualValues(t, 0, extra["downstream_tool_events"])
+		require.Equal(t, "STOP", extra["upstream_finish_reason"])
+		require.Equal(t, true, extra["effective_a"])
+		require.Equal(t, false, extra["effective_b"])
+		require.Equal(t, "messages", extra["protocol"])
+		all, err := json.Marshal(row)
+		require.NoError(t, err)
+		for _, secret := range []string{"private-body-sentinel", "private-thinking-sentinel", "private-signature-sentinel"} {
+			require.NotContains(t, string(all), secret)
+		}
+	}
+	require.EqualValues(t, 2, sink.Health().WrittenCount)
+	// No context model/IDs means no indexed model/IDs: never guess from model
+	// mapping, account name, a response ID or another request.
+	emptyRepo := &opsRepoMock{BatchInsertSystemLogsFn: func(_ context.Context, inputs []*OpsInsertSystemLogInput) (int64, error) {
+		require.Empty(t, inputs[0].RequestID)
+		require.Empty(t, inputs[0].ClientRequestID)
+		require.Empty(t, inputs[0].Model)
+		return 1, nil
+	}}
+	_, missingContext, _ := newAntigravityThoughtClaudeRequest(true)
+	missingSummary := (&antigravityThoughtContinuation{account: antigravityThoughtAccount(nil), generation: newAntigravityThoughtGeneration()}).summaryFields(missingContext)
+	for _, key := range []string{"request_id", "client_request_id", "model", "platform"} {
+		require.NotContains(t, missingSummary, key, "missing context metadata is not inferred")
+	}
+	_, err := NewOpsSystemLogSink(emptyRepo).flushBatch(context.Background(), []*logger.LogEvent{{Level: "info", Component: "service.antigravity_gateway", Message: "antigravity.response_summary", Fields: missingSummary}})
+	require.NoError(t, err)
 }

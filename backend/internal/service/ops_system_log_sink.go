@@ -166,6 +166,11 @@ func (s *OpsSystemLogSink) shouldIndex(event *logger.LogEvent) bool {
 			component = fc
 		}
 	}
+	// Payload-free response statistics need Info indexing, but no other service
+	// Info event is admitted. Preserve the explicit skip above and normal severity.
+	if level == "info" && component == "service.antigravity_gateway" && event.Message == "antigravity.response_summary" {
+		return true
+	}
 	if strings.Contains(component, "http.access") {
 		return true
 	}
