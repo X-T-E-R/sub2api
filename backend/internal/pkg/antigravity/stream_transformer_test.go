@@ -26,7 +26,9 @@ func streamBlocks(t *testing.T, payload []byte) []map[string]any {
 		case "content_block_start":
 			require.Nil(t, active, "previous block must close before a new one starts")
 			require.Equal(t, float64(len(blocks)), event["index"])
-			active = event["content_block"].(map[string]any)
+			block, ok := event["content_block"].(map[string]any)
+			require.True(t, ok, "content_block must be an object")
+			active = block
 			if active["type"] == "tool_use" {
 				require.NotEmpty(t, active["name"], "a continuation is not a new unnamed tool")
 				require.NotEmpty(t, active["id"])
@@ -35,15 +37,22 @@ func streamBlocks(t *testing.T, payload []byte) []map[string]any {
 		case "content_block_delta":
 			require.NotNil(t, active)
 			require.Equal(t, float64(len(blocks)), event["index"])
-			delta := event["delta"].(map[string]any)
+			delta, ok := event["delta"].(map[string]any)
+			require.True(t, ok, "delta must be an object")
 			switch delta["type"] {
 			case "input_json_delta":
 				require.Equal(t, "tool_use", active["type"])
-				input.WriteString(delta["partial_json"].(string))
+				partialJSON, ok := delta["partial_json"].(string)
+				require.True(t, ok, "partial_json must be a string")
+				_, _ = input.WriteString(partialJSON)
 			case "signature_delta":
 				active["signature"] = delta["signature"]
 			case "thinking_delta":
-				active["thinking"] = active["thinking"].(string) + delta["thinking"].(string)
+				thinking, ok := active["thinking"].(string)
+				require.True(t, ok, "thinking block must contain a string")
+				fragment, ok := delta["thinking"].(string)
+				require.True(t, ok, "thinking delta must contain a string")
+				active["thinking"] = thinking + fragment
 			}
 		case "content_block_stop":
 			require.NotNil(t, active)
@@ -132,14 +141,18 @@ func TestStreamingUsageCacheAccounting(t *testing.T) {
 			payload := streamChunk(t, p, `{"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":`+tc.metadata+`}}`)
 			for _, event := range decodeSSEData(payload) {
 				var usage map[string]any
+				var ok bool
 				switch event["type"] {
 				case "message_start":
-					usage = event["message"].(map[string]any)["usage"].(map[string]any)
+					message, isObject := event["message"].(map[string]any)
+					require.True(t, isObject, "message must be an object")
+					usage, ok = message["usage"].(map[string]any)
 				case "message_delta":
-					usage = event["usage"].(map[string]any)
+					usage, ok = event["usage"].(map[string]any)
 				default:
 					continue
 				}
+				require.True(t, ok, "usage must be an object")
 				require.Equal(t, float64(tc.input), usage["input_tokens"])
 				require.Equal(t, float64(tc.output), usage["output_tokens"])
 				require.Equal(t, float64(tc.cached), usage["cache_read_input_tokens"])
