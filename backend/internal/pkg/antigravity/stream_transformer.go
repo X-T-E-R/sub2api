@@ -35,6 +35,10 @@ type StreamingProcessor struct {
 	groundingChunks   []GeminiGroundingChunk
 	usageMapHook      UsageMapHook
 
+	// Keep object arguments open across name-less function-call continuations.
+	functionArgsStarted   bool
+	functionArgsHasFields bool
+
 	// 累计 usage
 	inputTokens       int
 	outputTokens      int
@@ -191,7 +195,7 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 	// 但 Claude 的 input_tokens 不包含 cache_read_input_tokens，需要减去
 	if geminiResp.UsageMetadata != nil {
 		cached := geminiResp.UsageMetadata.CachedContentTokenCount
-		p.inputTokens = geminiResp.UsageMetadata.PromptTokenCount - cached
+		p.inputTokens = max(0, geminiResp.UsageMetadata.PromptTokenCount-cached)
 		p.outputTokens = geminiResp.UsageMetadata.CandidatesTokenCount + geminiResp.UsageMetadata.ThoughtsTokenCount
 		p.cacheReadTokens = cached
 		p.imageOutputTokens = geminiResp.UsageMetadata.ImageOutputTokens()
@@ -264,7 +268,7 @@ func (p *StreamingProcessor) emitMessageStart(v1Resp *V1InternalResponse) []byte
 	usage := ClaudeUsage{}
 	if v1Resp.Response.UsageMetadata != nil {
 		cached := v1Resp.Response.UsageMetadata.CachedContentTokenCount
-		usage.InputTokens = v1Resp.Response.UsageMetadata.PromptTokenCount - cached
+		usage.InputTokens = max(0, v1Resp.Response.UsageMetadata.PromptTokenCount-cached)
 		usage.OutputTokens = v1Resp.Response.UsageMetadata.CandidatesTokenCount + v1Resp.Response.UsageMetadata.ThoughtsTokenCount
 		usage.CacheReadInputTokens = cached
 		usage.ImageOutputTokens = v1Resp.Response.UsageMetadata.ImageOutputTokens()
@@ -451,33 +455,51 @@ func (p *StreamingProcessor) processFunctionCall(fc *GeminiFunctionCall, signatu
 	p.usedTool = true
 	p.hasContent = true
 
-	toolID := fc.ID
-	if toolID == "" {
-		toolID = fmt.Sprintf("%s-%s", fc.Name, generateRandomID())
+	// A named part starts a new call (even when the name repeats). Subsequent
+	// parts may omit the name and only supply args for the currently open call.
+	if p.blockType != BlockTypeFunction || fc.Name != "" {
+		toolID := fc.ID
+		if toolID == "" {
+			toolID = fmt.Sprintf("%s-%s", fc.Name, generateRandomID())
+		}
+
+		toolUse := map[string]any{
+			"type":  "tool_use",
+			"id":    toolID,
+			"name":  fc.Name,
+			"input": map[string]any{},
+		}
+
+		if signature != "" {
+			toolUse["signature"] = signature
+		}
+
+		_, _ = result.Write(p.startBlock(BlockTypeFunction, toolUse))
 	}
 
-	toolUse := map[string]any{
-		"type":  "tool_use",
-		"id":    toolID,
-		"name":  fc.Name,
-		"input": map[string]any{},
-	}
-
-	if signature != "" {
-		toolUse["signature"] = signature
-	}
-
-	_, _ = result.Write(p.startBlock(BlockTypeFunction, toolUse))
-
-	// 发送 input_json_delta
 	if fc.Args != nil {
 		argsJSON, _ := json.Marshal(fc.Args)
-		_, _ = result.Write(p.emitDelta("input_json_delta", map[string]any{
-			"partial_json": string(argsJSON),
-		}))
+		partialJSON := string(argsJSON)
+		if len(argsJSON) >= 2 && argsJSON[0] == '{' && argsJSON[len(argsJSON)-1] == '}' {
+			// Claude concatenates partial_json deltas. Emit the members of each
+			// object into one open object, not adjacent complete objects ({}{}).
+			partialJSON = string(argsJSON[1 : len(argsJSON)-1])
+			if !p.functionArgsStarted {
+				partialJSON = "{" + partialJSON
+				p.functionArgsStarted = true
+			} else if p.functionArgsHasFields && partialJSON != "" {
+				partialJSON = "," + partialJSON
+			}
+			if len(argsJSON) > 2 {
+				p.functionArgsHasFields = true
+			}
+		}
+		if partialJSON != "" {
+			_, _ = result.Write(p.emitDelta("input_json_delta", map[string]any{
+				"partial_json": partialJSON,
+			}))
+		}
 	}
-
-	_, _ = result.Write(p.endBlock())
 
 	return result.Bytes()
 }
@@ -516,6 +538,14 @@ func (p *StreamingProcessor) endBlock() []byte {
 			"signature": p.pendingSignature,
 		}))
 		p.pendingSignature = ""
+	}
+
+	if p.blockType == BlockTypeFunction && p.functionArgsStarted {
+		_, _ = result.Write(p.emitDelta("input_json_delta", map[string]any{
+			"partial_json": "}",
+		}))
+		p.functionArgsStarted = false
+		p.functionArgsHasFields = false
 	}
 
 	event := map[string]any{
