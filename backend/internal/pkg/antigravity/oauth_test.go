@@ -3,11 +3,13 @@
 package antigravity
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -693,8 +695,8 @@ func TestConstants_值正确(t *testing.T) {
 	if RedirectURI != "http://localhost:8085/callback" {
 		t.Errorf("RedirectURI 不匹配: got %s", RedirectURI)
 	}
-	if GetUserAgent() != "antigravity/2.9.1 windows/amd64" {
-		t.Errorf("UserAgent 不匹配: got %s", GetUserAgent())
+	if got := BuildUserAgent(DefaultUserAgentVersion); got != "antigravity/2.23.0 windows/amd64" {
+		t.Errorf("UserAgent 不匹配: got %s", got)
 	}
 	if SessionTTL != 30*time.Minute {
 		t.Errorf("SessionTTL 不匹配: got %v", SessionTTL)
@@ -717,5 +719,67 @@ func TestScopes_包含必要范围(t *testing.T) {
 		if !strings.Contains(Scopes, scope) {
 			t.Errorf("Scopes 缺少 %s", scope)
 		}
+	}
+}
+
+// Run each environment case in a fresh process so the real package init reads
+// the version override, rather than reproducing init logic inside the test.
+func TestUserAgentVersionConfiguration(t *testing.T) {
+	const expectedEnv = "SUB2API_TEST_EXPECTED_UA_VERSION"
+	if expected := os.Getenv(expectedEnv); expected != "" {
+		if DefaultUserAgentVersion != "2.23.0" {
+			t.Fatalf("built-in version = %q, want 2.23.0", DefaultUserAgentVersion)
+		}
+		if got := GetDefaultUserAgentVersion(); got != expected {
+			t.Fatalf("environment default = %q, want %q", got, expected)
+		}
+		if got := GetUserAgent(); got != "antigravity/"+expected+" windows/amd64" {
+			t.Errorf("User-Agent without resolver = %q, want version %q", got, expected)
+		}
+		for _, resolverValue := range []string{"", "invalid", "  1.23.2  "} {
+			t.Run("resolver="+resolverValue, func(t *testing.T) {
+				SetUserAgentVersionResolver(func(context.Context) string { return resolverValue })
+				defer SetUserAgentVersionResolver(nil)
+				want := expected
+				if resolverValue == "  1.23.2  " {
+					want = "1.23.2"
+				}
+				if got := GetUserAgentVersionForContext(nil); got != want {
+					t.Errorf("resolved version = %q, want %q", got, want)
+				}
+				if got := GetUserAgent(); got != "antigravity/"+want+" windows/amd64" {
+					t.Errorf("User-Agent = %q, want version %q with unchanged format", got, want)
+				}
+			})
+		}
+		for _, version := range []string{"", "invalid"} {
+			if got := BuildUserAgent(version); got != "antigravity/"+expected+" windows/amd64" {
+				t.Errorf("BuildUserAgent(%q) = %q, want environment/default fallback", version, got)
+			}
+		}
+		return
+	}
+
+	for _, tc := range []struct{ name, value, want string }{
+		{"unset", "", "2.23.0"},
+		{"invalid", "not-a-version", "2.23.0"},
+		{"explicit older version", "  2.9.1  ", "2.9.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestUserAgentVersionConfiguration$", "-test.count=1")
+			for _, entry := range os.Environ() {
+				key, _, _ := strings.Cut(entry, "=")
+				if !strings.EqualFold(key, AntigravityUserAgentVersionEnv) && !strings.EqualFold(key, expectedEnv) {
+					cmd.Env = append(cmd.Env, entry)
+				}
+			}
+			cmd.Env = append(cmd.Env, expectedEnv+"="+tc.want)
+			if tc.value != "" {
+				cmd.Env = append(cmd.Env, AntigravityUserAgentVersionEnv+"="+tc.value)
+			}
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("version configuration: %v\n%s", err, output)
+			}
+		})
 	}
 }
