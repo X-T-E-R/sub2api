@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,7 @@ func TestAntigravityQuotaOriginPolicy(t *testing.T) {
 		plan, mode string
 		daily      bool
 	}{
-		{"", "", false}, {"free", "", false}, {"pro", "", true}, {"ULTRA", "", true},
+		{"", "", true}, {"free", "", true}, {"pro", "", true}, {"ULTRA", "", true},
 		{"pro", "prod", false}, {"pro", "unknown", false}, {"free", "daily", true}, {"free", "sandbox", true},
 	} {
 		t.Run(tc.plan+"/"+tc.mode, func(t *testing.T) {
@@ -57,6 +58,14 @@ func TestAntigravityQuotaOriginPolicy(t *testing.T) {
 			result, err := NewAntigravityQuotaFetcher(nil, nil).FetchQuota(context.Background(), account, "")
 			require.NoError(t, err)
 			require.Equal(t, []string{wantBase + "/v1internal:loadCodeAssist", wantBase + "/v1internal:fetchAvailableModels", wantBase + "/v1internal:retrieveUserQuotaSummary"}, calls)
+			upstream := &recordingOKUpstream{}
+			forward, err := (&AntigravityGatewayService{}).antigravityRetryLoop(antigravityRetryLoopParams{
+				ctx: context.Background(), account: account, accessToken: "synthetic-token",
+				action: "streamGenerateContent", body: []byte(`{}`), httpUpstream: upstream,
+			})
+			require.NoError(t, err)
+			require.NoError(t, forward.resp.Body.Close())
+			require.Equal(t, []string{wantBase + "/v1internal:streamGenerateContent?alt=sse"}, upstream.urls, "quota and forward must use the same single origin")
 			if tc.daily {
 				require.Zero(t, result.UsageInfo.AntigravityWindows["gemini_5h"].RemainingFraction)
 				require.NotContains(t, result.UsageInfo.AntigravityQuota, "synthetic-gemini", "missing model fraction stays unknown")
@@ -133,11 +142,11 @@ func TestAntigravityQuotaOriginInvalidatesObservations(t *testing.T) {
 	t.Setenv(antigravityForwardBaseURLEnv, "")
 	paidScope := antigravityQuotaScope(account)
 	account.Credentials["plan_type"] = "free"
-	require.NotEqual(t, paidScope, antigravityQuotaScope(account))
+	require.Equal(t, paidScope, antigravityQuotaScope(account), "cached plan changes must not change the default origin")
 }
 
 func TestAntigravityQuotaOriginSeparatesInflightRequests(t *testing.T) {
-	t.Setenv(antigravityForwardBaseURLEnv, "")
+	t.Setenv(antigravityForwardBaseURLEnv, "prod")
 	oldTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = oldTransport })
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -161,12 +170,10 @@ func TestAntigravityQuotaOriginSeparatesInflightRequests(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: r}, nil
 	})
-	free := antigravityIsolationAccount(901, "synthetic")
-	paid := snapshotOAuthRefreshAccount(free)
-	paid.Credentials["plan_type"] = "pro"
+	account := antigravityIsolationAccount(901, "synthetic")
 	svc := &AccountUsageService{cache: NewUsageCache(), antigravityQuotaFetcher: NewAntigravityQuotaFetcher(nil, nil)}
 	oldDone := make(chan struct{})
-	go func() { defer close(oldDone); _, _ = svc.getAntigravityUsage(context.Background(), free, true) }()
+	go func() { defer close(oldDone); _, _ = svc.getAntigravityUsage(context.Background(), account, true) }()
 	// Cleanup runs after release closes, keeping the transport alive until the old flight ends.
 	t.Cleanup(func() { <-oldDone })
 	select {
@@ -174,8 +181,9 @@ func TestAntigravityQuotaOriginSeparatesInflightRequests(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("old origin request did not start")
 	}
+	t.Setenv(antigravityForwardBaseURLEnv, "daily")
 	newDone := make(chan *UsageInfo, 1)
-	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), paid, true); newDone <- usage }()
+	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), account, true); newDone <- usage }()
 	select {
 	case usage := <-newDone:
 		require.NotNil(t, usage)
@@ -202,7 +210,7 @@ func TestAntigravityQuotaOriginUsesTokenProviderSnapshot(t *testing.T) {
 	})
 	old := antigravityIsolationAccount(901, "synthetic")
 	latest := snapshotOAuthRefreshAccount(old)
-	latest.Credentials["plan_type"] = "pro"
+	latest.Credentials["project_id"] = "latest-project"
 	repo := &quotaRefreshRepo{account: latest}
 	provider := NewAntigravityTokenProvider(repo, nil, nil)
 	svc := &AccountUsageService{cache: NewUsageCache(), antigravityQuotaFetcher: ProvideAntigravityQuotaFetcher(nil, nil, provider)}
@@ -220,48 +228,51 @@ func TestAntigravityQuotaOriginReadmissionAfterSnapshotReplacement(t *testing.T)
 	entered, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	http.DefaultTransport = quotaRedirectTransport(func(r *http.Request) (*http.Response, error) {
-		daily := strings.HasPrefix(r.URL.String(), antigravity.BaseURLs[1]+"/")
+		require.True(t, strings.HasPrefix(r.URL.String(), antigravity.BaseURLs[1]+"/"))
+		var payload map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		replaced := payload["project"] == "replacement-project"
 		body := `{}`
 		switch r.URL.Path {
 		case "/v1internal:fetchAvailableModels":
-			if daily {
+			if replaced {
 				close(entered)
 				<-release
 			}
 			body = `{"models":{}}`
 		case "/v1internal:retrieveUserQuotaSummary":
 			fraction := 1
-			if daily {
+			if replaced {
 				fraction = 0
 			}
 			body = fmt.Sprintf(`{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":%d}]}]}`, fraction)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: r}, nil
 	})
-	free := antigravityIsolationAccount(901, "synthetic")
-	paid := snapshotOAuthRefreshAccount(free)
-	paid.Credentials["plan_type"] = "pro"
-	repo := &quotaRefreshRepo{account: paid}
+	original := antigravityIsolationAccount(901, "synthetic")
+	replacement := snapshotOAuthRefreshAccount(original)
+	replacement.Credentials["project_id"] = "replacement-project"
+	repo := &quotaRefreshRepo{account: replacement}
 	provider := NewAntigravityTokenProvider(repo, nil, nil)
 	svc := &AccountUsageService{cache: NewUsageCache(), antigravityQuotaFetcher: ProvideAntigravityQuotaFetcher(nil, nil, provider)}
 	firstDone, secondDone := make(chan *UsageInfo, 1), make(chan *UsageInfo, 1)
-	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), free, true); firstDone <- usage }()
+	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), original, true); firstDone <- usage }()
 	t.Cleanup(func() { <-firstDone })
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("daily request did not start")
+		t.Fatal("replacement snapshot request did not start")
 	}
 	repo.mu.Lock()
-	repo.account = snapshotOAuthRefreshAccount(free)
+	repo.account = snapshotOAuthRefreshAccount(original)
 	repo.mu.Unlock()
-	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), free, true); secondDone <- usage }()
+	go func() { usage, _ := svc.getAntigravityUsage(context.Background(), original, true); secondDone <- usage }()
 	select {
 	case usage := <-secondDone:
 		require.NotNil(t, usage)
 		require.Equal(t, 1.0, usage.AntigravityWindows["gemini_5h"].RemainingFraction)
 	case <-time.After(2 * time.Second):
 		t.Cleanup(func() { <-secondDone })
-		t.Fatal("free caller joined the daily flight admitted under its old free scope")
+		t.Fatal("caller joined the flight admitted under a different project snapshot")
 	}
 }

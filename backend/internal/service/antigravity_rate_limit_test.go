@@ -30,10 +30,12 @@ type stubAntigravityUpstream struct {
 
 type recordingOKUpstream struct {
 	calls int
+	urls  []string
 }
 
 func (r *recordingOKUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	r.calls++
+	r.urls = append(r.urls, req.URL.String())
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{},
@@ -119,7 +121,7 @@ func TestAntigravityRetryLoop_NoURLFallback_UsesConfiguredBaseURL(t *testing.T) 
 	antigravity.BaseURLs = []string{base1, base2}
 	antigravity.DefaultURLAvailability = antigravity.NewURLAvailability(time.Minute)
 
-	upstream := &stubAntigravityUpstream{firstBase: base1, secondBase: base2}
+	upstream := &stubAntigravityUpstream{firstBase: base2, secondBase: base1}
 	account := &Account{
 		ID:          1,
 		Name:        "acc-1",
@@ -155,7 +157,7 @@ func TestAntigravityRetryLoop_NoURLFallback_UsesConfiguredBaseURL(t *testing.T) 
 	require.True(t, handleErrorCalled)
 	require.Len(t, upstream.calls, antigravityMaxRetries)
 	for _, callURL := range upstream.calls {
-		require.True(t, strings.HasPrefix(callURL, base1))
+		require.True(t, strings.HasPrefix(callURL, base2), "daily retries must not cross to prod")
 	}
 
 	available := antigravity.DefaultURLAvailability.GetAvailableURLs()
@@ -1081,12 +1083,14 @@ func TestResolveAntigravityForwardBaseURL(t *testing.T) {
 			name: "ultra defaults to daily", account: &Account{Credentials: map[string]any{"plan_type": "ULTRA"}},
 			want: dailyURL,
 		},
-		{name: "free defaults to prod", account: &Account{Credentials: map[string]any{"plan_type": "free"}}, want: prodURL},
-		{name: "abnormal defaults to prod", account: &Account{Credentials: map[string]any{"plan_type": "Abnormal"}}, want: prodURL},
-		{name: "unknown defaults to prod", account: &Account{Credentials: map[string]any{"plan_type": "enterprise"}}, want: prodURL},
-		{name: "malformed defaults to prod", account: &Account{Credentials: map[string]any{"plan_type": map[string]any{"name": "pro"}}}, want: prodURL},
-		{name: "missing defaults to prod", account: &Account{Credentials: map[string]any{}}, want: prodURL},
-		{name: "nil account defaults to prod", account: nil, want: prodURL},
+		{name: "free defaults to daily", account: &Account{Credentials: map[string]any{"plan_type": "free"}}, want: dailyURL},
+		{name: "abnormal defaults to daily", account: &Account{Credentials: map[string]any{"plan_type": "Abnormal"}}, want: dailyURL},
+		{name: "unknown defaults to daily", account: &Account{Credentials: map[string]any{"plan_type": "enterprise"}}, want: dailyURL},
+		{name: "malformed defaults to daily", account: &Account{Credentials: map[string]any{"plan_type": map[string]any{"name": "pro"}}}, want: dailyURL},
+		{name: "missing defaults to daily", account: &Account{Credentials: map[string]any{}}, want: dailyURL},
+		{name: "nil account defaults to daily", account: nil, want: dailyURL},
+		{name: "sandbox alias uses daily", env: "sandbox", want: dailyURL},
+		{name: "invalid env retains prod behavior", env: "unknown", want: prodURL},
 		{
 			name: "daily override wins for free tier", env: " daily ",
 			account: &Account{Credentials: map[string]any{"plan_type": "free"}},
@@ -1299,5 +1303,21 @@ func TestNormalizeAntigravityModelName(t *testing.T) {
 			actual := normalizeAntigravityModelName(tt.model)
 			require.Equal(t, tt.expected, actual)
 		})
+	}
+}
+
+func TestResolveAntigravityForwardBaseURLLimitedList(t *testing.T) {
+	old := antigravity.BaseURLs
+	t.Cleanup(func() { antigravity.BaseURLs = old })
+	for _, urls := range [][]string{nil, {}, {"https://only.test"}} {
+		antigravity.BaseURLs = urls
+		want := ""
+		if len(urls) > 0 {
+			want = urls[0]
+		}
+		for _, mode := range []string{"", "prod", "daily", "sandbox", "unknown"} {
+			t.Setenv(antigravityForwardBaseURLEnv, mode)
+			require.Equal(t, want, resolveAntigravityForwardBaseURL(nil))
+		}
 	}
 }
