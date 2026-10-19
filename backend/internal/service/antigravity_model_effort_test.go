@@ -223,7 +223,7 @@ func TestAntigravityEffortUnknownForwardAndRateLimit(t *testing.T) {
 			account := effortTestAccount(map[string]string{base: base + "-{effort}"})
 			if limited {
 				now := time.Now()
-				setAccountModelRateLimitSnapshot(account, base, now.Add(time.Minute), "fixture", now)
+				setAccountModelRateLimitSnapshot(account, base+"-low", now.Add(time.Minute), "fixture", now)
 			}
 			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
 			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
@@ -256,7 +256,7 @@ func TestAntigravityEffortUnknownForwardAndRateLimit(t *testing.T) {
 	account := effortTestAccount(map[string]string{"gemini-3.8-flash": "gemini-3.8-flash-{effort}"})
 	now := time.Now()
 	setAccountModelRateLimitSnapshot(account, antigravityGeminiModelRateLimitKey, now.Add(time.Minute), "fixture", now)
-	require.True(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-low"))
+	require.False(t, account.isModelRateLimitedWithContext(context.Background(), "gemini-3.8-flash-low"), "legacy family is not evidence of this target's quota")
 }
 
 func TestCompactAntigravityEffortMapping(t *testing.T) {

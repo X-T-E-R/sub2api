@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"time"
 
@@ -149,36 +148,19 @@ func resolveFinalAntigravityModelKey(ctx context.Context, account *Account, requ
 	return modelKey
 }
 
-func isAntigravityGeminiModel(model string) bool {
-	return strings.HasPrefix(normalizeAntigravityModelName(model), "gemini-")
-}
-
+// Model names and effort-template prefixes are not evidence of a shared quota
+// bucket. Read and write the same final wire target, so aliases cannot evade a
+// limit and unrelated models/effort targets do not inherit it. Legacy inferred
+// family/base entries remain stored for reconciliation, but are not expanded.
 func antigravityModelRateLimitKeysForAccount(ctx context.Context, account *Account, model string) []string {
+	if wire := antigravityRateLimitWireModel(ctx, account); wire != "" {
+		model = wire
+	}
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return nil
 	}
-	keys := []string{model}
-	if account != nil {
-		bases := []string{}
-		policy := antigravityEffortPolicyFromContext(ctx)
-		for base, target := range account.GetModelMapping() {
-			if rule, valid := parseAntigravityEffortTemplate(target); valid && base != model {
-				for _, level := range policy.Levels {
-					if model == rule.model(level, policy) {
-						bases = append(bases, base)
-						break
-					}
-				}
-			}
-		}
-		sort.Strings(bases)
-		keys = append(keys, bases...)
-	}
-	if isAntigravityGeminiModel(model) && model != antigravityGeminiModelRateLimitKey {
-		keys = append(keys, antigravityGeminiModelRateLimitKey)
-	}
-	return keys
+	return []string{model}
 }
 
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {

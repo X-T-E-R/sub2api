@@ -1347,7 +1347,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		require.Equal(t, int64(2), acc.ID, "应选择优先级最高的账户（包含启用混合调度的antigravity）")
 	})
 
-	t.Run("混合调度-Gemini家族限流后跳过Antigravity账户", func(t *testing.T) {
+	t.Run("混合调度-Gemini单模型限流后跳过Antigravity账户", func(t *testing.T) {
 		resetAt := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
@@ -1360,7 +1360,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Extra: map[string]any{
 						"mixed_scheduling": true,
 						modelRateLimitsKey: map[string]any{
-							antigravityGeminiModelRateLimitKey: map[string]any{
+							"gemini-3-pro-high": map[string]any{
 								"rate_limit_reset_at": resetAt,
 							},
 						},
@@ -1375,7 +1375,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Extra: map[string]any{
 						"mixed_scheduling": true,
 						modelRateLimitsKey: map[string]any{
-							antigravityGeminiModelRateLimitKey: map[string]any{
+							"gemini-3-pro-high": map[string]any{
 								"rate_limit_reset_at": resetAt,
 							},
 						},
@@ -1408,7 +1408,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		require.Equal(t, int64(3), acc.ID)
 	})
 
-	t.Run("混合调度-Gemini家族限流不影响Claude调度", func(t *testing.T) {
+	t.Run("混合调度-Gemini单模型限流不影响Claude调度", func(t *testing.T) {
 		resetAt := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
@@ -1421,7 +1421,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Extra: map[string]any{
 						"mixed_scheduling": true,
 						modelRateLimitsKey: map[string]any{
-							antigravityGeminiModelRateLimitKey: map[string]any{
+							"gemini-3-pro-high": map[string]any{
 								"rate_limit_reset_at": resetAt,
 							},
 						},

@@ -195,18 +195,9 @@ func TestHandleSmartRetry_503_LongDelay_NoSingleAccountRetry_StillSwitches(t *te
 	require.NotNil(t, result.switchError, "multi-account mode should return switchError for 503")
 	require.Nil(t, result.resp, "should not return resp when switchError is set")
 
-	// 对照：多账号模式应设模型限流。新的模板家族限流会同时写入完整作用域：
-	// 上游返回的精确模型 ID、它命中的模板 base、以及 Gemini 家族 key。
-	require.Len(t, repo.modelRateLimitCalls, 3,
-		"multi-account mode SHOULD set model rate limit")
-	require.Equal(t,
-		[]string{"gemini-3-pro-high", "gemini-3-pro", antigravityGeminiModelRateLimitKey},
-		[]string{
-			repo.modelRateLimitCalls[0].modelKey,
-			repo.modelRateLimitCalls[1].modelKey,
-			repo.modelRateLimitCalls[2].modelKey,
-		},
-		"model rate limit must cover the exact ID, its template base and the Gemini family scope")
+	// 多账号模式只冷却已识别的目标，不推断模板或provider共享额度。
+	require.Len(t, repo.modelRateLimitCalls, 1)
+	require.Equal(t, "gemini-3-pro-high", repo.modelRateLimitCalls[0].modelKey)
 }
 
 // TestHandleSmartRetry_429_LongDelay_SingleAccountRetry_StillSwitches
@@ -421,10 +412,9 @@ func TestHandleSmartRetry_503_ShortDelay_NoSingleAccountRetry_SetsRateLimit(t *t
 	// 对照：多账号模式应返回 switchError
 	require.NotNil(t, result.switchError, "multi-account mode should return switchError for 503")
 	// 对照：多账号模式应设模型限流
-	require.Len(t, repo.modelRateLimitCalls, 2,
-		"multi-account mode should set model rate limit")
+	require.Len(t, repo.modelRateLimitCalls, 1,
+		"multi-account mode should set only the target model rate limit")
 	require.Equal(t, "gemini-3-flash", repo.modelRateLimitCalls[0].modelKey)
-	require.Equal(t, antigravityGeminiModelRateLimitKey, repo.modelRateLimitCalls[1].modelKey)
 }
 
 // ---------------------------------------------------------------------------

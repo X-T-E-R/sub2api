@@ -46,10 +46,10 @@ func TestAntigravityEffortIndependentRateScope(t *testing.T) {
 	account := effortTestAccount(map[string]string{"custom": "custom-{effort}", "custom-image": "custom-image"})
 	inFlight := WithAntigravityRequestEffort(context.Background(), []byte(`{"reasoning_effort":"ultra"}`))
 	require.NoError(t, svc.SetAntigravityModelEffortSettings(context.Background(), defaultAntigravityModelEffortSettings()))
-	require.Equal(t, []string{"custom-ultra", "custom"}, antigravityModelRateLimitKeysForAccount(inFlight, account, "custom-ultra"))
+	require.Equal(t, []string{"custom-ultra"}, antigravityModelRateLimitKeysForAccount(inFlight, account, "custom-ultra"))
 	require.Equal(t, []string{"custom-image"}, antigravityModelRateLimitKeysForAccount(inFlight, account, "custom-image"))
 	now := time.Now()
-	setAccountModelRateLimitSnapshot(account, "custom", now.Add(time.Minute), "fixture", now)
+	setAccountModelRateLimitSnapshot(account, "custom-ultra", now.Add(time.Minute), "fixture", now)
 	require.False(t, account.isModelRateLimitedWithContext(context.Background(), "custom-image"))
 	require.True(t, account.isModelRateLimitedWithContext(inFlight, "custom"))
 }

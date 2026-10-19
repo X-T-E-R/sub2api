@@ -4,7 +4,40 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
+
+type antigravityRateLimitWireKey struct{}
+
+type antigravityRateLimitWireTarget struct {
+	accountID int64
+	model     string
+}
+
+// Bind only inside a physical Forward attempt, after mapping/transformation.
+// The account identity prevents a failover from reusing another account's route.
+func withAntigravityRateLimitWireModel(ctx context.Context, account *Account, body []byte) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if account == nil || model == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, antigravityRateLimitWireKey{}, antigravityRateLimitWireTarget{account.ID, model})
+}
+
+func antigravityRateLimitWireModel(ctx context.Context, account *Account) string {
+	if ctx == nil || account == nil {
+		return ""
+	}
+	target, ok := ctx.Value(antigravityRateLimitWireKey{}).(antigravityRateLimitWireTarget)
+	if !ok || target.accountID != account.ID {
+		return ""
+	}
+	return target.model
+}
 
 func normalizeAntigravityModelName(model string) string {
 	normalized := strings.ToLower(strings.TrimSpace(model))

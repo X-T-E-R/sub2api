@@ -209,7 +209,7 @@ func TestGatewaySelectAccountWithLoadAwareness_HydratesSelectedAccountFromSchedu
 	}
 }
 
-func TestGatewaySelectAccountWithLoadAwareness_SkipsAntigravityGeminiFamilyRateLimitedSnapshot(t *testing.T) {
+func TestGatewaySelectAccountWithLoadAwareness_AntigravityQuotaIsolationSnapshot(t *testing.T) {
 	resetAt := time.Now().Add(10 * time.Minute).Format(time.RFC3339)
 	cache := &snapshotHydrationCache{
 		snapshot: []*Account{
@@ -231,6 +231,7 @@ func TestGatewaySelectAccountWithLoadAwareness_SkipsAntigravityGeminiFamilyRateL
 						antigravityGeminiModelRateLimitKey: map[string]any{
 							"rate_limit_reset_at": resetAt,
 						},
+						"gemini-3-flash": map[string]any{"rate_limit_reset_at": resetAt},
 					},
 				},
 			},
@@ -283,14 +284,24 @@ func TestGatewaySelectAccountWithLoadAwareness_SkipsAntigravityGeminiFamilyRateL
 		},
 	}
 
-	result, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", "gemini-3-flash", nil, "", 0)
-	if err != nil {
-		t.Fatalf("SelectAccountWithLoadAwareness error: %v", err)
-	}
-	if result == nil || result.Account == nil {
-		t.Fatalf("expected selected account")
-	}
-	if result.Account.ID != 2 {
-		t.Fatalf("expected scheduler to skip Gemini-family limited antigravity account 1, got %d", result.Account.ID)
+	for _, tc := range []struct {
+		model string
+		want  int64
+	}{
+		{"gemini-3-flash", 2}, {"gemini-2.5-pro", 1},
+	} {
+		result, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "", tc.model, nil, "", 0)
+		if err != nil {
+			t.Fatalf("SelectAccountWithLoadAwareness %s: %v", tc.model, err)
+		}
+		if result == nil || result.Account == nil {
+			t.Fatal("expected selected account")
+		}
+		if result.Account.ID != tc.want {
+			t.Fatalf("%s selected %d, want %d: quota must remain model-local even in legacy snapshots", tc.model, result.Account.ID, tc.want)
+		}
+		if result.ReleaseFunc != nil {
+			result.ReleaseFunc()
+		}
 	}
 }

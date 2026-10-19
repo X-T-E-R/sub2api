@@ -123,7 +123,7 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit blocks mapped template variant",
+			name: "antigravity platform - legacy inferred family does not block a resolved target",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
@@ -135,7 +135,7 @@ func TestIsModelRateLimited(t *testing.T) {
 				},
 			},
 			requestedModel: "gemini-3-pro",
-			expected:       true,
+			expected:       false,
 		},
 		{
 			name: "antigravity platform - gemini family rate limit does not block claude",
@@ -395,7 +395,7 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    6 * time.Minute,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit remaining",
+			name: "antigravity platform - legacy inferred family does not impose a remaining time",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
@@ -407,8 +407,8 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 				},
 			},
 			requestedModel: "gemini-3-pro",
-			minExpected:    9 * time.Minute,
-			maxExpected:    11 * time.Minute,
+			minExpected:    0,
+			maxExpected:    0,
 		},
 		{
 			name: "antigravity platform - gemini family remaining ignored for claude",

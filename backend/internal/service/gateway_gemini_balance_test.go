@@ -242,7 +242,7 @@ func TestGeminiBalanceUnavailableBindingsAndExclusions(t *testing.T) {
 				repo.accounts[0].RateLimitResetAt = &until
 			case "model":
 				repo.accounts[0].Extra = map[string]any{modelRateLimitsKey: map[string]any{
-					antigravityGeminiModelRateLimitKey: map[string]any{"rate_limit_reset_at": time.Now().Add(time.Hour).Format(time.RFC3339)},
+					"gemini-2.5-pro": map[string]any{"rate_limit_reset_at": time.Now().Add(time.Hour).Format(time.RFC3339)},
 				}}
 			case "quota":
 				repo.accounts[0].Type = AccountTypeAPIKey

@@ -469,6 +469,7 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 
 // antigravityRetryLoop 执行带 URL fallback 的重试循环
 func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopParams) (*antigravityRetryLoopResult, error) {
+	p.ctx = withAntigravityRateLimitWireModel(p.ctx, p.account, p.body)
 	// 预检查：模型限流 + overages 启用 + 积分未耗尽 → 直接注入 AI Credits
 	overagesInjected := false
 	if p.requestedModel != "" && p.account.Platform == PlatformAntigravity &&
@@ -873,8 +874,8 @@ func isSingleAccountRetry(ctx context.Context) bool {
 	return v
 }
 
-// setModelRateLimitByModelName 使用官方模型 ID 设置模型级限流
-// 直接使用上游返回的模型 ID（如 claude-sonnet-4-5）作为限流 key
+// setModelRateLimitByModelName 使用调用方确定的上游模型 ID 设置模型级限流。
+// 不在持久化前再次映射或从模型名称推断共享 scope。
 // 返回是否已成功设置（若模型名为空或 repo 为 nil 将返回 false）
 func setModelRateLimitByModelName(ctx context.Context, repo AccountRepository, accountID int64, modelName, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool) bool {
 	if repo == nil || modelName == "" {
