@@ -312,3 +312,45 @@ func TestConfiguredAntigravityRoutesIgnoreMissingCatalogIDs(t *testing.T) {
 		}
 	}
 }
+
+// Replays the account73 Hub-profile IDs observed at 2026-10-19T12:10:50Z;
+// only the ID list is retained, not credentials or capability metadata.
+func TestCatalogHubProfileProjectsObservedArgon(t *testing.T) {
+	effortTestSettings(t)
+	body, err := os.ReadFile("testdata/antigravity_catalog_20261019_hub.json")
+	require.NoError(t, err)
+	var fixture struct {
+		ModelIDs []string `json:"model_ids"`
+	}
+	require.NoError(t, json.Unmarshal(body, &fixture))
+	models := make(map[string]any, len(fixture.ModelIDs))
+	for _, id := range fixture.ModelIDs {
+		models[id] = map[string]any{}
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		require.Equal(t, "/v1internal:fetchAvailableModels", r.URL.Path)
+		require.Equal(t, "antigravity/hub/"+antigravity.GetUserAgentVersionForContext(r.Context())+" darwin/arm64", r.Header.Get("User-Agent"))
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"models": models}))
+	}))
+	defer server.Close()
+	oldURL, oldURLs := antigravity.BaseURL, antigravity.BaseURLs
+	antigravity.BaseURL, antigravity.BaseURLs = server.URL, []string{server.URL}
+	t.Cleanup(func() { antigravity.BaseURL, antigravity.BaseURLs = oldURL, oldURLs })
+	account := newAntigravityCompatAccount(AccountTypeOAuth)
+	repo := &upstreamModelMetadataRepoStub{}
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig(), accountRepo: repo, antigravityGatewayService: newAntigravityCompatService(config.GatewayConfig{}, nil)}
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.True(t, catalog.Live)
+	require.Len(t, catalog.Models, 34)
+	require.ElementsMatch(t, fixture.ModelIDs, catalog.Models)
+	require.Equal(t, "gemini-4-argon-{effort}", catalog.ModelMapping["gemini-4-argon"])
+	for _, effort := range []string{"low", "medium", "high"} {
+		require.NotContains(t, catalog.ModelMapping, "gemini-4-argon-"+effort)
+	}
+	require.Equal(t, []string{"high", "low", "medium"}, catalog.Metadata["gemini-4-argon"].SupportedReasoningLevels)
+	require.Equal(t, "medium", catalog.Metadata["gemini-4-argon"].DefaultReasoningLevel)
+}

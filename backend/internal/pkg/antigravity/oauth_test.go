@@ -695,7 +695,7 @@ func TestConstants_值正确(t *testing.T) {
 	if RedirectURI != "http://localhost:8085/callback" {
 		t.Errorf("RedirectURI 不匹配: got %s", RedirectURI)
 	}
-	if got := BuildUserAgent(DefaultUserAgentVersion); got != "antigravity/2.23.0 windows/amd64" {
+	if got := BuildUserAgent(DefaultUserAgentVersion); got != "antigravity/hub/2.23.0 darwin/arm64" {
 		t.Errorf("UserAgent 不匹配: got %s", got)
 	}
 	if SessionTTL != 30*time.Minute {
@@ -733,7 +733,7 @@ func TestUserAgentVersionConfiguration(t *testing.T) {
 		if got := GetDefaultUserAgentVersion(); got != expected {
 			t.Fatalf("environment default = %q, want %q", got, expected)
 		}
-		if got := GetUserAgent(); got != "antigravity/"+expected+" windows/amd64" {
+		if got := GetUserAgent(); got != "antigravity/hub/"+expected+" darwin/arm64" {
 			t.Errorf("User-Agent without resolver = %q, want version %q", got, expected)
 		}
 		for _, resolverValue := range []string{"", "invalid", "  1.23.2  "} {
@@ -747,13 +747,13 @@ func TestUserAgentVersionConfiguration(t *testing.T) {
 				if got := GetUserAgentVersionForContext(nil); got != want {
 					t.Errorf("resolved version = %q, want %q", got, want)
 				}
-				if got := GetUserAgent(); got != "antigravity/"+want+" windows/amd64" {
-					t.Errorf("User-Agent = %q, want version %q with unchanged format", got, want)
+				if got := GetUserAgent(); got != "antigravity/hub/"+want+" darwin/arm64" {
+					t.Errorf("User-Agent = %q, want version %q with Hub profile", got, want)
 				}
 			})
 		}
 		for _, version := range []string{"", "invalid"} {
-			if got := BuildUserAgent(version); got != "antigravity/"+expected+" windows/amd64" {
+			if got := BuildUserAgent(version); got != "antigravity/hub/"+expected+" darwin/arm64" {
 				t.Errorf("BuildUserAgent(%q) = %q, want environment/default fallback", version, got)
 			}
 		}
