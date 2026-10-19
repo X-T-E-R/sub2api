@@ -96,6 +96,11 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx contex
 // it omitted, so in that case the caches are rebuilt from storage rather than
 // from the request struct.
 func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) {
+	// Publish the explicitly written UA even if the broad post-write read fails.
+	// An omitted field must not replace its existing runtime value with zero.
+	if _, skipped := omitted[SettingKeyAntigravityUserAgent]; !skipped && settings != nil {
+		s.publishAntigravityUserAgent(settings.AntigravityUserAgent)
+	}
 	if len(omitted) == 0 {
 		s.refreshCachedSettings(settings)
 		return
@@ -156,6 +161,11 @@ func (s *SettingService) refreshCyberSessionBlockRuntimeAfterWrite(ctx context.C
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
+	ua, err := antigravity.NormalizeUserAgentOverride(settings.AntigravityUserAgent)
+	if err != nil {
+		return nil, infraerrors.BadRequest("INVALID_ANTIGRAVITY_USER_AGENT", err.Error())
+	}
+	settings.AntigravityUserAgent = ua
 	if err := s.validateDefaultSubscriptionGroups(ctx, settings.DefaultSubscriptions); err != nil {
 		return nil, err
 	}
@@ -529,6 +539,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableAnthropicCacheTTL1hInjection] = strconv.FormatBool(settings.EnableAnthropicCacheTTL1hInjection)
 	updates[SettingKeyRewriteMessageCacheControl] = strconv.FormatBool(settings.RewriteMessageCacheControl)
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
+	updates[SettingKeyAntigravityUserAgent] = settings.AntigravityUserAgent
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)

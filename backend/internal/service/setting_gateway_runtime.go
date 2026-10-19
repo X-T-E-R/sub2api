@@ -85,6 +85,15 @@ const accountSchedulingThresholdsCacheTTL = 60 * time.Second
 const accountSchedulingThresholdsErrorTTL = 5 * time.Second
 const accountSchedulingThresholdsDBTimeout = 5 * time.Second
 
+type cachedAntigravityUserAgent struct {
+	value     string // empty means use the separately resolved numeric version
+	expiresAt int64
+}
+
+const antigravityUserAgentCacheTTL = 60 * time.Second
+const antigravityUserAgentErrorTTL = 5 * time.Second
+const antigravityUserAgentDBTimeout = 5 * time.Second
+
 // cachedAntigravityUserAgentVersion 缓存 Antigravity UA 版本号（进程内缓存，60s TTL）
 type cachedAntigravityUserAgentVersion struct {
 	version   string
@@ -199,6 +208,48 @@ func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool,
 	entry := &cachedCyberSessionBlockRuntime{enabled: enabled, ttl: ttl, expiresAt: time.Now().Add(cyberSessionBlockRuntimeCacheTTL).UnixNano()}
 	s.cyberSessionBlockRuntimeCache.Store(entry)
 	return entry.enabled, entry.ttl
+}
+
+// GetAntigravityUserAgentOverride returns the saved complete header, or empty
+// to leave the existing version resolver in control of the Hub profile.
+func (s *SettingService) GetAntigravityUserAgentOverride(ctx context.Context) string {
+	if s == nil || s.settingRepo == nil {
+		return ""
+	}
+	s.antigravityUAMu.RLock()
+	defer s.antigravityUAMu.RUnlock()
+	if cached, ok := s.antigravityUACache.Load().(*cachedAntigravityUserAgent); ok && cached != nil && time.Now().UnixNano() < cached.expiresAt {
+		return cached.value
+	}
+	result, _, _ := s.antigravityUASF.Do(SettingKeyAntigravityUserAgent, func() (any, error) {
+		if cached, ok := s.antigravityUACache.Load().(*cachedAntigravityUserAgent); ok && cached != nil && time.Now().UnixNano() < cached.expiresAt {
+			return cached.value, nil
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravityUserAgentDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravityUserAgent)
+		ttl := antigravityUserAgentCacheTTL
+		if err != nil && !errors.Is(err, ErrSettingNotFound) {
+			slog.Warn("failed to get antigravity user agent setting", "error", err)
+			value, ttl = "", antigravityUserAgentErrorTTL
+		}
+		ua, _ := antigravity.NormalizeUserAgentOverride(value)
+		s.antigravityUACache.Store(&cachedAntigravityUserAgent{value: ua, expiresAt: time.Now().Add(ttl).UnixNano()})
+		return ua, nil
+	})
+	ua, _ := result.(string)
+	return ua
+}
+
+func (s *SettingService) publishAntigravityUserAgent(value string) {
+	ua, _ := antigravity.NormalizeUserAgentOverride(value)
+	s.antigravityUAMu.Lock()
+	defer s.antigravityUAMu.Unlock()
+	s.antigravityUASF.Forget(SettingKeyAntigravityUserAgent)
+	s.antigravityUACache.Store(&cachedAntigravityUserAgent{value: ua, expiresAt: time.Now().Add(antigravityUserAgentCacheTTL).UnixNano()})
 }
 
 // GetAntigravityUserAgentVersion 返回 Antigravity 上游请求使用的版本号。

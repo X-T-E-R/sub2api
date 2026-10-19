@@ -62,11 +62,16 @@ var userAgentVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 // UserAgentVersionResolver 提供运行时 User-Agent 版本号覆盖能力。
 type UserAgentVersionResolver func(ctx context.Context) string
 
+// UserAgentResolver provides a complete runtime User-Agent override.
+// An empty value preserves the version-based Hub profile.
+type UserAgentResolver func(ctx context.Context) string
+
 var (
 	// defaultUserAgentVersion 可通过环境变量 ANTIGRAVITY_USER_AGENT_VERSION 配置。
 	defaultUserAgentVersion  = DefaultUserAgentVersion
 	userAgentVersionMu       sync.RWMutex
 	userAgentVersionResolver UserAgentVersionResolver
+	userAgentResolver        UserAgentResolver
 )
 
 // defaultClientSecret 可通过环境变量 ANTIGRAVITY_OAUTH_CLIENT_SECRET 配置
@@ -128,8 +133,41 @@ func BuildUserAgent(version string) string {
 	return fmt.Sprintf("antigravity/hub/%s darwin/arm64", defaultUserAgentVersion)
 }
 
-// GetUserAgentForContext 返回当前请求应使用的 User-Agent。
+// NormalizeUserAgentOverride accepts printable ASCII only, then trims spaces.
+// Reject controls before trimming so leading/trailing CRLF cannot be hidden.
+func NormalizeUserAgentOverride(value string) (string, error) {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return "", fmt.Errorf("antigravity_user_agent must contain only printable ASCII characters")
+		}
+	}
+	value = strings.TrimSpace(value)
+	if len(value) > 512 {
+		return "", fmt.Errorf("antigravity_user_agent must be at most 512 characters")
+	}
+	return value, nil
+}
+
+// SetUserAgentResolver installs the complete UA override from runtime settings.
+func SetUserAgentResolver(resolver UserAgentResolver) {
+	userAgentVersionMu.Lock()
+	defer userAgentVersionMu.Unlock()
+	userAgentResolver = resolver
+}
+
+// GetUserAgentForContext 返回完整覆盖值，未配置时使用版本号构造 Hub User-Agent。
 func GetUserAgentForContext(ctx context.Context) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	userAgentVersionMu.RLock()
+	resolver := userAgentResolver
+	userAgentVersionMu.RUnlock()
+	if resolver != nil {
+		if ua, err := NormalizeUserAgentOverride(resolver(ctx)); err == nil && ua != "" {
+			return ua
+		}
+	}
 	return BuildUserAgent(GetUserAgentVersionForContext(ctx))
 }
 

@@ -124,6 +124,9 @@ type SettingService struct {
 	onUpdate                    func() // Callback when settings are updated (for cache invalidation)
 	version                     string // Application version
 	webSearchManagerBuilder     WebSearchManagerBuilder
+	antigravityUACache          atomic.Value // *cachedAntigravityUserAgent
+	antigravityUASF             singleflight.Group
+	antigravityUAMu             sync.RWMutex // prevent an in-flight DB read from overwriting a successful save
 	antigravityUAVersionCache   atomic.Value // *cachedAntigravityUserAgentVersion
 	antigravityUAVersionSF      singleflight.Group
 	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
