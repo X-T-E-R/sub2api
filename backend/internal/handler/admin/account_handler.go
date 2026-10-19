@@ -1389,7 +1389,7 @@ type ApplyOAuthCredentialsRequest struct {
 	Extra       map[string]any `json:"extra"`
 }
 
-// ApplyOAuthCredentials 将"重新授权"得到的新凭据原子落库。
+// ApplyOAuthCredentials 将"重新授权"得到的新凭据落库。
 // POST /api/v1/admin/accounts/:id/apply-oauth-credentials
 //
 // 与通用 PUT /:id (Update) 接口的关键区别：
@@ -1397,8 +1397,9 @@ type ApplyOAuthCredentialsRequest struct {
 //   - Extra 走 UpdateAccountExtra(JSONB key 级合并)，**绝不**全量覆盖；
 //     避免 base_rpm / window_cost_limit / max_sessions / quota_* / privacy_mode
 //     等持久化配置在重新授权后丢失
-//   - 内置 ClearError + InvalidateToken，避免前端额外两次调用，
-//     并修复旧路径未失效 token 缓存导致重新授权后立即 401 的隐性 bug
+//   - 内置错误状态恢复 + InvalidateToken，避免前端额外两次调用，
+//     并修复旧路径未失效 token 缓存导致重新授权后立即 401 的隐性 bug；
+//     Antigravity 仅恢复认证错误状态，保留真实 quota / cooldown，其它平台维持 ClearAccountError 行为
 //
 // 与 /refresh 的区别：/refresh 用现有 refresh_token 换 access_token（无用户交互），
 // 本接口承接前端完成完整 OAuth 流程后的落库步骤。
@@ -1435,10 +1436,19 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
 
-	updatedAccount, err := h.adminService.UpdateAccount(ctx, accountID, &service.UpdateAccountInput{
-		Type:        req.Type,
-		Credentials: req.Credentials,
-	})
+	var updatedAccount *service.Account
+	if existing.Platform == service.PlatformAntigravity {
+		if req.Type != service.AccountTypeOAuth {
+			response.ErrorFrom(c, infraerrors.BadRequest("NOT_ANTIGRAVITY_OAUTH", "account must remain Antigravity OAuth"))
+			return
+		}
+		updatedAccount, err = h.adminService.ApplyAntigravityOAuthCredentials(ctx, accountID, req.Credentials)
+	} else {
+		updatedAccount, err = h.adminService.UpdateAccount(ctx, accountID, &service.UpdateAccountInput{
+			Type:        req.Type,
+			Credentials: req.Credentials,
+		})
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -1476,7 +1486,17 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		}
 	}
 
-	if cleared, clearErr := h.adminService.ClearAccountError(ctx, accountID); clearErr != nil {
+	if existing.Platform == service.PlatformAntigravity {
+		// AG recovery has already restored authentication state without clearing
+		// real provider quota. Reload only if optional extra metadata was merged.
+		if len(req.Extra) > 0 {
+			updatedAccount, err = h.adminService.GetAccount(ctx, accountID)
+			if err != nil {
+				response.ErrorFrom(c, err)
+				return
+			}
+		}
+	} else if cleared, clearErr := h.adminService.ClearAccountError(ctx, accountID); clearErr != nil {
 		slog.Warn("apply_oauth_credentials.clear_error_failed",
 			"account_id", accountID,
 			"err", clearErr,
