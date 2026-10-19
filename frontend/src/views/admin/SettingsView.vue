@@ -5814,9 +5814,48 @@
                 />
               </div>
 
+              <!-- Antigravity User-Agent -->
+              <div>
+                <label
+                  for="antigravity-user-agent"
+                  class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                >
+                  {{ t("admin.settings.gatewayForwarding.antigravityUserAgent") }}
+                </label>
+                <input
+                  id="antigravity-user-agent"
+                  v-model="form.antigravity_user_agent"
+                  type="text"
+                  class="input min-h-11 w-full font-mono text-sm placeholder:text-gray-500 dark:placeholder:text-gray-400"
+                  :class="antigravityUserAgentError && 'border-red-500 dark:border-red-500'"
+                  :placeholder="t('admin.settings.gatewayForwarding.antigravityUserAgentPlaceholder')"
+                  :aria-invalid="Boolean(antigravityUserAgentError)"
+                  :aria-describedby="antigravityUserAgentError ? 'antigravity-user-agent-hint antigravity-user-agent-error' : 'antigravity-user-agent-hint'"
+                  :disabled="saving"
+                  autocomplete="off"
+                  :spellcheck="false"
+                  @paste="validateAntigravityUserAgentPaste"
+                />
+                <p
+                  id="antigravity-user-agent-hint"
+                  class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
+                >
+                  {{ t("admin.settings.gatewayForwarding.antigravityUserAgentHint") }}
+                </p>
+                <p
+                  v-if="antigravityUserAgentError"
+                  id="antigravity-user-agent-error"
+                  class="mt-1.5 text-xs text-red-600 dark:text-red-400"
+                  role="alert"
+                >
+                  {{ antigravityUserAgentError }}
+                </p>
+              </div>
+
               <!-- Antigravity UA 版本 -->
               <div>
                 <label
+                  for="antigravity-user-agent-version"
                   class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
                 >
                   {{
@@ -5826,6 +5865,7 @@
                   }}
                 </label>
                 <input
+                  id="antigravity-user-agent-version"
                   v-model="form.antigravity_user_agent_version"
                   type="text"
                   class="input max-w-xs font-mono text-sm"
@@ -9958,6 +9998,7 @@ const form = reactive<SettingsForm>({
   enable_anthropic_cache_ttl_1h_injection: false,
   rewrite_message_cache_control: false,
   enable_client_dateline_normalization: true,
+  antigravity_user_agent: "",
   antigravity_user_agent_version: "",
   openai_codex_user_agent: "",
   openai_codex_client_version: "",
@@ -11190,9 +11231,33 @@ function findDuplicateDefaultSubscription(
   });
 }
 
+const antigravityUserAgentError = computed(() => {
+  if (/[^\x20-\x7e]/.test(form.antigravity_user_agent)) {
+    return t("admin.settings.gatewayForwarding.antigravityUserAgentInvalidCharacters");
+  }
+  if (form.antigravity_user_agent.trim().length > 512) {
+    return t("admin.settings.gatewayForwarding.antigravityUserAgentTooLong");
+  }
+  return "";
+});
+
+function validateAntigravityUserAgentPaste(event: ClipboardEvent) {
+  // Single-line inputs silently strip line breaks before input validation.
+  if (/[^\x20-\x7e]/.test(event.clipboardData?.getData("text") || "")) {
+    event.preventDefault();
+    appStore.showError(
+      t("admin.settings.gatewayForwarding.antigravityUserAgentInvalidCharacters"),
+    );
+  }
+}
+
 async function saveSettings() {
   saving.value = true;
   try {
+    if (antigravityUserAgentError.value) {
+      appStore.showError(antigravityUserAgentError.value);
+      return;
+    }
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -11536,6 +11601,7 @@ async function saveSettings() {
       rewrite_message_cache_control: form.rewrite_message_cache_control,
       enable_client_dateline_normalization:
         form.enable_client_dateline_normalization,
+      antigravity_user_agent: form.antigravity_user_agent.trim(),
       antigravity_user_agent_version:
         form.antigravity_user_agent_version?.trim() || "",
       openai_codex_user_agent:

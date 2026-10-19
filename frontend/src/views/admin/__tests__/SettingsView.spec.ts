@@ -1635,6 +1635,125 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
+  it("loads, trims, saves and echoes the full Antigravity User-Agent without changing its version", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_user_agent: "antigravity/hub/2.23.0 darwin/arm64",
+      antigravity_user_agent_version: "1.23.2",
+    });
+    updateSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_user_agent: "saved-client/3.0 linux/amd64",
+      antigravity_user_agent_version: "1.23.2",
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const input = wrapper.get<HTMLInputElement>("#antigravity-user-agent");
+    expect(input.element.value).toBe("antigravity/hub/2.23.0 darwin/arm64");
+    await input.setValue("  custom-client/3.0 linux/amd64  ");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      antigravity_user_agent: "custom-client/3.0 linux/amd64",
+      antigravity_user_agent_version: "1.23.2",
+    }));
+    expect(input.element.value).toBe("saved-client/3.0 linux/amd64");
+    expect(showSuccess).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it.each(["", "   "])("sends an explicit empty Antigravity User-Agent for %j and preserves version editing", async (empty) => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_user_agent: "custom-client/3.0",
+      antigravity_user_agent_version: "1.23.2",
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await wrapper.get("#antigravity-user-agent").setValue(empty);
+    await wrapper.get("#antigravity-user-agent-version").setValue("2.24.0");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      antigravity_user_agent: "",
+      antigravity_user_agent_version: "2.24.0",
+    }));
+    expect(wrapper.get<HTMLInputElement>("#antigravity-user-agent").element.value).toBe("");
+    wrapper.unmount();
+  });
+
+  it.each(["client/中文", "client/é", "client/\u007f", "client/\t", "client/\u0001"])("blocks invalid Antigravity User-Agent characters in %j", async (value) => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const input = wrapper.get("#antigravity-user-agent");
+    await input.setValue(value);
+    expect(input.attributes("aria-invalid")).toBe("true");
+    expect(wrapper.get("#antigravity-user-agent-error").text()).toContain("antigravityUserAgentInvalidCharacters");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith("admin.settings.gatewayForwarding.antigravityUserAgentInvalidCharacters");
+    await input.setValue("client/3.0");
+    expect(input.attributes("aria-invalid")).toBe("false");
+    expect(wrapper.find("#antigravity-user-agent-error").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it.each(["client/3.0\r\nInjected: yes", "\nclient/3.0", "client/3.0\t", "client/中文"])("rejects invalid pasted Antigravity User-Agent %j before browser normalization", async (value) => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const input = wrapper.get<HTMLInputElement>("#antigravity-user-agent");
+    await input.setValue("client/3.0");
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { getData: () => value } });
+    input.element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(input.element.value).toBe("client/3.0");
+    expect(showError).toHaveBeenCalledWith("admin.settings.gatewayForwarding.antigravityUserAgentInvalidCharacters");
+    wrapper.unmount();
+  });
+
+  it("rejects 513 characters and accepts 512 after trimming the Antigravity User-Agent", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const input = wrapper.get("#antigravity-user-agent");
+    await input.setValue("a".repeat(513));
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith("admin.settings.gatewayForwarding.antigravityUserAgentTooLong");
+    await input.setValue(`  ${"a".repeat(512)}  `);
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ antigravity_user_agent: "a".repeat(512) }));
+    wrapper.unmount();
+  });
+
+  it("retains the edited Antigravity User-Agent after a backend error and allows retry", async () => {
+    updateSettings.mockRejectedValueOnce({ message: "antigravity_user_agent must contain only printable ASCII characters" });
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const input = wrapper.get<HTMLInputElement>("#antigravity-user-agent");
+    await input.setValue("client/3.0");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(showError).toHaveBeenCalledWith("error");
+    expect(showSuccess).not.toHaveBeenCalled();
+    expect(input.element.value).toBe("client/3.0");
+    expect(input.element.disabled).toBe(false);
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+    expect(showSuccess).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("updates provider enablement immediately and reloads providers", async () => {
     const provider = {
       id: 7,
