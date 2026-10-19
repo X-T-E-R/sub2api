@@ -148,31 +148,11 @@ func extractAntigravityCatalogMetadata(body []byte) map[string]UpstreamModelMeta
 	return result
 }
 
-// Availability constraints apply only to explicitly opted-in templates with a
-// live catalog. Old/manual mappings without a catalog retain their contract.
-// Neither registry metadata nor global levels can grant a missing ID.
-func (a *Account) constrainAntigravityCatalogModel(model string) string {
-	if model == "" || a == nil || a.Platform != PlatformAntigravity {
-		return model
-	}
-	snapshot := a.GetUpstreamModelMetadataSnapshot()
-	if snapshot == nil || !snapshot.Live || (snapshot.Identity != "" && snapshot.Identity != upstreamCatalogIdentity(a)) {
-		return model
-	}
-	for _, id := range snapshot.ModelIDs {
-		if model == id {
-			return model
-		}
-	}
-	return ""
-}
-
+// Saved mappings, including catalog-projected templates, are routing authority.
+// Discovery snapshots may lag new models and must not veto a configured target.
+// Template syntax and enabled effort levels still follow the request's policy.
 func (a *Account) resolveAntigravityCatalogMapping(mapping map[string]string, requested, effort string, p *AntigravityModelEffortSettings) (string, bool) {
-	model, matched, generated := resolveAntigravityEffortMappingDetails(mapping, requested, effort, p)
-	if matched && generated {
-		model = a.constrainAntigravityCatalogModel(model)
-	}
-	return model, matched
+	return resolveAntigravityEffortMappingWithPolicy(mapping, requested, effort, p)
 }
 
 // Scope list evidence to the account/network identity, not an access token that

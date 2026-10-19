@@ -53,7 +53,7 @@ func TestCatalogProjectionNamingEvidence(t *testing.T) {
 	require.Equal(t, map[string]string{"foo-low": "foo-low", "foo-high": "foo-high"}, mapping)
 }
 
-func TestCatalogSnapshotConstrainsRoutingAndRealForward(t *testing.T) {
+func TestCatalogSnapshotDoesNotVetoConfiguredRoutingAndRealForward(t *testing.T) {
 	effortTestSettings(t)
 	metadata := map[string]UpstreamModelMetadata{}
 	ids := []string{"bespoke-low", "bespoke-high"}
@@ -61,9 +61,9 @@ func TestCatalogSnapshotConstrainsRoutingAndRealForward(t *testing.T) {
 	account := effortTestAccount(mapping)
 	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Live: true, ModelIDs: ids, Models: metadata, EffortFamilies: families, Identity: upstreamCatalogIdentity(account)})
 	for _, requested := range []string{"bespoke-max", "bespoke-medium"} {
-		require.False(t, account.IsModelSupported(requested))
-		require.Empty(t, mapAntigravityModel(account, requested))
-		require.True(t, explicitModelMappingClaims(*account, requested), "ownership is a naming claim; actual account admission is checked separately")
+		require.True(t, account.IsModelSupported(requested))
+		require.Equal(t, requested, mapAntigravityModel(account, requested))
+		require.True(t, explicitModelMappingClaims(*account, requested))
 	}
 	for _, effort := range []string{"low", "high", "", "max"} {
 		body := []byte(`{"model":"bespoke","reasoning_effort":"` + effort + `","messages":[{"role":"user","content":"hello"}]}`)
@@ -73,12 +73,6 @@ func TestCatalogSnapshotConstrainsRoutingAndRealForward(t *testing.T) {
 		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
 		c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", body)
 		_, err := svc.ForwardAsChatCompletions(ctx, c, account, body, nil)
-		if effort == "max" {
-			require.False(t, supported)
-			require.Error(t, err)
-			require.Empty(t, upstream.requestBodies)
-			continue
-		}
 		require.True(t, supported)
 		require.NoError(t, err)
 		require.Len(t, upstream.requestBodies, 1)
@@ -88,10 +82,9 @@ func TestCatalogSnapshotConstrainsRoutingAndRealForward(t *testing.T) {
 		}
 		require.Equal(t, "bespoke-"+want, gjson.GetBytes(upstream.requestBodies[0], "model").String())
 	}
-	// A newly authoritative catalog with only one remaining literal variant still
-	// constrains an existing saved template; disappearance must not grant max.
+	// A later, smaller discovery snapshot cannot revoke the saved template.
 	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Live: true, ModelIDs: []string{"bespoke-low"}, Models: map[string]UpstreamModelMetadata{}})
-	require.False(t, account.IsModelSupported("bespoke-high"))
+	require.True(t, account.IsModelSupported("bespoke-high"))
 	require.True(t, account.IsModelSupported("bespoke-low"))
 	now := time.Now()
 	setAccountModelRateLimitSnapshot(account, "bespoke", now.Add(time.Minute), "fixture", now)
@@ -262,10 +255,60 @@ func TestCatalogProjectionObserved20261011(t *testing.T) {
 			}
 			account = effortTestAccount(mapping)
 			account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Live: true, ModelIDs: fixture.ModelIDs, Models: metadata, EffortFamilies: families})
-			require.Empty(t, mapAntigravityModel(account, "gemini-3.8-flash-max"))
-			require.Empty(t, mapAntigravityModel(account, "gemini-3.1-pro-medium"))
-			require.Empty(t, mapAntigravityModel(account, "gemini-3.5-flash-medium"))
+			require.Equal(t, "gemini-3.8-flash-max", mapAntigravityModel(account, "gemini-3.8-flash-max"))
+			require.Equal(t, "gemini-3.1-pro-medium", mapAntigravityModel(account, "gemini-3.1-pro-medium"))
+			require.Equal(t, "gemini-3.5-flash-medium", mapAntigravityModel(account, "gemini-3.5-flash-medium"))
 			require.Equal(t, "gemini-3.5-flash-low", mapAntigravityModel(account, "gemini-3.5-flash-low"))
 		})
+	}
+}
+
+func TestConfiguredAntigravityRoutesIgnoreMissingCatalogIDs(t *testing.T) {
+	effortTestSettings(t, "ultra")
+	for _, live := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, requested, effort, want string
+			mapping                       map[string]string
+		}{
+			{"literal", "gemini-4-argon", "high", "gemini-4-argon", map[string]string{"gemini-4-argon": "gemini-4-argon"}},
+			{"alias", "friendly", "high", "gemini-4-argon-ultra", map[string]string{"friendly": "gemini-4-argon-ultra"}},
+			{"wildcard", "lab-new", "high", "gemini-4-argon-ultra", map[string]string{"lab-*": "gemini-4-argon-ultra"}},
+			{"template", "gemini-4-argon", "ultra", "gemini-4-argon-ultra", map[string]string{"gemini-4-argon": "gemini-4-argon-{effort}"}},
+			{"template default", "friendly", "", "gemini-4-argon-high", map[string]string{"friendly": "gemini-4-argon-{effort:high}"}},
+			{"template suffix", "friendly-ultra", "high", "gemini-4-argon-ultra", map[string]string{"friendly": "gemini-4-argon-{effort}"}},
+			{"not configured", "gemini-4-argon", "high", "", map[string]string{"known": "known"}},
+			{"disabled effort", "gemini-4-argon", "disabled", "", map[string]string{"gemini-4-argon": "gemini-4-argon-{effort}"}},
+			{"invalid template", "gemini-4-argon", "high", "", map[string]string{"gemini-4-argon": "gemini-4-argon-{effort:bad name}"}},
+			{"empty target", "blocked", "", "", map[string]string{"blocked": ""}},
+		} {
+			t.Run(fmt.Sprintf("live_%t/%s", live, tc.name), func(t *testing.T) {
+				account := effortTestAccount(tc.mapping)
+				account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+					Live: live, Identity: upstreamCatalogIdentity(account), ModelIDs: []string{"old-low", "old-high"},
+				})
+				ctx := WithAntigravityRequestEffort(context.Background(), []byte(`{"reasoning_effort":"`+tc.effort+`"}`))
+				require.Equal(t, tc.want, resolveFinalAntigravityModelKey(ctx, account, tc.requested))
+				require.Equal(t, tc.want != "", (&GatewayService{}).isModelSupportedByAccountWithContext(ctx, account, tc.requested))
+				if tc.want != "" {
+					require.Contains(t, account.modelRateLimitKeysForRequest(ctx, tc.requested), tc.want)
+					now := time.Now()
+					setAccountModelRateLimitSnapshot(account, tc.want, now.Add(time.Minute), "fixture", now)
+					require.True(t, account.isModelRateLimitedWithContext(ctx, tc.requested), "configured models must retain exact-target rate limits")
+				} else {
+					body := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":200,"output_config":{"effort":%q},"messages":[{"role":"user","content":"hello"}]}`, tc.requested, tc.effort))
+					upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+					svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+					c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/messages", body)
+					_, err := svc.Forward(ctx, c, account, body, false)
+					require.Error(t, err)
+					wantStatus := http.StatusForbidden
+					if tc.name == "disabled effort" {
+						wantStatus = http.StatusBadRequest
+					}
+					require.Equal(t, wantStatus, recorder.Code)
+					require.Zero(t, upstream.callCount)
+				}
+			})
+		}
 	}
 }

@@ -46,31 +46,32 @@ func TestAdminCatalogSyncSaveRetainsLatestAvailability(t *testing.T) {
 			require.Equal(t, "bespoke-{effort:high}", catalog.ModelMapping["bespoke"])
 			latest := account.GetUpstreamModelMetadataSnapshot()
 			require.NotNil(t, latest)
-			assertCatalogMissingMaxNotForwarded(t, account)
+			assertConfiguredTemplateSurvivesCatalogSave(t, account)
 			credentials := mergeMap(nil, opened.Credentials)
 			credentials["model_mapping"] = map[string]any{"bespoke": catalog.ModelMapping["bespoke"]}
 			saved, err := (&adminServiceImpl{accountRepo: repo}).UpdateAccount(context.Background(), account.ID, &UpdateAccountInput{Credentials: credentials, Extra: staleExtra})
 			require.NoError(t, err)
 			require.Equal(t, latest, saved.GetUpstreamModelMetadataSnapshot())
 			require.NotContains(t, saved.Extra, "quota_daily_limit", "ordinary explicit clears must still work")
-			assertCatalogMissingMaxNotForwarded(t, saved)
+			assertConfiguredTemplateSurvivesCatalogSave(t, saved)
 		})
 	}
 	require.Equal(t, 3, calls)
 }
 
-func assertCatalogMissingMaxNotForwarded(t *testing.T, account *Account) {
+func assertConfiguredTemplateSurvivesCatalogSave(t *testing.T, account *Account) {
 	t.Helper()
 	body := []byte(`{"model":"bespoke","reasoning_effort":"max","messages":[{"role":"user","content":"hello"}]}`)
 	ctx := WithAntigravityRequestEffort(context.Background(), body)
-	require.False(t, (&GatewayService{}).isModelSupportedByAccountWithContext(ctx, account, "bespoke"))
+	require.True(t, (&GatewayService{}).isModelSupportedByAccountWithContext(ctx, account, "bespoke"))
 	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
 	svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
 	c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", body)
-	_, err := svc.ForwardAsChatCompletions(ctx, c, account, body, nil)
-	require.Error(t, err)
-	require.Zero(t, upstream.callCount)
-	require.Empty(t, upstream.requestBodies)
+	result, err := svc.ForwardAsChatCompletions(ctx, c, account, body, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, upstream.callCount)
+	require.Len(t, upstream.requestBodies, 1)
+	require.Equal(t, "bespoke-max", result.UpstreamModel)
 }
 
 func TestAdminCatalogClientCannotCreateManagedSnapshot(t *testing.T) {
@@ -110,7 +111,7 @@ func TestAdminCatalogSavePreservesEvidenceAndIdentityContract(t *testing.T) {
 				require.Equal(t, "bespoke-max", mapAntigravityModel(saved, "bespoke-max"), "old identity evidence must not constrain a different project")
 			} else {
 				require.Equal(t, snapshot.Identity, upstreamCatalogIdentity(saved))
-				assertCatalogMissingMaxNotForwarded(t, saved)
+				assertConfiguredTemplateSurvivesCatalogSave(t, saved)
 			}
 		})
 	}

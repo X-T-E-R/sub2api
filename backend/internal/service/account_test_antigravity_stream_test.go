@@ -215,3 +215,24 @@ func TestAccountTestAntigravityWithThoughtContinuation(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountTestConfiguredAntigravityModelIgnoresStaleCatalog(t *testing.T) {
+	effortTestSettings(t)
+	for _, model := range []string{"gemini-4-argon", "custom-future-model"} {
+		t.Run(model, func(t *testing.T) {
+			account := effortTestAccount(map[string]string{model: model + "-{effort}"})
+			account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Live: true, ModelIDs: []string{"old-low", "old-high"}})
+			before := account.GetModelMapping()
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+			gateway := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+			service := &AccountTestService{antigravityGatewayService: gateway}
+			c, recorder := newAntigravityCompatContext(http.MethodPost, "/test", nil)
+			require.NoError(t, service.testAntigravityAccountConnection(c, account, model))
+			require.Contains(t, recorder.Body.String(), `"success":true`)
+			require.Len(t, upstream.requestBodies, 1)
+			require.Equal(t, model+"-medium", gjson.GetBytes(upstream.requestBodies[0], "model").String())
+			require.Equal(t, before, account.GetModelMapping())
+			require.Equal(t, []string{"old-low", "old-high"}, account.GetUpstreamModelMetadataSnapshot().ModelIDs)
+		})
+	}
+}

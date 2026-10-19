@@ -39,7 +39,7 @@ func effortTestSettings(t *testing.T, additional ...string) (*SettingService, *c
 
 func TestAntigravityEffortRealForward(t *testing.T) {
 	effortTestSettings(t, "ultra")
-	for _, model := range []string{"gemini-3.8-flash", "opus5.5", "bespoke-model"} {
+	for _, model := range []string{"gemini-3.8-flash", "gemini-4-argon", "opus5.5", "bespoke-model"} {
 		// All protocols carry the same opt-in rule; no Gemini admission branch.
 		for _, protocol := range []string{"chat", "responses", "messages", "gemini"} {
 			for _, effort := range []string{"low", "medium", "high", ""} {
@@ -81,13 +81,16 @@ func runEffortForward(t *testing.T, model, protocol, effort string, contexts ...
 	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
 	svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
 	account := effortTestAccount(map[string]string{model: model + "-{effort}"})
+	// A saved route remains authoritative when discovery predates the model.
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Live: true, Identity: upstreamCatalogIdentity(account), ModelIDs: []string{"old-low", "old-high"},
+	})
 	ctx := context.Background()
 	if len(contexts) > 0 {
 		ctx = contexts[0]
 	}
 	ctx = WithAntigravityRequestEffort(ctx, encoded)
-	require.True(t, (&GatewayService{}).isModelSupportedByAccountWithContext(ctx, account, model))
-	require.True(t, account.IsModelSupported(model+"-low"))
+	supported := (&GatewayService{}).isModelSupportedByAccountWithContext(ctx, account, model)
 	c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/messages", encoded)
 	var result *ForwardResult
 	switch protocol {
@@ -101,6 +104,8 @@ func runEffortForward(t *testing.T, model, protocol, effort string, contexts ...
 		result, err = svc.ForwardGemini(ctx, c, account, model, "generateContent", false, encoded, false)
 	}
 	require.NoError(t, err)
+	require.True(t, supported, "scheduler and forward must agree")
+	require.True(t, account.IsModelSupported(model+"-low"))
 	require.Len(t, upstream.requestBodies, 1)
 	if effort == "" {
 		effort = "medium"

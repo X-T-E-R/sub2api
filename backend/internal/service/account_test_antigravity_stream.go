@@ -307,7 +307,7 @@ func accountTestAntigravityNamedEffort(account *Account, requested, effort, sent
 		}
 		base := strings.TrimSuffix(requested, suffix)
 		// The formal resolver already chose the winning template (including
-		// longest suffix, aliases, wildcards and catalog constraints). Verify
+		// longest suffix, aliases and wildcards). Verify
 		// against that target, not a second ranking of the user level list.
 		if template, valid := parseAntigravityEffortTemplate(mapping[base]); valid && template.model(level, policy) == sent {
 			return level
