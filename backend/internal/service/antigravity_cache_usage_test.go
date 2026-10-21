@@ -111,8 +111,10 @@ func TestAntigravityCompatFinalCacheUsageZeroInput(t *testing.T) {
 				var event map[string]any
 				require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event))
 				if protocol == "responses" && event["type"] == "response.completed" {
-					response := event["response"].(map[string]any)
-					terminalUsage = response["usage"].(map[string]any)
+					response, ok := event["response"].(map[string]any)
+					require.True(t, ok, "response.completed must carry a response object")
+					terminalUsage, ok = response["usage"].(map[string]any)
+					require.True(t, ok, "response.completed must carry usage")
 				} else if protocol == "chat" {
 					if usage, ok := event["usage"].(map[string]any); ok {
 						terminalUsage = usage
