@@ -27,6 +27,7 @@ type StreamingProcessor struct {
 	blockIndex        int
 	messageStartSent  bool
 	messageStopSent   bool
+	finishReason      string
 	usedTool          bool
 	pendingSignature  string
 	trailingSignature string
@@ -112,6 +113,7 @@ func (p *StreamingProcessor) ResetGenerationUsage() {
 	p.outputTokens = 0
 	p.cacheReadTokens = 0
 	p.imageOutputTokens = 0
+	p.finishReason = ""
 }
 
 // CurrentUsage reports the usage accumulated for the generation in flight plus any
@@ -224,7 +226,11 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 			}
 		}
 		if finishReason != "" {
-			_, _ = result.Write(p.emitFinish(finishReason))
+			// Gemini can send usage-only frames after finishReason. Keep streaming
+			// content, but emit the Anthropic terminal only when Finish drains EOF,
+			// otherwise clients stop before receiving the final cache accounting.
+			p.finishReason = finishReason
+			_, _ = result.Write(p.finishContent())
 		}
 	}
 
@@ -243,7 +249,7 @@ func (p *StreamingProcessor) Finish() ([]byte, *ClaudeUsage) {
 
 	var result bytes.Buffer
 	if !p.messageStopSent {
-		_, _ = result.Write(p.emitFinish(""))
+		_, _ = result.Write(p.emitFinish(p.finishReason))
 	}
 
 	return result.Bytes(), &usage
@@ -599,8 +605,8 @@ func (p *StreamingProcessor) emitEmptyThinkingWithSignature(signature string) []
 	return result.Bytes()
 }
 
-// emitFinish 发送结束事件
-func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
+// finishContent closes this generation's blocks without ending the message.
+func (p *StreamingProcessor) finishContent() []byte {
 	var result bytes.Buffer
 
 	// 关闭最后一个块
@@ -628,6 +634,16 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 			_, _ = result.Write(p.endBlock())
 		}
 	}
+
+	p.webSearchQueries = nil
+	p.groundingChunks = nil
+	return result.Bytes()
+}
+
+// emitFinish sends final usage and the message terminal after the stream is drained.
+func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
+	var result bytes.Buffer
+	_, _ = result.Write(p.finishContent())
 
 	// 确定 stop_reason
 	if p.withholdSuccessfulTerminal {

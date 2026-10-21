@@ -139,6 +139,8 @@ func TestStreamingUsageCacheAccounting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := NewStreamingProcessor("gemini-3.8-flash")
 			payload := streamChunk(t, p, `{"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":`+tc.metadata+`}}`)
+			final, usage := p.Finish()
+			payload = append(payload, final...)
 			for _, event := range decodeSSEData(payload) {
 				var usage map[string]any
 				var ok bool
@@ -157,7 +159,6 @@ func TestStreamingUsageCacheAccounting(t *testing.T) {
 				require.Equal(t, float64(tc.output), usage["output_tokens"])
 				require.Equal(t, float64(tc.cached), usage["cache_read_input_tokens"])
 			}
-			_, usage := p.Finish()
 			require.Equal(t, tc.input, usage.InputTokens)
 			require.Equal(t, tc.output, usage.OutputTokens)
 			require.Equal(t, tc.cached, usage.CacheReadInputTokens)
