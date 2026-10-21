@@ -13,12 +13,14 @@ import (
 // Non-streaming: AnthropicResponse → ResponsesResponse
 // ---------------------------------------------------------------------------
 
-// AnthropicToResponsesOptions controls provider-specific opaque carriers.
-// Generic callers keep the default zero value: provider-encrypted reasoning is
-// not inferred as a Gemini thought signature unless the caller explicitly opts
-// into the Antigravity envelope.
+// AnthropicToResponsesOptions controls explicit producer contracts. Generic
+// callers keep sparse usage deltas and omit provider-owned signature carriers.
 type AnthropicToResponsesOptions struct {
 	PreserveThinkingSignatures bool
+	// UsageDeltasAreSnapshots means each message_delta usage replaces every
+	// token bucket, including zero. Enable only for producers that emit complete
+	// cumulative usage; native Anthropic deltas can contain output_tokens alone.
+	UsageDeltasAreSnapshots bool
 }
 
 // AnthropicToResponsesResponse converts an Anthropic Messages response into a
@@ -229,6 +231,7 @@ type AnthropicEventToResponsesState struct {
 	// Usage from message_start / message_delta. InputTokens here follows
 	// Anthropic semantics (excludes cached tokens); they are added back when
 	// emitting the OpenAI Responses usage.
+	UsageDeltasAreSnapshots  bool
 	InputTokens              int
 	OutputTokens             int
 	CacheReadInputTokens     int
@@ -243,11 +246,12 @@ func NewAnthropicEventToResponsesState() *AnthropicEventToResponsesState {
 }
 
 // NewAnthropicEventToResponsesStateWithOptions returns a stream converter state
-// with explicit provider-carrier behavior.
+// with explicit producer contracts.
 func NewAnthropicEventToResponsesStateWithOptions(opts AnthropicToResponsesOptions) *AnthropicEventToResponsesState {
 	return &AnthropicEventToResponsesState{
 		Created:                    time.Now().Unix(),
 		PreserveThinkingSignatures: opts.PreserveThinkingSignatures,
+		UsageDeltasAreSnapshots:    opts.UsageDeltasAreSnapshots,
 	}
 }
 
@@ -585,13 +589,13 @@ func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *Anthropic
 func anthToResHandleMessageDelta(evt *AnthropicStreamEvent, state *AnthropicEventToResponsesState) []ResponsesStreamEvent {
 	if evt.Usage != nil {
 		state.OutputTokens = evt.Usage.OutputTokens
-		if evt.Usage.InputTokens > 0 {
+		if state.UsageDeltasAreSnapshots || evt.Usage.InputTokens > 0 {
 			state.InputTokens = evt.Usage.InputTokens
 		}
-		if evt.Usage.CacheReadInputTokens > 0 {
+		if state.UsageDeltasAreSnapshots || evt.Usage.CacheReadInputTokens > 0 {
 			state.CacheReadInputTokens = evt.Usage.CacheReadInputTokens
 		}
-		if evt.Usage.CacheCreationInputTokens > 0 {
+		if state.UsageDeltasAreSnapshots || evt.Usage.CacheCreationInputTokens > 0 {
 			state.CacheCreationInputTokens = evt.Usage.CacheCreationInputTokens
 		}
 	}

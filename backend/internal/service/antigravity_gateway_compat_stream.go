@@ -38,7 +38,11 @@ type antigravityChatStreamAdapter struct {
 }
 
 func newAntigravityChatStreamAdapter(model string, includeUsage bool) *antigravityChatStreamAdapter {
-	anthropicState := apicompat.NewAnthropicEventToResponsesState()
+	// The Antigravity processor emits full cumulative usage, including an
+	// authoritative zero uncached bucket after a fully cached final prompt.
+	anthropicState := apicompat.NewAnthropicEventToResponsesStateWithOptions(apicompat.AnthropicToResponsesOptions{
+		UsageDeltasAreSnapshots: true,
+	})
 	anthropicState.Model = model
 	chatState := apicompat.NewResponsesEventToChatState()
 	chatState.Model = model
@@ -110,6 +114,7 @@ type antigravityResponsesStreamAdapter struct {
 func newAntigravityResponsesStreamAdapter(model string) *antigravityResponsesStreamAdapter {
 	state := apicompat.NewAnthropicEventToResponsesStateWithOptions(apicompat.AnthropicToResponsesOptions{
 		PreserveThinkingSignatures: true,
+		UsageDeltasAreSnapshots:    true,
 	})
 	state.Model = model
 	return &antigravityResponsesStreamAdapter{anthropicState: state}

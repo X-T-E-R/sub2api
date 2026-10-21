@@ -79,3 +79,57 @@ func TestAntigravityMessagesReadFailureAfterFinishDoesNotSignalSuccess(t *testin
 		})
 	}
 }
+
+// R1: a fully cached final prompt replaces the initial uncached estimate with
+// zero. Exercise both real adapters, not just the processor's billing result.
+func TestAntigravityCompatFinalCacheUsageZeroInput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, protocol := range []string{"responses", "chat"} {
+		t.Run(protocol, func(t *testing.T) {
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+			c, rec := newAntigravityCompatContext(http.MethodPost, "/v1/"+protocol, nil)
+			body := "data: " + `{"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1}}}` + "\n\n" +
+				"data: " + `{"response":{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":100,"candidatesTokenCount":7,"thoughtsTokenCount":3}}}` + "\n\n"
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+			var result *antigravityStreamResult
+			var err error
+			if protocol == "responses" {
+				result, err = svc.handleResponsesStreamingFromAntigravity(c, resp, time.Now(), "configured-model")
+			} else {
+				result, err = svc.handleChatCompletionsStreamingFromAntigravity(c, resp, time.Now(), "configured-model", true)
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Zero(t, result.usage.InputTokens)
+			require.Equal(t, 100, result.usage.CacheReadInputTokens)
+			require.Equal(t, 10, result.usage.OutputTokens)
+			var terminalUsage map[string]any
+			for _, line := range strings.Split(rec.Body.String(), "\n") {
+				if !strings.HasPrefix(line, "data: ") || strings.TrimPrefix(line, "data: ") == "[DONE]" {
+					continue
+				}
+				var event map[string]any
+				require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event))
+				if protocol == "responses" && event["type"] == "response.completed" {
+					response := event["response"].(map[string]any)
+					terminalUsage = response["usage"].(map[string]any)
+				} else if protocol == "chat" {
+					if usage, ok := event["usage"].(map[string]any); ok {
+						terminalUsage = usage
+					}
+				}
+			}
+			require.NotNil(t, terminalUsage)
+			inputKey, outputKey, detailsKey := "input_tokens", "output_tokens", "input_tokens_details"
+			if protocol == "chat" {
+				inputKey, outputKey, detailsKey = "prompt_tokens", "completion_tokens", "prompt_tokens_details"
+			}
+			require.Equal(t, float64(100), terminalUsage[inputKey], "total input must equal final uncached + cached buckets")
+			require.Equal(t, float64(10), terminalUsage[outputKey])
+			require.Equal(t, float64(110), terminalUsage["total_tokens"])
+			details, ok := terminalUsage[detailsKey].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, float64(100), details["cached_tokens"])
+		})
+	}
+}
