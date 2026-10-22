@@ -112,15 +112,12 @@ func TestOmittedToolChoicePrefixMatchesExplicitModes(t *testing.T) {
 	}
 }
 
-func TestNamedToolChoiceUsesSanitizedDeclarationName(t *testing.T) {
+func TestNamedToolChoiceUsesOriginalDeclarationName(t *testing.T) {
 	body := `{
 	  "model":"client-alias",
 	  "max_tokens":64,
 	  "tool_choice":{"type":"tool","name":"get time"},
-	  "tools":[
-	    {"name":"get time","input_schema":{"type":"object"}},
-	    {"name":"9lives","input_schema":{"type":"object"}}
-	  ],
+	  "tools":[{"name":"get time","input_schema":{"type":"object"}}],
 	  "messages":[
 	    {"role":"user","content":"hi"},
 	    {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"get time","input":{},"signature":"real-signature-value"}]}
@@ -129,15 +126,116 @@ func TestNamedToolChoiceUsesSanitizedDeclarationName(t *testing.T) {
 	doc, _ := transformContract(t, body, "gemini-3-flash")
 	calling := doc.Request.ToolConfig.FunctionCallingConfig
 	require.Equal(t, "ANY", calling.Mode)
-	require.Equal(t, []string{"get_time"}, calling.AllowedFunctionNames)
-	require.Equal(t, "get_time", doc.Request.Tools[0].FunctionDeclarations[0].Name)
-	require.Equal(t, "_9lives", doc.Request.Tools[0].FunctionDeclarations[1].Name)
-	require.Equal(t, "get_time", doc.Request.Contents[1].Parts[0].FunctionCall.Name)
+	require.Equal(t, []string{"get time"}, calling.AllowedFunctionNames)
+	require.Equal(t, "get time", doc.Request.Tools[0].FunctionDeclarations[0].Name)
+	require.Equal(t, "get time", doc.Request.Contents[1].Parts[0].FunctionCall.Name)
 	require.Equal(t, "real-signature-value", doc.Request.Contents[1].Parts[0].ThoughtSignature)
 
 	nested := strings.Replace(body, `{"type":"tool","name":"get time"}`, `{"type":"function","function":{"name":"get time"}}`, 1)
 	nestedDoc, _ := transformContract(t, nested, "gemini-3-flash")
-	require.Equal(t, []string{"get_time"}, nestedDoc.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+	require.Equal(t, []string{"get time"}, nestedDoc.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+}
+
+func TestDigitAndUnderscoreToolNamesStayDistinct(t *testing.T) {
+	body := func(choice string) string {
+		return `{
+		  "model":"client-alias",
+		  "max_tokens":64,
+		  "tool_choice":{"type":"tool","name":"` + choice + `"},
+		  "tools":[
+		    {"name":"9lives","input_schema":{"type":"object"}},
+		    {"name":"_9lives","input_schema":{"type":"object"}}
+		  ],
+		  "messages":[
+		    {"role":"user","content":"hi"},
+		    {"role":"assistant","content":[
+		      {"type":"tool_use","id":"call_digit","name":"9lives","input":{},"signature":"sig-digit"},
+		      {"type":"tool_use","id":"call_under","name":"_9lives","input":{},"signature":"sig-under"}
+		    ]},
+		    {"role":"user","content":[
+		      {"type":"tool_result","tool_use_id":"call_digit","content":"a"},
+		      {"type":"tool_result","tool_use_id":"call_under","content":"b"}
+		    ]}
+		  ]
+		}`
+	}
+	for _, choice := range []string{"9lives", "_9lives"} {
+		doc, raw := transformContract(t, body(choice), "gemini-3-flash")
+		decls := doc.Request.Tools[0].FunctionDeclarations
+		require.Equal(t, "9lives", decls[0].Name)
+		require.Equal(t, "_9lives", decls[1].Name)
+		require.Equal(t, []string{choice}, doc.Request.ToolConfig.FunctionCallingConfig.AllowedFunctionNames)
+		require.Equal(t, "ANY", doc.Request.ToolConfig.FunctionCallingConfig.Mode)
+		require.NotContains(t, raw, `"name":"_9lives","name":"_9lives"`)
+		var sawDigit, sawUnder bool
+		for _, content := range doc.Request.Contents {
+			for _, part := range content.Parts {
+				if part.FunctionCall != nil {
+					switch part.FunctionCall.Name {
+					case "9lives":
+						sawDigit = true
+						require.Equal(t, "sig-digit", part.ThoughtSignature)
+					case "_9lives":
+						sawUnder = true
+						require.Equal(t, "sig-under", part.ThoughtSignature)
+					default:
+						t.Fatalf("functionCall name %q", part.FunctionCall.Name)
+					}
+				}
+				if part.FunctionResponse != nil {
+					require.Contains(t, []string{"9lives", "_9lives"}, part.FunctionResponse.Name)
+				}
+			}
+		}
+		require.True(t, sawDigit)
+		require.True(t, sawUnder)
+	}
+}
+
+func TestNamedToolChoiceMissDoesNotWidenAny(t *testing.T) {
+	cases := []string{
+		`{"type":"tool","name":"_9lives"}`,
+		`{"type":"tool","name":""}`,
+		`{"type":"tool"}`,
+		`{"type":"function","name":"missing"}`,
+	}
+	for _, choice := range cases {
+		t.Run(choice, func(t *testing.T) {
+			body := `{
+			  "model":"client-alias",
+			  "max_tokens":32,
+			  "tool_choice":` + choice + `,
+			  "tools":[{"name":"9lives","input_schema":{"type":"object"}}],
+			  "messages":[{"role":"user","content":"hi"}]
+			}`
+			var req ClaudeRequest
+			require.NoError(t, json.Unmarshal([]byte(body), &req))
+			_, err := TransformClaudeToGeminiWithOptions(&req, "project", "gemini-3-flash", TransformOptions{})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not a declared tool")
+		})
+	}
+}
+
+func TestCollectAndStreamReturnOriginalToolNames(t *testing.T) {
+	resp := NewNonStreamingProcessor().Process(&GeminiResponse{
+		Candidates: []GeminiCandidate{{
+			Content: &GeminiContent{Role: "model", Parts: []GeminiPart{
+				{FunctionCall: &GeminiFunctionCall{ID: "call_digit", Name: "9lives", Args: map[string]any{}}},
+				{FunctionCall: &GeminiFunctionCall{ID: "call_under", Name: "_9lives", Args: map[string]any{}}},
+			}},
+		}},
+	}, "resp", "gemini-3-flash")
+	require.Equal(t, []string{"9lives", "_9lives"}, []string{resp.Content[0].Name, resp.Content[1].Name})
+
+	p := NewStreamingProcessor("gemini-3-flash")
+	payload := streamChunk(t, p, `{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_digit","name":"9lives","args":{}}},{"functionCall":{"id":"call_under","name":"_9lives","args":{}}}]},"finishReason":"STOP"}]}}`)
+	final, _ := p.Finish()
+	payload = append(payload, final...)
+	blocks := streamBlocks(t, payload)
+	require.Len(t, blocks, 2)
+	require.Equal(t, "9lives", blocks[0]["name"])
+	require.Equal(t, "_9lives", blocks[1]["name"])
 }
 
 func TestClaudeRequestKeepsToolChoiceAndEffortJSON(t *testing.T) {

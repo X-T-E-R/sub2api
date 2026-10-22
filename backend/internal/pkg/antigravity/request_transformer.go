@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,11 +15,6 @@ import (
 
 	"github.com/google/uuid"
 )
-
-// geminiFunctionNamePattern 是 Gemini function name 允许的字符。
-// 声明、历史调用和具名 tool_choice 共用 geminiFunctionName，这样 allowedFunctionNames
-// 指向的就是声明里的名字。已经合法的名字保持原样，省略 tool_choice 时 tools 字节不变。
-var geminiFunctionNamePattern = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
 var (
 	sessionRand      = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -202,8 +196,13 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// toolConfig must always be present: upstream rejects requests without it,
 	// including reasoning models called without any tools.
 	// 省略 tool_choice 时保持 VALIDATED。显式 none/auto/any/具名只改 mode，不删除 tools。
+	// 具名选择只引用声明里的原名，不改写工具名。
+	calling, err := functionCallingConfig(claudeReq.ToolChoice, tools)
+	if err != nil {
+		return nil, err
+	}
 	innerRequest.ToolConfig = &GeminiToolConfig{
-		FunctionCallingConfig: functionCallingConfig(claudeReq.ToolChoice),
+		FunctionCallingConfig: calling,
 	}
 	// 内置工具（googleSearch）与函数调用混用时，上游要求显式开启
 	// includeServerSideToolInvocations，否则返回 400（issue #5709）。
@@ -596,15 +595,14 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			}
 
 		case "tool_use":
-			// 存储 id -> name 映射。名字与声明、allowedFunctionNames 使用同一清洗结果。
-			functionName := geminiFunctionName(block.Name)
-			if block.ID != "" && functionName != "" {
-				toolIDToName[block.ID] = functionName
+			// 存储 id -> name 映射。历史调用保留客户端原名。
+			if block.ID != "" && block.Name != "" {
+				toolIDToName[block.ID] = block.Name
 			}
 
 			part := GeminiPart{
 				FunctionCall: &GeminiFunctionCall{
-					Name: functionName,
+					Name: block.Name,
 					Args: block.Input,
 					ID:   block.ID,
 				},
@@ -620,13 +618,13 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			parts = append(parts, part)
 
 		case "tool_result":
-			// 获取函数名。来自本次 tool_use 的映射已经清洗过，裸 id 再走同一函数。
-			funcName := geminiFunctionName(block.Name)
+			// 获取函数名。沿用客户端原名；缺失时用本轮 tool_use 记下的原名。
+			funcName := block.Name
 			if funcName == "" {
 				if name, ok := toolIDToName[block.ToolUseID]; ok {
 					funcName = name
 				} else {
-					funcName = geminiFunctionName(block.ToolUseID)
+					funcName = block.ToolUseID
 				}
 			}
 
@@ -733,36 +731,11 @@ func isAntigravityOpusHighTierModel(model string) bool {
 		strings.HasPrefix(lower, "claude-opus-4-8")
 }
 
-// geminiFunctionName 把工具名收成 Gemini function name。
-// 合法字符是字母、数字和 _.:-，必须以字母或下划线开头，最长 64 字节。
-// 已经满足约束的名字原样返回。
-func geminiFunctionName(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	sanitized := geminiFunctionNamePattern.ReplaceAllString(name, "_")
-	if sanitized == "" {
-		return "_"
-	}
-	first := sanitized[0]
-	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
-		if len(sanitized) >= 64 {
-			sanitized = sanitized[:63]
-		}
-		sanitized = "_" + sanitized
-	}
-	if len(sanitized) > 64 {
-		sanitized = sanitized[:64]
-	}
-	return sanitized
-}
-
-func functionCallingConfig(raw json.RawMessage) *GeminiFunctionCallingConfig {
+func functionCallingConfig(raw json.RawMessage, tools []GeminiToolDeclaration) (*GeminiFunctionCallingConfig, error) {
 	cfg := &GeminiFunctionCallingConfig{Mode: "VALIDATED"}
 	kind, name, explicit := parseClaudeToolChoice(raw)
 	if !explicit {
-		return cfg
+		return cfg, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "none":
@@ -772,12 +745,29 @@ func functionCallingConfig(raw json.RawMessage) *GeminiFunctionCallingConfig {
 	case "any":
 		cfg.Mode = "ANY"
 	case "tool", "function":
+		// 只接受声明里的原名。对不上时不改成不带 allowedFunctionNames 的 ANY。
+		declared, ok := exactDeclaredFunctionName(tools, name)
+		if !ok {
+			return nil, fmt.Errorf("tool_choice names %q, which is not a declared tool", name)
+		}
 		cfg.Mode = "ANY"
-		if allowed := geminiFunctionName(name); allowed != "" {
-			cfg.AllowedFunctionNames = []string{allowed}
+		cfg.AllowedFunctionNames = []string{declared}
+	}
+	return cfg, nil
+}
+
+func exactDeclaredFunctionName(tools []GeminiToolDeclaration, requested string) (string, bool) {
+	if requested == "" {
+		return "", false
+	}
+	for _, tool := range tools {
+		for _, decl := range tool.FunctionDeclarations {
+			if decl.Name == requested {
+				return decl.Name, true
+			}
 		}
 	}
-	return cfg
+	return "", false
 }
 
 func parseClaudeToolChoice(raw json.RawMessage) (kind, name string, explicit bool) {
@@ -802,9 +792,9 @@ func parseClaudeToolChoice(raw json.RawMessage) (kind, name string, explicit boo
 	if err := json.Unmarshal(trimmed, &choice); err != nil {
 		return "", "", false
 	}
-	name = strings.TrimSpace(choice.Name)
+	name = choice.Name
 	if name == "" {
-		name = strings.TrimSpace(choice.Function.Name)
+		name = choice.Function.Name
 	}
 	return choice.Type, name, true
 }
@@ -1015,9 +1005,8 @@ func buildTools(tools []ClaudeTool) []GeminiToolDeclaration {
 		if isWebSearchTool(tool) || isCodeExecutionTool(tool) {
 			continue
 		}
-		// 跳过无效工具名称。清洗结果与具名 tool_choice 的 allowedFunctionNames 相同。
-		declarationName := geminiFunctionName(tool.Name)
-		if declarationName == "" {
+		// 跳过空白工具名。其余名字按客户端原文进入声明，不另做改写。
+		if strings.TrimSpace(tool.Name) == "" {
 			log.Printf("Warning: skipping tool with empty name")
 			continue
 		}
@@ -1054,7 +1043,7 @@ func buildTools(tools []ClaudeTool) []GeminiToolDeclaration {
 		}
 
 		funcDecls = append(funcDecls, GeminiFunctionDecl{
-			Name:        declarationName,
+			Name:        tool.Name,
 			Description: description,
 			Parameters:  params,
 		})
