@@ -1,12 +1,14 @@
 package antigravity
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +16,11 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// geminiFunctionNamePattern 是 Gemini function name 允许的字符。
+// 声明、历史调用和具名 tool_choice 共用 geminiFunctionName，这样 allowedFunctionNames
+// 指向的就是声明里的名字。已经合法的名字保持原样，省略 tool_choice 时 tools 字节不变。
+var geminiFunctionNamePattern = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
 var (
 	sessionRand      = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -192,14 +199,11 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		SessionID: generateStableSessionID(contents),
 	}
 
-	// 针对 Gemini Reasoning 模型（如 gemini-3.1-pro-high等）过滤强制空 ToolConfig
 	// toolConfig must always be present: upstream rejects requests without it,
 	// including reasoning models called without any tools.
-	// 总是设置 toolConfig，与官方客户端一致
+	// 省略 tool_choice 时保持 VALIDATED。显式 none/auto/any/具名只改 mode，不删除 tools。
 	innerRequest.ToolConfig = &GeminiToolConfig{
-		FunctionCallingConfig: &GeminiFunctionCallingConfig{
-			Mode: "VALIDATED",
-		},
+		FunctionCallingConfig: functionCallingConfig(claudeReq.ToolChoice),
 	}
 	// 内置工具（googleSearch）与函数调用混用时，上游要求显式开启
 	// includeServerSideToolInvocations，否则返回 400（issue #5709）。
@@ -592,14 +596,15 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			}
 
 		case "tool_use":
-			// 存储 id -> name 映射
-			if block.ID != "" && block.Name != "" {
-				toolIDToName[block.ID] = block.Name
+			// 存储 id -> name 映射。名字与声明、allowedFunctionNames 使用同一清洗结果。
+			functionName := geminiFunctionName(block.Name)
+			if block.ID != "" && functionName != "" {
+				toolIDToName[block.ID] = functionName
 			}
 
 			part := GeminiPart{
 				FunctionCall: &GeminiFunctionCall{
-					Name: block.Name,
+					Name: functionName,
 					Args: block.Input,
 					ID:   block.ID,
 				},
@@ -615,13 +620,13 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			parts = append(parts, part)
 
 		case "tool_result":
-			// 获取函数名
-			funcName := block.Name
+			// 获取函数名。来自本次 tool_use 的映射已经清洗过，裸 id 再走同一函数。
+			funcName := geminiFunctionName(block.Name)
 			if funcName == "" {
 				if name, ok := toolIDToName[block.ToolUseID]; ok {
 					funcName = name
 				} else {
-					funcName = block.ToolUseID
+					funcName = geminiFunctionName(block.ToolUseID)
 				}
 			}
 
@@ -728,6 +733,148 @@ func isAntigravityOpusHighTierModel(model string) bool {
 		strings.HasPrefix(lower, "claude-opus-4-8")
 }
 
+// geminiFunctionName 把工具名收成 Gemini function name。
+// 合法字符是字母、数字和 _.:-，必须以字母或下划线开头，最长 64 字节。
+// 已经满足约束的名字原样返回。
+func geminiFunctionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	sanitized := geminiFunctionNamePattern.ReplaceAllString(name, "_")
+	if sanitized == "" {
+		return "_"
+	}
+	first := sanitized[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		if len(sanitized) >= 64 {
+			sanitized = sanitized[:63]
+		}
+		sanitized = "_" + sanitized
+	}
+	if len(sanitized) > 64 {
+		sanitized = sanitized[:64]
+	}
+	return sanitized
+}
+
+func functionCallingConfig(raw json.RawMessage) *GeminiFunctionCallingConfig {
+	cfg := &GeminiFunctionCallingConfig{Mode: "VALIDATED"}
+	kind, name, explicit := parseClaudeToolChoice(raw)
+	if !explicit {
+		return cfg
+	}
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "none":
+		cfg.Mode = "NONE"
+	case "auto":
+		cfg.Mode = "AUTO"
+	case "any":
+		cfg.Mode = "ANY"
+	case "tool", "function":
+		cfg.Mode = "ANY"
+		if allowed := geminiFunctionName(name); allowed != "" {
+			cfg.AllowedFunctionNames = []string{allowed}
+		}
+	}
+	return cfg
+}
+
+func parseClaudeToolChoice(raw json.RawMessage) (kind, name string, explicit bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", "", false
+	}
+	if trimmed[0] == '"' {
+		var value string
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return "", "", false
+		}
+		return value, "", true
+	}
+	var choice struct {
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(trimmed, &choice); err != nil {
+		return "", "", false
+	}
+	name = strings.TrimSpace(choice.Name)
+	if name == "" {
+		name = strings.TrimSpace(choice.Function.Name)
+	}
+	return choice.Type, name, true
+}
+
+func explicitOutputEffort(req *ClaudeRequest) string {
+	if req == nil || req.OutputConfig == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(req.OutputConfig.Effort))
+}
+
+// modelIDCarriesEffort 判断映射结果是否已经把这次 effort 写进模型 id。
+// 账号模板的产物是 prefix + "-" + effort。id 已带这个后缀时不再写 thinkingLevel。
+func modelIDCarriesEffort(model, effort string) bool {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || effort == "auto" || effort == "none" {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(model)), "-"+effort)
+}
+
+func isClaudeModelID(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-")
+}
+
+func isKnownGeminiCatalogModel(modelID string) bool {
+	lowerID := strings.ToLower(modelID)
+	for _, m := range geminiModels {
+		if m.ID != "" && strings.Contains(lowerID, m.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+func usesDefaultStopSequences(modelID string) bool {
+	if IsGeminiReasoningModel(modelID) {
+		return false
+	}
+	return isKnownGeminiCatalogModel(modelID) || isClaudeModelID(modelID)
+}
+
+// unknownExplicitThinkingLevel 只覆盖「不是已知 Gemini 目录项、也不是 Claude」的模型。
+// 客户端没给 effort，或模型 id 已经带上这次 effort 时，不编造 level。
+// thinking.type=enabled 且带了正的 budget_tokens 时，budget 优先，不改成 level。
+// adaptive 且 effort 是具体档位时写 level，让 budget 路径完全不跑，避免两者共存。
+func unknownExplicitThinkingLevel(req *ClaudeRequest) (string, bool) {
+	if req == nil || req.Thinking == nil {
+		return "", false
+	}
+	if isClaudeModelID(req.Model) || isKnownGeminiCatalogModel(req.Model) {
+		return "", false
+	}
+	effort := explicitOutputEffort(req)
+	if effort == "" || effort == "auto" || effort == "none" || modelIDCarriesEffort(req.Model, effort) {
+		return "", false
+	}
+	switch req.Thinking.Type {
+	case "adaptive":
+		return effort, true
+	case "enabled":
+		if req.Thinking.BudgetTokens > 0 {
+			return "", false
+		}
+		return effort, true
+	default:
+		return "", false
+	}
+}
+
 func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 	maxLimit := maxOutputTokensLimit(req.Model)
 	config := &GeminiGenerationConfig{
@@ -735,7 +882,8 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 	}
 
 	isReasoning := IsGeminiReasoningModel(req.Model)
-	if !isReasoning {
+	// 缺省 stop 只留给已知非推理 Gemini 和 Claude。未入目录的显式模型不继承这组序列。
+	if usesDefaultStopSequences(req.Model) {
 		config.StopSequences = DefaultStopSequences
 	}
 
@@ -744,8 +892,14 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 		config.MaxOutputTokens = req.MaxTokens
 	}
 
-	// Thinking 配置
-	if req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive") {
+	// 未知模型上的显式 effort：映射没把该 effort 写进模型 id 时只写 thinkingLevel。
+	// 已知目录模型与 Claude 不进这个分支，继续用原来的 budget。
+	if level, ok := unknownExplicitThinkingLevel(req); ok {
+		config.ThinkingConfig = &GeminiThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingLevel:   level,
+		}
+	} else if req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive") {
 		config.ThinkingConfig = &GeminiThinkingConfig{
 			IncludeThoughts: true,
 		}
@@ -781,7 +935,8 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 		config.MaxOutputTokens = maxLimit
 	}
 
-	// 其他参数
+	// 显式 temperature/topP/topK 原样转发。已知推理模型继续省略。
+	// 未知模型没有内置缺省采样值，客户端没写时这里也不补。
 	if !isReasoning {
 		if req.Temperature != nil {
 			config.Temperature = req.Temperature
@@ -860,8 +1015,9 @@ func buildTools(tools []ClaudeTool) []GeminiToolDeclaration {
 		if isWebSearchTool(tool) || isCodeExecutionTool(tool) {
 			continue
 		}
-		// 跳过无效工具名称
-		if strings.TrimSpace(tool.Name) == "" {
+		// 跳过无效工具名称。清洗结果与具名 tool_choice 的 allowedFunctionNames 相同。
+		declarationName := geminiFunctionName(tool.Name)
+		if declarationName == "" {
 			log.Printf("Warning: skipping tool with empty name")
 			continue
 		}
@@ -898,7 +1054,7 @@ func buildTools(tools []ClaudeTool) []GeminiToolDeclaration {
 		}
 
 		funcDecls = append(funcDecls, GeminiFunctionDecl{
-			Name:        tool.Name,
+			Name:        declarationName,
 			Description: description,
 			Parameters:  params,
 		})
