@@ -243,10 +243,14 @@ func (s *AccountTestService) streamAntigravityAccountTest(c *gin.Context, accoun
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID, UpstreamSentModel: sent, EffectiveEffort: effective, StreamMode: "stream"})
 	state := &accountTestRawStreamState{service: s, admin: c, observer: &upstreamResponseModelObserver{}}
-	// Copy only pointer dependencies; this service has no mutable locks or per-call
-	// state. The production singleton and its transport remain untouched.
-	isolated := *gateway
-	isolated.httpUpstream = &accountTestObservedUpstream{HTTPUpstream: gateway.httpUpstream, state: state}
+	// Reuse dependencies, not the service value: it owns synchronization and
+	// continuity state that must not be copied while production Forward is active.
+	isolated := NewAntigravityGatewayService(
+		gateway.accountRepo, gateway.cache, gateway.schedulerSnapshot,
+		gateway.tokenProvider, gateway.rateLimitService,
+		&accountTestObservedUpstream{HTTPUpstream: gateway.httpUpstream, state: state},
+		gateway.settingService, gateway.internal500Cache,
+	)
 	forward := c.Copy()
 	writer := &accountTestForwardWriter{ResponseWriter: c.Writer, service: s, admin: c, headers: make(http.Header)}
 	forward.Writer = writer

@@ -290,9 +290,8 @@ func TestAntigravityThoughtContinuationReusesEnvelopeAndCarriers(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "answer")
 }
 
-// Task23 的消费方以 `isolated := *gateway; isolated.httpUpstream = observedUpstream` 复制服务来
-// 观察追加请求。B 必须使用同一个 HTTPUpstream 端口：服务本身不能持有第二套传输，也不能有实例级
-// 可变状态，否则复制出来的服务既看不到追加生成，观察到的用量也会不完整。
+// 管理员测试以相同依赖新建隔离服务并替换 HTTPUpstream，不复制同步状态。
+// B 必须沿用隔离服务的上游端口，让观察方看到第一代与追加生成及其完整用量。
 func TestAntigravityThoughtContinuationUsesTheIsolatedUpstreamPort(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	original := &queuedHTTPUpstreamStub{responses: []*http.Response{
@@ -303,15 +302,18 @@ func TestAntigravityThoughtContinuationUsesTheIsolatedUpstreamPort(t *testing.T)
 		antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine),
 	}}
 	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueThoughtOnly: true}, original)
-	isolated := *svc
-	isolated.httpUpstream = observed
+	isolated := NewAntigravityGatewayService(
+		svc.accountRepo, svc.cache, svc.schedulerSnapshot,
+		svc.tokenProvider, svc.rateLimitService, observed,
+		svc.settingService, svc.internal500Cache,
+	)
 	body, c, recorder := newAntigravityThoughtClaudeRequest(true)
 
 	result, err := isolated.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 0, original.callCount, "追加生成必须走复制后的上游端口，而不是原服务的传输")
+	require.Equal(t, 0, original.callCount, "追加生成必须走隔离服务的上游端口，而不是原服务的传输")
 	require.Equal(t, 2, observed.callCount, "观察方看到第一代与追加生成两个请求")
 	require.Contains(t, recorder.Body.String(), "answer")
 	require.Equal(t, antigravityThoughtGenerationOneInput+antigravityThoughtGenerationTwoInput, result.Usage.InputTokens)
