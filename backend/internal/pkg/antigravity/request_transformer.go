@@ -48,6 +48,10 @@ type TransformOptions struct {
 	EnableMCPXML  bool
 	// GeminiMessages scopes the Messages turn adapter to final Gemini model IDs.
 	GeminiMessages GeminiMessagesCompatibilityOptions
+	// EffortResolvedByMapping is set by the gateway after account mapping.
+	// True means a suffix, template, or effort override already selected the model,
+	// so output_config.effort must not also be written as thinkingLevel.
+	EffortResolvedByMapping bool
 }
 
 func DefaultTransformOptions() TransformOptions {
@@ -181,7 +185,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		reqCopy.Model = targetModel
 		reqForConfig = &reqCopy
 	}
-	generationConfig := buildGenerationConfig(reqForConfig)
+	generationConfig := buildGenerationConfig(reqForConfig, opts.EffortResolvedByMapping)
 
 	// 4. 构建 tools
 	tools := buildTools(claudeReq.Tools)
@@ -806,16 +810,6 @@ func explicitOutputEffort(req *ClaudeRequest) string {
 	return strings.ToLower(strings.TrimSpace(req.OutputConfig.Effort))
 }
 
-// modelIDCarriesEffort 判断映射结果是否已经把这次 effort 写进模型 id。
-// 账号模板的产物是 prefix + "-" + effort。id 已带这个后缀时不再写 thinkingLevel。
-func modelIDCarriesEffort(model, effort string) bool {
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	if effort == "" || effort == "auto" || effort == "none" {
-		return false
-	}
-	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(model)), "-"+effort)
-}
-
 func isClaudeModelID(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-")
 }
@@ -838,18 +832,18 @@ func usesDefaultStopSequences(modelID string) bool {
 }
 
 // unknownExplicitThinkingLevel 只覆盖「不是已知 Gemini 目录项、也不是 Claude」的模型。
-// 客户端没给 effort，或模型 id 已经带上这次 effort 时，不编造 level。
+// 映射已经选过 effort 时不再从 body 写 level。客户端没给 effort 时不编造 level。
 // thinking.type=enabled 且带了正的 budget_tokens 时，budget 优先，不改成 level。
 // adaptive 且 effort 是具体档位时写 level，让 budget 路径完全不跑，避免两者共存。
-func unknownExplicitThinkingLevel(req *ClaudeRequest) (string, bool) {
-	if req == nil || req.Thinking == nil {
+func unknownExplicitThinkingLevel(req *ClaudeRequest, effortResolvedByMapping bool) (string, bool) {
+	if req == nil || req.Thinking == nil || effortResolvedByMapping {
 		return "", false
 	}
 	if isClaudeModelID(req.Model) || isKnownGeminiCatalogModel(req.Model) {
 		return "", false
 	}
 	effort := explicitOutputEffort(req)
-	if effort == "" || effort == "auto" || effort == "none" || modelIDCarriesEffort(req.Model, effort) {
+	if effort == "" || effort == "auto" || effort == "none" {
 		return "", false
 	}
 	switch req.Thinking.Type {
@@ -865,7 +859,7 @@ func unknownExplicitThinkingLevel(req *ClaudeRequest) (string, bool) {
 	}
 }
 
-func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
+func buildGenerationConfig(req *ClaudeRequest, effortResolvedByMapping bool) *GeminiGenerationConfig {
 	maxLimit := maxOutputTokensLimit(req.Model)
 	config := &GeminiGenerationConfig{
 		MaxOutputTokens: defaultMaxOutputTokens, // 默认最大输出
@@ -882,9 +876,9 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 		config.MaxOutputTokens = req.MaxTokens
 	}
 
-	// 未知模型上的显式 effort：映射没把该 effort 写进模型 id 时只写 thinkingLevel。
+	// 未知模型上的显式 effort：映射未消费该 effort 时只写 thinkingLevel。
 	// 已知目录模型与 Claude 不进这个分支，继续用原来的 budget。
-	if level, ok := unknownExplicitThinkingLevel(req); ok {
+	if level, ok := unknownExplicitThinkingLevel(req, effortResolvedByMapping); ok {
 		config.ThinkingConfig = &GeminiThinkingConfig{
 			IncludeThoughts: true,
 			ThinkingLevel:   level,

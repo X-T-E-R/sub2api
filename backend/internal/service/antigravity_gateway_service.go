@@ -265,22 +265,33 @@ func mapAntigravityModel(account *Account, requestedModel string) string {
 }
 
 func mapAntigravityModelWithContext(ctx context.Context, account *Account, requestedModel string) string {
-	if account == nil {
+	decision := antigravityEffortDecisionForRequest(ctx, account, requestedModel)
+	if !decision.matched {
 		return ""
+	}
+	return decision.model
+}
+
+// antigravityEffortDecisionForRequest uses the same lookup order as model mapping.
+// effortApplied reports that a suffix, template, or effort override already selected the id.
+func antigravityEffortDecisionForRequest(ctx context.Context, account *Account, requestedModel string) antigravityEffortDecision {
+	if account == nil {
+		return antigravityEffortDecision{}
 	}
 	requestedModel = strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/")
 	mapping := account.GetModelMapping()
 	policy := antigravityEffortPolicyFromContext(ctx)
-	if model, matched := account.resolveAntigravityCatalogMapping(mapping, requestedModel, antigravityRequestEffort(ctx), policy); matched {
-		return model
+	effort := antigravityRequestEffort(ctx)
+	if decision := decideAntigravityEffortMapping(mapping, requestedModel, effort, policy); decision.matched {
+		return decision
 	}
 	normalized := normalizeRequestedModelForLookup(account.Platform, requestedModel)
 	if normalized != requestedModel {
-		if model, matched := account.resolveAntigravityCatalogMapping(mapping, normalized, antigravityRequestEffort(ctx), policy); matched {
-			return model
+		if decision := decideAntigravityEffortMapping(mapping, normalized, effort, policy); decision.matched {
+			return decision
 		}
 	}
-	return ""
+	return antigravityEffortDecision{}
 }
 
 // getMappedModel 获取映射后的模型名

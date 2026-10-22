@@ -298,7 +298,7 @@ func TestExplicitEffortBecomesThinkingLevelWithoutCatalog(t *testing.T) {
 	require.Equal(t, 256, doc.Request.GenerationConfig.MaxOutputTokens)
 }
 
-func TestMappedEffortSuffixIsNotWrittenAgainAsThinkingLevel(t *testing.T) {
+func TestMappedEffortFlagSuppressesBodyLevel(t *testing.T) {
 	body := `{
 	  "model":"client-alias",
 	  "max_tokens":128,
@@ -306,10 +306,29 @@ func TestMappedEffortSuffixIsNotWrittenAgainAsThinkingLevel(t *testing.T) {
 	  "thinking":{"type":"adaptive"},
 	  "messages":[{"role":"user","content":"hi"}]
 	}`
-	doc, raw := transformContract(t, body, "custom-base-high")
-	require.NotContains(t, raw, "thinkingLevel")
+	var req ClaudeRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	raw, err := TransformClaudeToGeminiWithOptions(&req, "project", "gemini-explicit-custom-low", TransformOptions{EffortResolvedByMapping: true})
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "thinkingLevel")
+	var doc V1InternalRequest
+	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.Equal(t, -1, doc.Request.GenerationConfig.ThinkingConfig.ThinkingBudget)
 	require.Empty(t, doc.Request.GenerationConfig.ThinkingConfig.ThinkingLevel)
+}
+
+func TestModelSuffixAloneDoesNotConsumeBodyEffort(t *testing.T) {
+	body := `{
+	  "model":"client-alias",
+	  "max_tokens":128,
+	  "output_config":{"effort":"high"},
+	  "thinking":{"type":"adaptive"},
+	  "messages":[{"role":"user","content":"hi"}]
+	}`
+	doc, raw := transformContract(t, body, "gemini-explicit-custom-low")
+	require.Contains(t, raw, `"thinkingLevel":"high"`)
+	require.NotContains(t, raw, "thinkingBudget")
+	require.Equal(t, "high", doc.Request.GenerationConfig.ThinkingConfig.ThinkingLevel)
 }
 
 func TestUnknownModelDoesNotEmitBudgetAndLevelTogether(t *testing.T) {
@@ -364,7 +383,7 @@ func TestKnownModelsKeepBudgetStopsAndSampling(t *testing.T) {
 			Thinking:     &ThinkingConfig{Type: "enabled", BudgetTokens: 30000},
 			OutputConfig: &ClaudeOutputConfig{Effort: "high"},
 		}
-		cfg := buildGenerationConfig(req)
+		cfg := buildGenerationConfig(req, false)
 		require.Equal(t, DefaultStopSequences, cfg.StopSequences)
 		require.Equal(t, Gemini25FlashThinkingBudgetLimit, cfg.ThinkingConfig.ThinkingBudget)
 		require.Empty(t, cfg.ThinkingConfig.ThinkingLevel)
@@ -381,7 +400,7 @@ func TestKnownModelsKeepBudgetStopsAndSampling(t *testing.T) {
 			Thinking:     &ThinkingConfig{Type: "adaptive"},
 			OutputConfig: &ClaudeOutputConfig{Effort: "high"},
 		}
-		cfg := buildGenerationConfig(req)
+		cfg := buildGenerationConfig(req, false)
 		require.Empty(t, cfg.StopSequences)
 		require.Nil(t, cfg.Temperature)
 		require.Equal(t, -1, cfg.ThinkingConfig.ThinkingBudget)
@@ -395,7 +414,7 @@ func TestKnownModelsKeepBudgetStopsAndSampling(t *testing.T) {
 			Thinking:     &ThinkingConfig{Type: "adaptive", BudgetTokens: 20000},
 			OutputConfig: &ClaudeOutputConfig{Effort: "max"},
 		}
-		cfg := buildGenerationConfig(req)
+		cfg := buildGenerationConfig(req, false)
 		require.Equal(t, DefaultStopSequences, cfg.StopSequences)
 		require.Equal(t, ClaudeAdaptiveHighThinkingBudgetTokens, cfg.ThinkingConfig.ThinkingBudget)
 		require.Empty(t, cfg.ThinkingConfig.ThinkingLevel)
@@ -408,7 +427,7 @@ func TestKnownModelsKeepBudgetStopsAndSampling(t *testing.T) {
 			Thinking:     &ThinkingConfig{Type: "adaptive"},
 			OutputConfig: &ClaudeOutputConfig{Effort: "high"},
 		}
-		cfg := buildGenerationConfig(req)
+		cfg := buildGenerationConfig(req, false)
 		require.Equal(t, -1, cfg.ThinkingConfig.ThinkingBudget)
 		require.Empty(t, cfg.ThinkingConfig.ThinkingLevel)
 		require.Equal(t, DefaultStopSequences, cfg.StopSequences)

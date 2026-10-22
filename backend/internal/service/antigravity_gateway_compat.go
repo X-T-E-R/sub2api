@@ -253,7 +253,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		_ = s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
 	}
-	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel)
+	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel, antigravityEffortDecisionForRequest(ctx, account, request.originalModel).effortApplied)
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
 	}
@@ -275,6 +275,7 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	claudeRequest *antigravity.ClaudeRequest,
 	projectID string,
 	mappedModel string,
+	effortResolvedByMapping bool,
 ) ([]byte, error) {
 	if strings.HasPrefix(strings.ToLower(mappedModel), "gemini-") {
 		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
@@ -298,6 +299,7 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 
 	options := s.getClaudeTransformOptions(ctx)
 	options.EnableIdentityPatch = true
+	options.EffortResolvedByMapping = effortResolvedByMapping
 	return antigravity.TransformClaudeToGeminiWithOptions(claudeRequest, projectID, mappedModel, options)
 }
 

@@ -92,6 +92,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// Antigravity 上游要求必须包含身份提示词，否则会返回 429
 	transformOpts := s.getClaudeMessagesTransformOptions(ctx, account)
 	transformOpts.EnableIdentityPatch = true // 强制启用，Antigravity 上游必需
+	transformOpts.EffortResolvedByMapping = antigravityEffortDecisionForRequest(ctx, account, originalModel).effortApplied
 
 	// 转换 Claude 请求为 Gemini 格式
 	geminiBody, err := antigravity.TransformClaudeToGeminiWithOptions(&claudeReq, projectID, mappedModel, transformOpts)
@@ -208,7 +209,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected signature-related 400, retrying once (%s)", account.ID, stage.name)
 
-				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, s.getClaudeMessagesTransformOptions(ctx, account))
+				retryOpts := s.getClaudeMessagesTransformOptions(ctx, account)
+				retryOpts.EffortResolvedByMapping = transformOpts.EffortResolvedByMapping
+				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, retryOpts)
 				if txErr != nil {
 					continue
 				}

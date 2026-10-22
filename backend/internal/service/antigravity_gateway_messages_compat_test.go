@@ -136,7 +136,7 @@ func TestAntigravityMessagesCompatibilityDoesNotLeakThroughWebSearchFallback(t *
 	body := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"question"},{"role":"assistant","content":"prefix:"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
 	var request antigravity.ClaudeRequest
 	require.NoError(t, json.Unmarshal(body, &request))
-	converted, err := svc.buildAntigravityCompatGeminiBody(context.Background(), body, &request, "mock-project", "claude-sonnet-4-5")
+	converted, err := svc.buildAntigravityCompatGeminiBody(context.Background(), body, &request, "mock-project", "claude-sonnet-4-5", false)
 	require.NoError(t, err)
 	require.Equal(t, "gemini-2.5-flash", gjson.GetBytes(converted, "model").String())
 	require.Equal(t, int64(2), gjson.GetBytes(converted, "request.contents.#").Int())

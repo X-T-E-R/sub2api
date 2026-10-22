@@ -103,37 +103,51 @@ func antigravityRequestEffort(ctx context.Context) string {
 }
 
 func resolveAntigravityEffortMapping(mapping map[string]string, requested, effort string) (string, bool) {
-	return resolveAntigravityEffortMappingWithPolicy(mapping, requested, effort, currentAntigravityModelEffortSettings())
+	decision := decideAntigravityEffortMapping(mapping, requested, effort, currentAntigravityModelEffortSettings())
+	return decision.model, decision.matched
+}
+
+type antigravityEffortDecision struct {
+	model   string
+	matched bool
+	// effortApplied is true when a suffix, template expansion, or
+	// requested-effort override selected the model. Literal targets leave it false.
+	effortApplied bool
 }
 
 // Exact suffixes/aliases and wildcards win. Match configured template base IDs
 // plus a complete enabled level, never an arbitrary last hyphen token.
 func resolveAntigravityEffortMappingWithPolicy(mapping map[string]string, requested, effort string, p *AntigravityModelEffortSettings) (string, bool) {
+	decision := decideAntigravityEffortMapping(mapping, requested, effort, p)
+	return decision.model, decision.matched
+}
+
+func decideAntigravityEffortMapping(mapping map[string]string, requested, effort string, p *AntigravityModelEffortSettings) antigravityEffortDecision {
 	if target, matched := resolveRequestedModelInMapping(mapping, requested); matched {
 		if t, valid := parseAntigravityEffortTemplate(target); valid {
 			if _, exact := mapping[requested]; !exact {
-				return "", true
+				return antigravityEffortDecision{matched: true}
 			}
 			if effort != "" {
 				if !p.supports(effort) {
-					return "", true
+					return antigravityEffortDecision{matched: true}
 				}
-				if override, matched := resolveRequestedModelInMapping(mapping, requested+"-"+effort); matched {
+				if override, ok := resolveRequestedModelInMapping(mapping, requested+"-"+effort); ok {
 					if rule, valid := parseAntigravityEffortTemplate(override); valid {
-						return rule.model("", p), true
+						return antigravityEffortDecision{model: rule.model("", p), matched: true, effortApplied: true}
 					}
 					if strings.Contains(override, "{effort") {
-						return "", true
+						return antigravityEffortDecision{matched: true}
 					}
-					return override, true
+					return antigravityEffortDecision{model: override, matched: true, effortApplied: true}
 				}
 			}
-			return t.model(effort, p), true
+			return antigravityEffortDecision{model: t.model(effort, p), matched: true, effortApplied: true}
 		}
 		if strings.Contains(target, "{effort") {
-			return "", true
+			return antigravityEffortDecision{matched: true}
 		}
-		return target, true
+		return antigravityEffortDecision{model: target, matched: true}
 	}
 	// Complete level names are longest-first. An overlapping base must not
 	// turn extra-low into low; ties between bases remain deterministic.
@@ -153,11 +167,11 @@ func resolveAntigravityEffortMappingWithPolicy(mapping map[string]string, reques
 		for _, base := range bases {
 			if requested == base+"-"+level {
 				t, _ := parseAntigravityEffortTemplate(mapping[base])
-				return t.model(level, p), true
+				return antigravityEffortDecision{model: t.model(level, p), matched: true, effortApplied: true}
 			}
 		}
 	}
-	return requested, false
+	return antigravityEffortDecision{model: requested}
 }
 
 func antigravityEffortRequestError(ctx context.Context, account *Account, requested string) string {
