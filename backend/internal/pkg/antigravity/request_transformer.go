@@ -446,12 +446,16 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			systemParts = append(systemParts, parts...)
 			continue
 		}
-		if geminiOptions.enabled && role == "user" && i == geminiOptions.terminalMessage && emptyGeminiTextParts(parts) {
-			if geminiOptions.recoveredThinkingTail {
-				return nil, nil, false, geminiMessagesError(fmt.Sprintf("messages[%d]", i), "send a nonempty user message or real tool results before retrying a partial assistant turn")
-			}
-			if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultImages); err != nil {
-				return nil, nil, false, err
+		if geminiOptions.enabled && role == "user" && emptyGeminiTextParts(parts) && (i == geminiOptions.terminalMessage || emptyGeminiUserContent(msg.Content)) {
+			// A sent empty-user turn must keep the same representation when it
+			// becomes history. Do not reinterpret unsupported historical blocks as empty.
+			if i == geminiOptions.terminalMessage {
+				if geminiOptions.recoveredThinkingTail {
+					return nil, nil, false, geminiMessagesError(fmt.Sprintf("messages[%d]", i), "send a nonempty user message or real tool results before retrying a partial assistant turn")
+				}
+				if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultImages); err != nil {
+					return nil, nil, false, err
+				}
 			}
 			text := geminiEmptyUserMessage
 			for _, part := range parts {

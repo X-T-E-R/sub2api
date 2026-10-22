@@ -28,7 +28,7 @@ import (
 //	      └─ retryDelay <  7s → 等待后重试 1 次
 //	          ├─ 成功 → 正常返回
 //	          └─ 失败 → 设置模型限流 + 清除粘性绑定 → 切换账号
-func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte, isStickySession bool) (*ForwardResult, error) {
+func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte, isStickySession bool) (forwardResult *ForwardResult, forwardErr error) {
 	beginUpstreamResponseModelObservation(c)
 	// 上游透传账号直接转发，不走 OAuth token 刷新
 	if account.Type == AccountTypeUpstream {
@@ -111,6 +111,21 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	action := "streamGenerateContent"
 	// Task24：续写必须复用「这一代实际成功发出的上游请求信封」，因此跟踪最终 body。
 	finalBody := geminiBody
+	cacheObservation := s.beginAntigravityCacheObservation(ctx, c, account, body, geminiBody)
+	var cacheContinuation *antigravityThoughtContinuation
+	defer func() {
+		var rawUsage *ClaudeUsage
+		if forwardResult != nil {
+			rawUsage = &forwardResult.Usage
+		}
+		continued := cacheContinuation != nil && cacheContinuation.extraUsed
+		if continued && cacheContinuation.finishedGeneration != nil {
+			// The public result is cumulative across generations. Log only the
+			// initial generation's metering and leave continuity unknown.
+			rawUsage = &cacheContinuation.finishedGeneration.claudeUsage
+		}
+		cacheObservation.finish(rawUsage, forwardErr == nil && forwardResult != nil && !forwardResult.ClientDisconnect, !bytes.Equal(finalBody, geminiBody), continued)
+	}()
 
 	// 执行带重试的请求
 	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
@@ -442,6 +457,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)
+	cacheContinuation = cont
 	defer cont.startResponse(c, "messages", claudeReq.Stream)()
 
 	var usage *ClaudeUsage

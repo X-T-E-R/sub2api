@@ -174,6 +174,25 @@ func validateGeminiMessageContent(content json.RawMessage, index int, toolResult
 	return nil
 }
 
+// Only supported, explicitly empty user input may acquire the compatibility turn
+// in history. null, omitted content and unsupported blocks retain their old policy.
+func emptyGeminiUserContent(content json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		return !bytes.Equal(bytes.TrimSpace(content), []byte("null")) && strings.TrimSpace(text) == ""
+	}
+	var blocks []ContentBlock
+	if json.Unmarshal(content, &blocks) != nil {
+		return false
+	}
+	for _, block := range blocks {
+		if block.Type != "text" || strings.TrimSpace(block.Text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 func emptyGeminiTextParts(parts []GeminiPart) bool {
 	for _, part := range parts {
 		if part.Thought || part.InlineData != nil || part.FunctionCall != nil || part.FunctionResponse != nil || strings.TrimSpace(part.Text) != "" {
