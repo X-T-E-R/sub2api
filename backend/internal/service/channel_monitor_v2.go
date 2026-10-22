@@ -97,6 +97,7 @@ type ChannelMonitorV2Metric struct {
 	ErrorRate                float64                 `json:"error_rate"`
 	SuccessRate              float64                 `json:"success_rate"`
 	CacheRate                float64                 `json:"cache_rate"`
+	CacheRateHasSamples      bool                    `json:"cache_rate_has_samples"` // 公开响应隐藏分母后，仍能区分真实零命中与无数据。
 	CacheRateNumerator       int64                   `json:"cache_rate_numerator"`
 	CacheRateDenominator     int64                   `json:"cache_rate_denominator"`
 	TTFT                     ChannelMonitorV2Latency `json:"ttft"`
