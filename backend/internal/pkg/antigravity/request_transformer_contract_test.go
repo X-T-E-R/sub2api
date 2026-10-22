@@ -449,11 +449,14 @@ func TestReadOnlySchemaKeywordAlreadyStripped(t *testing.T) {
 	})
 	_, ok := cleaned["readOnly"]
 	require.False(t, ok)
-	props := cleaned["properties"].(map[string]any)
-	name := props["name"].(map[string]any)
+	props, ok := cleaned["properties"].(map[string]any)
+	require.True(t, ok, "properties must remain an object")
+	name, ok := props["name"].(map[string]any)
+	require.True(t, ok, "name must remain an object schema")
 	_, ok = name["readOnly"]
 	require.False(t, ok)
-	kept := props["readOnly"].(map[string]any)
+	kept, ok := props["readOnly"].(map[string]any)
+	require.True(t, ok, "the readOnly property must remain an object schema")
 	require.Equal(t, "boolean", kept["type"])
 	require.Equal(t, "Legitimate property named readOnly", kept["description"])
 	_, ok = kept["readOnly"]
