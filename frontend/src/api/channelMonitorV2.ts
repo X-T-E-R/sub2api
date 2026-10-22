@@ -42,6 +42,8 @@ export interface MonitorMetric {
   tpm: number
   error_rate: number
   cache_rate: number
+  /** True when the bucket had a cache denominator; public redaction keeps it while hiding the denominator. */
+  cache_rate_has_samples?: boolean
   cache_rate_numerator: number
   cache_rate_denominator: number
   ttft: LatencyMetric

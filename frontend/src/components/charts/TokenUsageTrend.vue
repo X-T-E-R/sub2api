@@ -108,15 +108,18 @@ const chartData = computed(() => {
       },
       {
         label: 'Cache Hit Rate',
+        // No prompt tokens means the bucket observed no cache opportunity:
+        // leave a gap instead of plotting a misleading 0%.
         data: props.trendData.map((d) => {
           const totalPromptTokens = d.input_tokens + d.cache_read_tokens + d.cache_creation_tokens
-          return totalPromptTokens > 0 ? (d.cache_read_tokens / totalPromptTokens) * 100 : 0
+          return totalPromptTokens > 0 ? (d.cache_read_tokens / totalPromptTokens) * 100 : null
         }),
         borderColor: chartColors.value.cacheHitRate,
         backgroundColor: `${chartColors.value.cacheHitRate}20`,
         borderDash: [5, 5],
         fill: false,
         tension: 0.3,
+        spanGaps: false,
         yAxisID: 'yPercent'
       }
     ]
@@ -147,7 +150,9 @@ const lineOptions = computed(() => ({
       callbacks: {
         label: (context: any) => {
           if (context.dataset.yAxisID === 'yPercent') {
-            return `${context.dataset.label}: ${context.raw.toFixed(1)}%`
+            return context.raw == null
+              ? `${context.dataset.label}: -`
+              : `${context.dataset.label}: ${context.raw.toFixed(1)}%`
           }
           return `${context.dataset.label}: ${formatTokens(context.raw)}`
         },

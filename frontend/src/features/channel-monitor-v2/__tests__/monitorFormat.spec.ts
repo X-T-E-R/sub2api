@@ -3,6 +3,8 @@ import {
   formatLatencyKpiSecondary,
   formatLatencyPrivacy,
   formatMonitorMs,
+  formatMonitorCacheRate,
+  monitorCacheRate,
   formatMonitorNumber,
   formatMonitorPercent,
   formatMonitorRate,
@@ -40,6 +42,27 @@ describe('monitorFormat accuracy', () => {
     // value < 0.01 uses 2 decimal places (includes exact 0)
     expect(formatMonitorPercent(0)).toBe('0.00%')
     expect(formatMonitorPercent(0.5)).toBe('50.0%')
+  })
+
+  it('only reports a cache rate for buckets that observed cache samples', () => {
+    // The explicit backend flag wins even when the public payload hides the denominator.
+    expect(monitorCacheRate({ cache_rate: 0.5, cache_rate_has_samples: true, cache_rate_denominator: 0 })).toBe(0.5)
+    expect(monitorCacheRate({ cache_rate: 0, cache_rate_has_samples: true, cache_rate_denominator: 0 })).toBe(0)
+    expect(monitorCacheRate({ cache_rate: 0.5, cache_rate_has_samples: false })).toBeNull()
+    // Older payloads without the flag fall back to the denominator.
+    expect(monitorCacheRate({ cache_rate: 0.5, cache_rate_denominator: 100 })).toBe(0.5)
+    expect(monitorCacheRate({ cache_rate: 0, cache_rate_denominator: 100 })).toBe(0)
+    expect(monitorCacheRate({ cache_rate: 0, cache_rate_denominator: 0 })).toBeNull()
+    expect(monitorCacheRate({ cache_rate: 0 })).toBeNull()
+  })
+
+  it('renders no sample as "-" while keeping real 0% and 100% distinct', () => {
+    expect(formatMonitorCacheRate({ cache_rate: 0, cache_rate_has_samples: false })).toBe('-')
+    expect(formatMonitorCacheRate({ cache_rate: 0, cache_rate_has_samples: true })).toBe('0.00%')
+    expect(formatMonitorCacheRate({ cache_rate: 0.5, cache_rate_has_samples: true })).toBe('50.0%')
+    expect(formatMonitorCacheRate({ cache_rate: 1, cache_rate_has_samples: true, cache_rate_denominator: 0 })).toBe('100.0%')
+    expect(formatMonitorCacheRate({ cache_rate: 0.8, cache_rate_denominator: 100 })).toBe('80.0%')
+    expect(formatMonitorCacheRate({ cache_rate: 0, cache_rate_denominator: 0 })).toBe('-')
   })
 
   it('formats RPM/TPM throughput with K/M compact notation', () => {

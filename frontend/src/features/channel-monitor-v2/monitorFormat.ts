@@ -63,6 +63,35 @@ export function formatMonitorPercent(value: number, locale = monitorIntlLocale()
   }).format((value || 0) * 100)}%`
 }
 
+/**
+ * Cache hit rate for one bucket, or null when the bucket observed no cache samples.
+ *
+ * An empty bucket is "no data", not a 0% hit rate. The backend marks sample
+ * presence explicitly because public responses hide the denominator; payloads
+ * that predate that flag fall back to the denominator.
+ */
+export function monitorCacheRate(metrics: {
+  cache_rate: number
+  cache_rate_has_samples?: boolean
+  cache_rate_denominator?: number
+}): number | null {
+  const hasSamples =
+    typeof metrics.cache_rate_has_samples === 'boolean'
+      ? metrics.cache_rate_has_samples
+      : (metrics.cache_rate_denominator ?? 0) > 0
+  return hasSamples ? metrics.cache_rate : null
+}
+
+/** Cache rate text for lists and tooltips; '-' keeps "no sample" distinct from a real 0%. */
+export function formatMonitorCacheRate(metrics: {
+  cache_rate: number
+  cache_rate_has_samples?: boolean
+  cache_rate_denominator?: number
+}): string {
+  const rate = monitorCacheRate(metrics)
+  return rate == null ? '-' : formatMonitorPercent(rate)
+}
+
 export function formatMonitorMs(value: number | null | undefined): string {
   if (value == null) return '-'
   return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`

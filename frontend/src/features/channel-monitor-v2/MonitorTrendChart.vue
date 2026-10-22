@@ -75,7 +75,7 @@ import { Line } from 'vue-chartjs'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Icon from '@/components/icons/Icon.vue'
 import type { MonitorCoverage, MonitorMetric, MonitorHealth } from '@/api/channelMonitorV2'
-import { formatMonitorMs, formatMonitorPercent } from '@/features/channel-monitor-v2/monitorFormat'
+import { formatMonitorMs, formatMonitorPercent, monitorCacheRate } from '@/features/channel-monitor-v2/monitorFormat'
 import {
   applyWheelZoom,
   clientXRatio,
@@ -111,6 +111,18 @@ const bucketLabel = computed(() => {
   return t('channelMonitorV2.bucket.days', { count: hours / 24 })
 })
 
+/**
+ * Cache rate per bucket; null where the bucket observed no cache samples, so the
+ * line breaks rather than claiming a 0% hit rate. Plotted exactly: smoothing a
+ * real 0% or 100% would show a value no bucket observed.
+ */
+const cacheSeries = computed<Array<number | null>>(() =>
+  visibleTrend.value.map((point) => {
+    const rate = monitorCacheRate(point.metrics)
+    return rate == null ? null : rate * 100
+  }),
+)
+
 const chartData = computed(() => {
   const points = visibleTrend.value
   if (!points.length) return null
@@ -123,7 +135,7 @@ const chartData = computed(() => {
     }).format(new Date(p.bucket_start))
   )
   const errorRates = smoothTrend(points.map((p) => (p.metrics.error_rate || 0) * 100))
-  const cacheRates = smoothTrend(points.map((p) => (p.metrics.cache_rate || 0) * 100))
+  const cacheRates = cacheSeries.value
   const ttftP50 = smoothTrend(points.map((p) => p.metrics.ttft?.p50_ms ?? null))
   return {
     labels,
@@ -151,7 +163,11 @@ const chartData = computed(() => {
         tension: 0.4,
         cubicInterpolationMode: 'monotone' as const,
         fill: false,
-        pointRadius: 0,
+        // A value between two gaps has no line segment; keep it visible as a dot.
+        pointRadius: (context: { dataIndex: number }) => {
+          if (cacheRates[context.dataIndex] == null) return 0
+          return cacheRates[context.dataIndex - 1] == null && cacheRates[context.dataIndex + 1] == null ? 3 : 0
+        },
         pointHoverRadius: 4,
         pointHitRadius: 10,
         borderWidth: 2,
@@ -233,6 +249,13 @@ const chartOptions = computed(() => {
               return `${label}: ${formatMonitorPercent(y / 100)}`
             }
             return `${label}: ${formatMonitorMs(y)}`
+          },
+          // Null cache points are skipped from the tooltip body; state the missing
+          // sample explicitly so the bucket never reads as 0%.
+          afterBody(items: Array<{ dataIndex: number }>) {
+            const dataIndex = items[0]?.dataIndex
+            if (dataIndex == null || cacheSeries.value[dataIndex] != null) return ''
+            return `${t('channelMonitorV2.chart.cacheDataset')}: -`
           },
         },
       },

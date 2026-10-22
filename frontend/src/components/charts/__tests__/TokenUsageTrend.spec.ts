@@ -20,6 +20,7 @@ vi.mock('vue-i18n', async () => {
 
 vi.mock('vue-chartjs', () => ({
   Line: {
+    name: 'Line',
     props: ['data', 'options'],
     template: '<div class="chart-data">{{ JSON.stringify(data) }}</div>',
   },
@@ -57,7 +58,7 @@ describe('TokenUsageTrend', () => {
     expect(hitRateDataset.data[0]).toBe(75)
   })
 
-  it('returns 0 hit rate when all prompt tokens are zero', () => {
+  it('leaves a gap when all prompt tokens are zero', () => {
     const wrapper = mount(TokenUsageTrend, {
       props: {
         trendData: [
@@ -84,7 +85,8 @@ describe('TokenUsageTrend', () => {
     const hitRateDataset = chartData.datasets.find(
       (ds: any) => ds.label === 'Cache Hit Rate'
     )
-    expect(hitRateDataset.data[0]).toBe(0)
+    expect(hitRateDataset.data[0]).toBeNull()
+    expect(hitRateDataset.spanGaps).toBe(false)
   })
 
   it('includes cache_creation_tokens in denominator for Anthropic models', () => {
@@ -116,5 +118,28 @@ describe('TokenUsageTrend', () => {
     )
     // Hit rate = 500 / (200 + 500 + 300) * 100 = 50%
     expect(hitRateDataset.data[0]).toBe(50)
+  })
+
+  it('keeps empty, true zero, full cache and mixed prompt samples distinct even with no output', () => {
+    const wrapper = mount(TokenUsageTrend, {
+      props: {
+        trendData: [
+          [100, 300, 0], [0, 0, 0], [100, 0, 0], [0, 100, 0], [200, 500, 300],
+        ].map(([input, read, creation], index) => ({
+          date: `2026-05-0${index + 1}`, requests: 1,
+          input_tokens: input, output_tokens: 0,
+          cache_read_tokens: read, cache_creation_tokens: creation,
+          cost: 0, actual_cost: 0,
+        })),
+      },
+    })
+    const chart = wrapper.findComponent({ name: 'Line' })
+    const data = JSON.parse(wrapper.find('.chart-data').text())
+    expect(data.datasets[4].data).toEqual([75, null, 0, 100, 50])
+    expect(data.datasets[4].spanGaps).toBe(false)
+    const tooltip = chart.props('options').plugins.tooltip.callbacks
+    expect(tooltip.label({ dataset: data.datasets[4], raw: null })).toBe('Cache Hit Rate: -')
+    expect(tooltip.label({ dataset: data.datasets[4], raw: 0 })).toBe('Cache Hit Rate: 0.0%')
+    expect(tooltip.label({ dataset: data.datasets[4], raw: 100 })).toBe('Cache Hit Rate: 100.0%')
   })
 })

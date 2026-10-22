@@ -46,6 +46,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
 })
 
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { describe, expect, it } from 'vitest'
 import RelayPulseMatrix from '../RelayPulseMatrix.vue'
 import type { MonitorHealth, MonitorMetric } from '@/api/channelMonitorV2'
@@ -139,6 +140,120 @@ describe('RelayPulseMatrix', () => {
     // No click-to-open modal
     await cells[0].trigger('click')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+})
+
+describe('RelayPulseMatrix cache rate samples', () => {
+  it('shows "-" for buckets without samples and keeps real 0% / redacted samples distinct', () => {
+    const empty = { ...metrics(0), cache_rate: 0, cache_rate_has_samples: false, cache_rate_denominator: 0 }
+    const trueZero = { ...metrics(10), cache_rate: 0, cache_rate_has_samples: true, cache_rate_denominator: 120 }
+    // Public payload: samples survived redaction, denominator and throughput did not.
+    const redacted = {
+      ...metrics(0),
+      cache_rate: 0.5,
+      cache_rate_has_samples: true,
+      cache_rate_denominator: 0,
+      cache_rate_numerator: 0,
+      rpm: 0,
+      tpm: 0,
+    }
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [{
+          platform: 'anthropic',
+          group_id: 7,
+          group_name: '默认组',
+          model: 'claude-sonnet-5',
+          metrics: redacted,
+          health,
+          buckets: [
+            { bucket_start: '2026-08-01T00:00:00Z', metrics: empty, health },
+            { bucket_start: '2026-08-01T00:01:00Z', metrics: trueZero, health },
+            { bucket_start: '2026-08-01T00:02:00Z', metrics: redacted, health },
+          ],
+        }],
+        coverage: {
+          requested_start: '2026-08-01T00:00:00Z',
+          requested_end: '2026-08-01T00:03:00Z',
+          coverage_start: '2026-08-01T00:00:00Z',
+          data_through: '2026-08-01T00:03:00Z',
+          computed_at: '2026-08-01T00:03:00Z',
+          aggregation_lag_seconds: 0,
+          coverage_complete: true,
+          bucket_seconds: 60,
+        },
+        healthMode: 'overall',
+      },
+    })
+
+    const cells = wrapper.findAll('.pulse-cell')
+    expect(cells[0].text()).toContain('缓存率 -')
+    expect(cells[1].text()).toContain('缓存率 0.00%')
+    expect(cells[2].text()).toContain('缓存率 50.0%')
+    // Row summary follows the same rule instead of defaulting to 0%.
+    expect(wrapper.findAll('.matrix-row')[1].text()).toContain('50.0%')
+  })
+})
+
+describe('RelayPulseMatrix tooltip placement', () => {
+  it('keeps the floating tooltip inside a narrow viewport', async () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList?.contains('matrix-floating-tooltip') ? 220 : 0
+      },
+    })
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList?.contains('matrix-floating-tooltip') ? 140 : 0
+      },
+    })
+    try {
+      const wrapper = mount(RelayPulseMatrix, {
+        props: {
+          rows: [{
+            platform: 'openai',
+            group_id: 7,
+            group_name: '默认组',
+            model: 'gpt-5',
+            metrics: metrics(10),
+            health,
+            buckets: [
+              { bucket_start: '2026-08-01T00:00:00Z', metrics: metrics(10), health },
+              { bucket_start: '2026-08-01T00:01:00Z', metrics: metrics(0), health },
+            ],
+          }],
+          coverage: {
+            requested_start: '2026-08-01T00:00:00Z',
+            requested_end: '2026-08-01T00:02:00Z',
+            coverage_start: '2026-08-01T00:00:00Z',
+            data_through: '2026-08-01T00:02:00Z',
+            computed_at: '2026-08-01T00:02:00Z',
+            aggregation_lag_seconds: 0,
+            coverage_complete: true,
+            bucket_seconds: 60,
+          },
+          healthMode: 'overall',
+        },
+      })
+      // jsdom reports a zero-sized rect at the left edge, the worst case for a
+      // centred tooltip: without clamping it would render off-screen.
+      await wrapper.findAll('.pulse-cell')[0].trigger('focus')
+      await nextTick()
+      await nextTick()
+      const tooltip = document.body.querySelector('.matrix-floating-tooltip') as HTMLElement
+      expect(tooltip).toBeTruthy()
+      expect(parseFloat(tooltip.style.left)).toBe(118)
+      expect(parseFloat(tooltip.style.top)).toBe(148)
+      wrapper.unmount()
+    } finally {
+      delete (HTMLElement.prototype as Partial<HTMLElement>).offsetWidth
+      delete (HTMLElement.prototype as Partial<HTMLElement>).offsetHeight
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
   })
 })
 
