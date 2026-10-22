@@ -778,8 +778,13 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	ApplyForwardImageBillingResolution(result)
 	logServiceTierBillingDowngrade("service.gateway", account, result.RequestID, ApplyForwardServiceTierBillingResolution(result))
 
-	// 强制缓存计费：将 input_tokens 转为 cache_read_input_tokens
-	// 用于粘性会话切换时的特殊计费处理
+	// Monetary adjustments use a value copy: the measured usage is also consumed
+	// by forwarding and cache telemetry, so discounts must not rewrite it.
+	measuredUsage := result.Usage
+	billingResult := *result
+	result = &billingResult
+
+	// 强制缓存计费：仅在计价副本中将 input_tokens 转为 cache_read_input_tokens。
 	if input.ForceCacheBilling && result.Usage.InputTokens > 0 {
 		logger.LegacyPrintf("service.gateway", "force_cache_billing: %d input_tokens → cache_read_input_tokens (account=%d)",
 			result.Usage.InputTokens, account.ID)
@@ -891,6 +896,13 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		)
 	}
 
+	// Keep the historical billing projection (including token-based ledger
+	// fingerprints) separate from the measured token buckets persisted below.
+	billingUsageLog := *usageLog
+	usageLog.InputTokens = measuredUsage.InputTokens
+	usageLog.CacheReadTokens = measuredUsage.CacheReadInputTokens
+	usageLog.CacheCreationTokens = measuredUsage.CacheCreationInputTokens
+
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
@@ -909,7 +921,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		}
 	}
 	requestID := usageLog.RequestID
-	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
+	_, billingErr := applyUsageBilling(ctx, requestID, &billingUsageLog, &postUsageBillingParams{
 		Cost:                  cost,
 		User:                  user,
 		APIKey:                apiKey,
