@@ -288,3 +288,26 @@ func TestAntigravityCacheContinuityContinuationUsesInitialMetering(t *testing.T)
 	require.Equal(t, "gateway_continuation", (*events)[0].Reason)
 	require.Equal(t, antigravityThoughtGenerationOneInput, (*events)[0].PromptTokens, "do not mislabel cumulative usage as one request's raw prompt")
 }
+
+func TestAntigravityCacheContinuitySchemaOnlyChangeAndNoSample(t *testing.T) {
+	o, now, events := continuityFixture(t)
+	c := continuityContext(1, "session")
+	const schema = `[{"functionDeclarations":[{"name":"same-tool","parameters":{"type":"object","properties":{"value":{"type":"string","enum":["old"]}}}}]}]`
+	for i, tools := range []string{schema, strings.Replace(schema, `"old"`, `"new"`, 1)} {
+		wire := continuityWire("gemini-4-argon-high", "system", tools, continuityFirst)
+		o.begin(c, &Account{ID: 74}, "high", nil, wire).finish(&ClaudeUsage{InputTokens: 100, CacheReadInputTokens: 900}, true, false, false)
+		if i == 1 {
+			e := (*events)[1]
+			require.Equal(t, "short_prefix_changed", e.Class)
+			require.False(t, e.ToolsSame, "same tool name and schema shape but changed enum must be detected")
+			require.True(t, e.SystemSame)
+			require.True(t, e.PrefixSame)
+		}
+		*now = now.Add(time.Second)
+	}
+	wire := continuityWire("gemini-4-argon-high", "system", schema, continuityFirst)
+	o.begin(c, &Account{ID: 74}, "high", nil, wire).finish(&ClaudeUsage{}, true, false, false)
+	require.Equal(t, "unknown", (*events)[2].Class)
+	require.Equal(t, "incomplete_or_missing_usage", (*events)[2].Reason)
+	require.False(t, (*events)[2].ReadDroppedToZero, "no input sample must not become a zero-cache miss")
+}
