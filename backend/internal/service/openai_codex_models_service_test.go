@@ -22,7 +22,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 )
 
 type codexModelsHTTPUpstreamStub struct {
@@ -1253,8 +1252,8 @@ func TestIsRetryableCodexModelsManifestTransportError(t *testing.T) {
 			retryable: true,
 		},
 		{
-			name:      "typed HTTP2 GOAWAY",
-			err:       http2.GoAwayError{ErrCode: http2.ErrCodeNo},
+			name:      "wrapped legacy HTTP2 GOAWAY",
+			err:       fmt.Errorf("models request: %w", errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=0, ErrCode=NO_ERROR, debug=""`)),
 			retryable: true,
 		},
 		{

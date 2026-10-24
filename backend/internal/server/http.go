@@ -136,13 +136,19 @@ func ProvideHTTPServer(cfg *config.Config, router *gin.Engine) *http.Server {
 	// 根据配置决定是否启用 H2C
 	if cfg.Server.H2C.Enabled {
 		h2cConfig := cfg.Server.H2C
-		if err := http2.ConfigureServer(server, &http2.Server{
-			MaxConcurrentStreams:         h2cConfig.MaxConcurrentStreams,
-			IdleTimeout:                  time.Duration(h2cConfig.IdleTimeout) * time.Second,
-			MaxReadFrameSize:             uint32(h2cConfig.MaxReadFrameSize),
-			MaxUploadBufferPerConnection: int32(h2cConfig.MaxUploadBufferPerConnection),
-			MaxUploadBufferPerStream:     int32(h2cConfig.MaxUploadBufferPerStream),
-		}); err != nil {
+		server.HTTP2 = &http.HTTP2Config{
+			MaxConcurrentStreams:          int(h2cConfig.MaxConcurrentStreams),
+			MaxReadFrameSize:              h2cConfig.MaxReadFrameSize,
+			MaxReceiveBufferPerConnection: h2cConfig.MaxUploadBufferPerConnection,
+			MaxReceiveBufferPerStream:     h2cConfig.MaxUploadBufferPerStream,
+		}
+		// HTTP2Config 没有独立的 IdleTimeout；保留官方兼容桥接，分别使用
+		// server.idle_timeout（HTTP/1）和 server.h2c.idle_timeout（HTTP/2），不合并两者。
+		//nolint:staticcheck // SA1019: ConfigureServer/Server.IdleTimeout 是保留独立 HTTP/2 空闲超时的官方兼容路径。
+		err := http2.ConfigureServer(server, &http2.Server{
+			IdleTimeout: time.Duration(h2cConfig.IdleTimeout) * time.Second,
+		})
+		if err != nil {
 			log.Printf("Failed to configure HTTP/2 Cleartext (h2c): %v", err)
 		} else {
 			protocols := new(http.Protocols)

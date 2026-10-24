@@ -22,31 +22,22 @@ func http2KeepAliveTestPoolSettings() poolSettings {
 	}
 }
 
-// requireHTTP2Configured 断言 http2 已显式挂到 http.Transport 上。
-// x/net/http2 在 go1.27 && !http2legacy 下是标准库 HTTP/2 的包装：ConfigureTransports 通过
-// Transport.RegisterProtocol("http/2") 注册配置并打开 Protocols.HTTP2（TLSNextProto 不承载 h2 入口），
-// ReadIdleTimeout/PingTimeout 在建连时映射为 http.HTTP2Config.SendPingTimeout/PingTimeout。
+// requireHTTP2Configured 断言标准库 HTTP/2 已启用，并保留 PING 健康探测的两个超时。
 func requireHTTP2Configured(t *testing.T, tr *http.Transport, msg string) {
 	t.Helper()
 	require.NotNil(t, tr.Protocols, msg)
+	require.True(t, tr.Protocols.HTTP1(), "仍须允许 HTTP/1.1 上游")
 	require.True(t, tr.Protocols.HTTP2(), msg)
+	require.NotNil(t, tr.HTTP2, msg)
+	require.Positive(t, tr.HTTP2.SendPingTimeout, "必须启用空闲 PING 探测以剔除死连接")
+	require.Equal(t, openAIHTTP2ReadIdleTimeout, tr.HTTP2.SendPingTimeout)
+	require.Equal(t, openAIHTTP2PingTimeout, tr.HTTP2.PingTimeout, "PING 无响应必须有超时判定")
 }
 
-// Codex/OpenAI 上游改走 HTTP/2 后，池化连接被代理/NAT 静默掐断会成为“死连接”：
-// 两端都以为连接存活，请求落上去会挂到 TCP 重传超时（分钟级）才失败。Go 的
-// http2.Transport 默认 ReadIdleTimeout=0（不发健康 PING），无法检测这种死连接。
-// 必须显式启用主动 PING 探测，让死连接被提前剔除，而不是只靠 ResponseHeaderTimeout
-// 事后兜底。
+// 默认不发送健康 PING，必须显式启用才能提前剔除代理/NAT 静默掐断的死连接。
 func TestEnableOpenAIHTTP2KeepAlive_EnablesPingHealthCheck(t *testing.T) {
 	tr := &http.Transport{}
-
-	h2, err := enableOpenAIHTTP2KeepAlive(tr)
-	require.NoError(t, err)
-	require.NotNil(t, h2, "必须返回已配置的 *http2.Transport")
-
-	require.Positive(t, h2.ReadIdleTimeout, "必须启用空闲 PING 探测以剔除死连接")
-	require.Equal(t, openAIHTTP2ReadIdleTimeout, h2.ReadIdleTimeout)
-	require.Equal(t, openAIHTTP2PingTimeout, h2.PingTimeout, "PING 无响应必须有超时判定")
+	enableOpenAIHTTP2KeepAlive(tr)
 	requireHTTP2Configured(t, tr, "http2 必须已挂到底层 http.Transport 上")
 }
 

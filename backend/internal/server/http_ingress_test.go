@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 )
 
 func ingressTestConfig() *config.Config {
@@ -53,6 +54,60 @@ func TestProvideHTTPServerEnablesBoundedH2C(t *testing.T) {
 	require.NotNil(t, srv.Protocols)
 	require.True(t, srv.Protocols.UnencryptedHTTP2())
 	require.True(t, srv.Protocols.HTTP1())
+	require.Equal(t, 5*time.Second, srv.IdleTimeout, "H2C 空闲超时不得覆盖 HTTP/1 的配置")
+	require.NotNil(t, srv.HTTP2)
+	require.Equal(t, int(cfg.Server.H2C.MaxConcurrentStreams), srv.HTTP2.MaxConcurrentStreams)
+	require.Equal(t, cfg.Server.H2C.MaxReadFrameSize, srv.HTTP2.MaxReadFrameSize)
+	require.Equal(t, cfg.Server.H2C.MaxUploadBufferPerConnection, srv.HTTP2.MaxReceiveBufferPerConnection)
+	require.Equal(t, cfg.Server.H2C.MaxUploadBufferPerStream, srv.HTTP2.MaxReceiveBufferPerStream)
+}
+
+func TestHTTPServerKeepsIndependentHTTP1AndH2CIdleTimeouts(t *testing.T) {
+	cfg := ingressTestConfig()
+	cfg.Server.H2C = config.H2CConfig{Enabled: true, IdleTimeout: 1}
+	r := gin.New()
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	srv := ProvideHTTPServer(cfg, r)
+	addr, stop := serveIngressTestServer(t, srv)
+	defer stop()
+
+	h1, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+	defer func() { _ = h1.Close() }()
+	require.NoError(t, h1.SetDeadline(time.Now().Add(4*time.Second)))
+	reader := bufio.NewReader(h1)
+	requestHTTP1 := func() {
+		t.Helper()
+		_, err := io.WriteString(h1, "GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+		require.NoError(t, err)
+		resp, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+	}
+	requestHTTP1()
+
+	h2, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+	defer func() { _ = h2.Close() }()
+	require.NoError(t, h2.SetDeadline(time.Now().Add(3*time.Second)))
+	_, err = io.WriteString(h2, http2.ClientPreface)
+	require.NoError(t, err)
+	framer := http2.NewFramer(h2, h2)
+	require.NoError(t, framer.WriteSettings())
+	for {
+		frame, err := framer.ReadFrame()
+		require.NoError(t, err, "H2C 必须按独立的 1 秒超时发出 GOAWAY，而非沿用 HTTP/1 的 5 秒")
+		if settings, ok := frame.(*http2.SettingsFrame); ok && !settings.IsAck() {
+			require.NoError(t, framer.WriteSettingsAck())
+		}
+		if goAway, ok := frame.(*http2.GoAwayFrame); ok {
+			require.Equal(t, http2.ErrCodeNo, goAway.ErrCode)
+			break
+		}
+	}
+	// 同一 HTTP/1 连接在 H2C 空闲超时后仍可用，证明没有统一改写它的超时。
+	requestHTTP1()
 }
 
 func TestConfigureTrustedProxies(t *testing.T) {
