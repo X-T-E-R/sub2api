@@ -162,7 +162,7 @@ func TestAntigravityThoughtPolicyPersistsOneJSONKeyAndReadsBack(t *testing.T) {
 
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(ctx, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}))
 	require.Equal(t, []string{SettingKeyAntigravityThoughtPolicy}, repo.writes)
-	require.Equal(t, `{"suppress_thought_only_stop":true,"continue_thought_only":false}`, repo.values[SettingKeyAntigravityThoughtPolicy])
+	require.Equal(t, `{"suppress_thought_only_stop":true,"continue_thought_only":false,"continue_zero_output":false}`, repo.values[SettingKeyAntigravityThoughtPolicy])
 	require.Len(t, repo.values, 1, "the two switches must share the single global key")
 
 	// A fresh process has no snapshot and must warm it from the persisted pair.
@@ -175,7 +175,7 @@ func TestAntigravityThoughtPolicyPersistsOneJSONKeyAndReadsBack(t *testing.T) {
 
 	// Explicitly stored false/false is a real value, not an absent key.
 	require.NoError(t, fresh.SetAntigravityThoughtPolicySettings(ctx, AntigravityThoughtPolicySettings{}))
-	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false}`, repo.values[SettingKeyAntigravityThoughtPolicy])
+	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false,"continue_zero_output":false}`, repo.values[SettingKeyAntigravityThoughtPolicy])
 	require.Equal(t, AntigravityThoughtPolicy{}, ResolveAntigravityThoughtPolicy(ctx, &Account{ID: 1}))
 }
 
@@ -245,4 +245,20 @@ func TestAntigravityThoughtPolicyCorruptStoredValueIsReported(t *testing.T) {
 	global, err = settings.GetAntigravityThoughtPolicySettings(ctx)
 	require.NoError(t, err)
 	require.Equal(t, AntigravityThoughtPolicySettings{ContinueThoughtOnly: true}, global)
+}
+
+func TestAntigravityZeroOutputContinueGlobalSnapshotAndLegacySettings(t *testing.T) {
+	repo := newThoughtPolicySettingRepo()
+	settings := thoughtPolicyTestSettings(t, repo)
+	ctx := context.Background()
+	repo.values[SettingKeyAntigravityThoughtPolicy] = `{"suppress_thought_only_stop":true,"continue_thought_only":false}`
+	require.NoError(t, settings.LoadAntigravityThoughtPolicySettings(ctx))
+	require.False(t, ResolveAntigravityThoughtPolicy(ctx, nil).ContinueZeroOutput)
+	pinned := WithAntigravityThoughtPolicySnapshot(ctx)
+	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(ctx, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true, ContinueZeroOutput: true}))
+	require.False(t, ResolveAntigravityThoughtPolicy(pinned, nil).ContinueZeroOutput)
+	require.True(t, ResolveAntigravityThoughtPolicy(ctx, &Account{Extra: map[string]any{"antigravity_continue_zero_output": false, AntigravitySuppressThoughtOnlyStopExtraKey: false}}).ContinueZeroOutput)
+	antigravityThoughtPolicySnapshot.Store(nil)
+	require.NoError(t, settings.LoadAntigravityThoughtPolicySettings(ctx))
+	require.True(t, ResolveAntigravityThoughtPolicy(ctx, nil).ContinueZeroOutput)
 }

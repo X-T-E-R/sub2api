@@ -12,23 +12,20 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
-// Task24: independent Antigravity "thought-only terminal" switches.
+// Task24: independent Antigravity response switches, all off by default.
 //
-// The two switches are independent and both default to off in source:
+//   - SuppressThoughtOnlyStop (A) preserves thinking/signature/usage and reports
+//     unusable completion to the client instead of a successful terminal.
+//   - ContinueThoughtOnly (B) resends the received thinking/signature as a model
+//     tail once, without added system/user text. Its legacy semantics are unchanged.
+//   - ContinueZeroOutput appends one user Continue. after clean EOF with a received
+//     candidate, no actual content and no refusal/error terminal. It is global-only
+//     and shares B's one-append budget; STOP and missing finish reasons both qualify.
 //
-//   - SuppressThoughtOnlyStop (A) keeps the received thinking, signature and real
-//     usage but suppresses the successful terminal completion signal for a response
-//     that only ever produced thinking, so the downstream client applies its own
-//     continuation policy.
-//   - ContinueThoughtOnly (B) continues once by re-sending the received
-//     thinking/signature as the assistant tail, without adding any system/user text.
-//
-// The global pair persists in exactly one JSON settings key. Each account may carry
-// an explicit per-switch override in Account.Extra; a missing or null value inherits
-// the global switch, while an explicit false always wins over a global true.
+// Only A/B have Account.Extra overrides: missing/null inherits; explicit false
+// overrides global true. All switches are pinned together for each request.
 
-// SettingKeyAntigravityThoughtPolicy stores both global switches as one JSON object:
-// {"suppress_thought_only_stop":bool,"continue_thought_only":bool}.
+// SettingKeyAntigravityThoughtPolicy stores the global switches as one JSON object.
 const SettingKeyAntigravityThoughtPolicy = "antigravity_thought_policy"
 
 const (
@@ -38,10 +35,12 @@ const (
 	AntigravityContinueThoughtOnlyExtraKey     = "antigravity_continue_thought_only"
 )
 
-// AntigravityThoughtPolicySettings is the persisted global switch pair.
+// AntigravityThoughtPolicySettings is the persisted global response policy.
 type AntigravityThoughtPolicySettings struct {
 	SuppressThoughtOnlyStop bool `json:"suppress_thought_only_stop"`
 	ContinueThoughtOnly     bool `json:"continue_thought_only"`
+	// Global-only: never inherited from the legacy per-account A/B overrides.
+	ContinueZeroOutput bool `json:"continue_zero_output"`
 }
 
 // AntigravityThoughtPolicy is the resolved effective policy for one request.
@@ -52,14 +51,16 @@ type AntigravityThoughtPolicySettings struct {
 type AntigravityThoughtPolicy struct {
 	SuppressThoughtOnlyStop bool
 	ContinueThoughtOnly     bool
+	ContinueZeroOutput      bool
 }
 
-// DefaultAntigravityThoughtPolicySettings is the seed used when the setting key is
-// absent: both switches off, which preserves the pre-Task24 gateway behavior.
+// DefaultAntigravityThoughtPolicySettings preserves existing behavior when the
+// settings key or the new zero-output field is absent: all switches are off.
 func DefaultAntigravityThoughtPolicySettings() AntigravityThoughtPolicySettings {
 	return AntigravityThoughtPolicySettings{
 		SuppressThoughtOnlyStop: false,
 		ContinueThoughtOnly:     false,
+		ContinueZeroOutput:      false,
 	}
 }
 
@@ -135,7 +136,7 @@ func (s *SettingService) LoadAntigravityThoughtPolicySettings(ctx context.Contex
 		return err
 	}
 	antigravityThoughtPolicySnapshot.Store(&value)
-	logger.LegacyPrintf("service.antigravity_thought_policy", "loaded key=%s source=%s suppress_thought_only_stop=%t continue_thought_only=%t", SettingKeyAntigravityThoughtPolicy, source, value.SuppressThoughtOnlyStop, value.ContinueThoughtOnly)
+	logger.LegacyPrintf("service.antigravity_thought_policy", "loaded key=%s source=%s suppress_thought_only_stop=%t continue_thought_only=%t continue_zero_output=%t", SettingKeyAntigravityThoughtPolicy, source, value.SuppressThoughtOnlyStop, value.ContinueThoughtOnly, value.ContinueZeroOutput)
 	return nil
 }
 
@@ -155,7 +156,7 @@ func (s *SettingService) SetAntigravityThoughtPolicySettings(ctx context.Context
 		return err
 	}
 	antigravityThoughtPolicySnapshot.Store(&value)
-	logger.LegacyPrintf("service.antigravity_thought_policy", "updated key=%s source=settings suppress_thought_only_stop=%t continue_thought_only=%t", SettingKeyAntigravityThoughtPolicy, value.SuppressThoughtOnlyStop, value.ContinueThoughtOnly)
+	logger.LegacyPrintf("service.antigravity_thought_policy", "updated key=%s source=settings suppress_thought_only_stop=%t continue_thought_only=%t continue_zero_output=%t", SettingKeyAntigravityThoughtPolicy, value.SuppressThoughtOnlyStop, value.ContinueThoughtOnly, value.ContinueZeroOutput)
 	return nil
 }
 

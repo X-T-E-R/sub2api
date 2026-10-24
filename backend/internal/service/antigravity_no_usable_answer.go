@@ -69,6 +69,14 @@ func (g *antigravityThoughtGeneration) failureCode(policy AntigravityThoughtPoli
 	if code := antigravity.TerminalFailureCode(g.finishReason); code != "" {
 		return code
 	}
+	if policy.ContinueZeroOutput && g.zeroOutputSuccessful() {
+		// The exhausted one-append budget ends with the existing explicit empty
+		// classification even when A is off; never a failover.
+		if g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED" {
+			return "antigravity_missing_terminal"
+		}
+		return "antigravity_empty_response"
+	}
 	if !policy.SuppressThoughtOnlyStop || !g.noUsableAnswerEligible() {
 		return ""
 	}
@@ -91,7 +99,14 @@ func (c *antigravityThoughtContinuation) completeNoUsableAnswer(ginCtx *gin.Cont
 	if c.noUsableAnswerErr != nil {
 		return true
 	}
-	code := c.effectiveGeneration().failureCode(c.policy)
+	g := c.effectiveGeneration()
+	code := g.failureCode(c.policy)
+	if code == "" && c.zeroOutputContinuationUsed() && g != nil &&
+		!g.hasContentCarrier && g.noUsableAnswerEligible() {
+		// A second usage-only generation without a candidate is still an explicit
+		// failure, including when legacy A is off; it cannot trigger failover.
+		code = "antigravity_missing_terminal"
+	}
 	if code == "" {
 		return false
 	}

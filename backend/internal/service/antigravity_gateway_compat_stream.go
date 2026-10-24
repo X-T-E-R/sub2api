@@ -255,7 +255,7 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 	finalEvents, usage := s.processor.Finish()
 	mergeAntigravityCompatUsage(s.usage, usage)
 	s.consumeClaudeEvents(finalEvents)
-	noAnswer := (s.continuation.responseFailure() != nil)
+	noAnswer := s.continuation.failureError() != nil
 	if noAnswer {
 		// Empty STOP has no content event to release the buffered message/usage.
 		// Publish those real frames before the explicit failed terminal, without
@@ -458,7 +458,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			if !open {
 				cont := session.continuation
-				eligibleNoAnswer := cont != nil && cont.effectiveGeneration().failureCode(cont.policy) != ""
+				eligibleNoAnswer := cont != nil && (cont.effectiveGeneration().failureCode(cont.policy) != "" || cont.zeroOutputContinuationUsed())
 				if !eligibleNoAnswer && !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
 				}

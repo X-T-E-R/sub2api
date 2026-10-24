@@ -34,6 +34,7 @@ import ThoughtPolicyCard from "../AntigravityThoughtPolicySettings.vue";
 const SUPPRESS = '[data-testid="antigravity-thought-policy-suppress"]';
 const CONTINUE = '[data-testid="antigravity-thought-policy-continue"]';
 const SAVE = '[data-testid="antigravity-thought-policy-save"]';
+const ZERO = '[data-testid="antigravity-thought-policy-zero-output"]';
 
 function mountCard(): VueWrapper {
   return mount(ThoughtPolicyCard);
@@ -86,6 +87,7 @@ describe("AntigravityThoughtPolicySettings", () => {
     expect(apiMocks.updateAntigravityThoughtPolicySettings).toHaveBeenCalledWith({
       suppress_thought_only_stop: true,
       continue_thought_only: true,
+      continue_zero_output: false,
     });
     expect(toastMocks.showSuccess).toHaveBeenCalledWith(
       "admin.settings.antigravityThoughtPolicy.saved",
@@ -104,7 +106,26 @@ describe("AntigravityThoughtPolicySettings", () => {
     expect(apiMocks.updateAntigravityThoughtPolicySettings).toHaveBeenCalledWith({
       suppress_thought_only_stop: false,
       continue_thought_only: false,
+      continue_zero_output: false,
     });
+  });
+
+  it("saves completely zero-output continuation without enabling legacy A or B", async () => {
+    apiMocks.getAntigravityThoughtPolicySettings.mockResolvedValueOnce({
+      suppress_thought_only_stop: false, continue_thought_only: false,
+    });
+    const wrapper = mountCard();
+    await flushPromises();
+    expect(isOn(wrapper, ZERO)).toBe(false);
+    await wrapper.get(ZERO).trigger("click");
+    await wrapper.get(SAVE).trigger("click");
+    await flushPromises();
+    expect(apiMocks.updateAntigravityThoughtPolicySettings).toHaveBeenCalledWith({
+      suppress_thought_only_stop: false, continue_thought_only: false, continue_zero_output: true,
+    });
+    expect(isOn(wrapper, ZERO)).toBe(true);
+    expect(isOn(wrapper, SUPPRESS)).toBe(false);
+    expect(isOn(wrapper, CONTINUE)).toBe(false);
   });
 
   it("stays read-only after a load failure until the retry succeeds", async () => {
@@ -135,6 +156,7 @@ describe("AntigravityThoughtPolicySettings", () => {
     apiMocks.getAntigravityThoughtPolicySettings.mockResolvedValueOnce({
       suppress_thought_only_stop: true,
       continue_thought_only: true,
+      continue_zero_output: false,
     });
     await wrapper.get('[data-testid="antigravity-thought-policy-retry"]').trigger("click");
     await flushPromises();
@@ -184,7 +206,7 @@ describe("AntigravityThoughtPolicySettings", () => {
     expect(wrapper.get(CONTINUE).attributes("disabled")).toBeDefined();
     expect(wrapper.get(SAVE).text()).toBe("common.saving");
 
-    resolveUpdate({ suppress_thought_only_stop: false, continue_thought_only: true });
+    resolveUpdate({ suppress_thought_only_stop: false, continue_thought_only: true, continue_zero_output: false });
     await flushPromises();
 
     expect(isOn(wrapper, SUPPRESS)).toBe(false);

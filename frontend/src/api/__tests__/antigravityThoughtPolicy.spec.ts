@@ -25,6 +25,7 @@ describe("admin antigravity thought policy API", () => {
     const response: AntigravityThoughtPolicySettings = {
       suppress_thought_only_stop: true,
       continue_thought_only: false,
+      continue_zero_output: false,
     };
     get.mockResolvedValueOnce({ data: response });
 
@@ -36,6 +37,7 @@ describe("admin antigravity thought policy API", () => {
     const payload: AntigravityThoughtPolicySettings = {
       suppress_thought_only_stop: false,
       continue_thought_only: true,
+      continue_zero_output: true,
     };
     put.mockResolvedValueOnce({ data: payload });
 
@@ -45,6 +47,7 @@ describe("admin antigravity thought policy API", () => {
     expect(put).toHaveBeenCalledWith("/admin/settings/antigravity-thought-policy", {
       suppress_thought_only_stop: false,
       continue_thought_only: true,
+      continue_zero_output: true,
     });
   });
 });

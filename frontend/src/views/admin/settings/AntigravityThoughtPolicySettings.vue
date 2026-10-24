@@ -115,6 +115,34 @@
               />
             </div>
           </div>
+
+          <div class="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-900 dark:text-white">
+                {{ t("admin.settings.antigravityThoughtPolicy.zeroOutputLabel") }}
+              </p>
+              <p class="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.antigravityThoughtPolicy.zeroOutputHint") }}
+              </p>
+            </div>
+            <div class="flex shrink-0 items-center gap-2 self-start sm:pt-0.5">
+              <span
+                class="text-xs font-medium"
+                :class="policy.continue_zero_output ? 'text-primary-600 dark:text-primary-400' : 'text-gray-400 dark:text-gray-500'"
+                aria-hidden="true"
+              >
+                {{ policy.continue_zero_output ? t("admin.settings.antigravityThoughtPolicy.stateOn") : t("admin.settings.antigravityThoughtPolicy.stateOff") }}
+              </span>
+              <Toggle
+                id="antigravity-thought-policy-zero-output"
+                :model-value="policy.continue_zero_output"
+                :disabled="controlsDisabled"
+                :aria-label="t('admin.settings.antigravityThoughtPolicy.zeroOutputLabel')"
+                data-testid="antigravity-thought-policy-zero-output"
+                @update:model-value="setSwitch('continue_zero_output', $event)"
+              />
+            </div>
+          </div>
         </div>
 
         <p
@@ -180,7 +208,6 @@ import { extractApiErrorMessage } from "@/utils/apiError";
 import {
   ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS,
   normalizeAntigravityThoughtPolicySettings,
-  type AntigravityThoughtPolicyKey,
   type AntigravityThoughtPolicySettings,
 } from "@/types/antigravityThoughtPolicy";
 
@@ -197,7 +224,7 @@ const policy = ref<AntigravityThoughtPolicySettings>({
 
 /**
  * Settings that could not be read must not be overwritten: without a successful load
- * both switches stay read-only until the administrator retries.
+ * all switches stay read-only until the administrator retries.
  */
 const controlsDisabled = computed(
   () => saving.value || loadError.value || !loaded.value,
@@ -207,7 +234,7 @@ function applySettings(value: unknown): void {
   policy.value = normalizeAntigravityThoughtPolicySettings(value);
 }
 
-function setSwitch(key: AntigravityThoughtPolicyKey, value: boolean): void {
+function setSwitch(key: keyof AntigravityThoughtPolicySettings, value: boolean): void {
   if (controlsDisabled.value) return;
   policy.value = { ...policy.value, [key]: value };
 }

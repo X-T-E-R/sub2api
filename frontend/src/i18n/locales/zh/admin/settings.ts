@@ -1216,20 +1216,22 @@ export default {
         affectsHint: '保存只作用于新测试；已开始运行的测试仍使用最初发送的提示词。'
       },
       antigravityThoughtPolicy: {
-        title: 'Antigravity 纯思考响应',
-        description: '处理没有正文或工具的纯思考、空响应。终态抑制也处理有思考却缺结束标志的 EOF；两个开关独立，默认都关闭。',
+        title: 'Antigravity 响应接续',
+        description: '分别配置纯思考响应处理与完全零输出接续。各开关独立，默认关闭。',
         suppressLabel: '抑制纯思考完成信号',
         suppressHint: '保留思考、签名与用量，返回可重试错误而非成功结束，让客户端按自身重试策略接续。',
         continueLabel: '网关自动续写',
         continueHint: '补发收到的思考与签名，最多一次、不新增提示词。上游须支持以 model 回合结尾；拒绝时返回错误。',
-        independenceHint: '只开启抑制不会触发续写；两个都关闭时保持现有行为。',
+        zeroOutputLabel: '完全零输出接续',
+        zeroOutputHint: '仅在完整接收响应后，实际思考、正文、工具和多模态内容均为空且无拒绝或异常终态时，保留原请求并追加一次 user Continue.。空思考块和仅签名不算内容；再次为空或出错即停止。全局生效。',
+        independenceHint: '只开启抑制不会触发接续。完全零输出接续不改变已有纯思考处理，也不受账号的纯思考开关覆盖。',
         stateOn: '已开启',
         stateOff: '已关闭',
         affectsHint: '保存只作用于新请求；已开始处理的请求仍使用开始时的取值。',
-        save: '保存纯思考响应处理',
-        saved: 'Antigravity 纯思考响应处理已保存',
-        loadFailed: '加载 Antigravity 纯思考响应处理失败',
-        saveFailed: '保存 Antigravity 纯思考响应处理失败'
+        save: '保存响应接续设置',
+        saved: 'Antigravity 响应接续设置已保存',
+        loadFailed: '加载 Antigravity 响应接续设置失败',
+        saveFailed: '保存 Antigravity 响应接续设置失败'
       },
       codexSessionAffinity: {
         title: 'Codex 会话账号偏好',

@@ -1222,20 +1222,22 @@ export default {
         affectsHint: 'Saving applies to new tests only; a test that is already running keeps the prompt it started with.'
       },
       antigravityThoughtPolicy: {
-        title: 'Antigravity thought-only responses',
-        description: 'Handles Antigravity thinking-only or empty responses without visible text or tools. Suppression also covers thinking that reaches EOF without a finish reason. Both switches are independent and off by default.',
+        title: 'Antigravity response continuation',
+        description: 'Configure thinking-only handling and completely zero-output continuation separately. Each switch is independent and off by default.',
         suppressLabel: 'Suppress the thinking-only completion signal',
         suppressHint: 'Keeps thinking, signature and usage, then returns a retryable error instead of a successful finish. The client uses its normal retry policy.',
         continueLabel: 'Automatic gateway continuation',
         continueHint: 'Resends the received thinking and signature — at most one attempt, with no added prompt text. Requires upstream support for a final model turn; rejection is returned as an error.',
-        independenceHint: 'Suppression alone never triggers a continuation; with both off the current behavior is unchanged.',
+        zeroOutputLabel: 'Completely zero-output continuation',
+        zeroOutputHint: 'After a complete response with no actual thinking, text, tools or multimodal content, and no refusal or error terminal, preserve the original request and append one user Continue. Empty thinking blocks and signatures alone are not content. Another empty response or an error stops the attempt. Applies globally.',
+        independenceHint: 'Suppression alone never triggers continuation. Zero-output continuation leaves thinking-only handling unchanged and is not affected by account thinking-only overrides.',
         stateOn: 'On',
         stateOff: 'Off',
         affectsHint: 'Saving applies to new requests; a request already in flight keeps the values it started with.',
-        save: 'Save thought-only handling',
-        saved: 'Antigravity thought-only handling saved',
-        loadFailed: 'Failed to load Antigravity thought-only handling',
-        saveFailed: 'Failed to save Antigravity thought-only handling'
+        save: 'Save response continuation settings',
+        saved: 'Antigravity response continuation settings saved',
+        loadFailed: 'Failed to load Antigravity response continuation settings',
+        saveFailed: 'Failed to save Antigravity response continuation settings'
       },
       codexSessionAffinity: {
         title: 'Codex session account preference',

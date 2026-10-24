@@ -385,6 +385,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 					if nextResp != nil {
 						// 整条响应只出现一次终态：第一代的成功完成信号让位给追加生成。
 						flushHeld(true)
+						usage = &ClaudeUsage{} // The first generation is now in cont.baseUsage.
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner = startScanner(nextResp.Body)
@@ -1273,7 +1274,9 @@ returnResponse:
 		return nil, nil, fmt.Errorf("failed to parse upstream response: %w", err)
 	}
 
-	// Task24 A：只思考且上游正常完成时，抑制成功终态；思考、签名与 usage 保留。
+	// Finalize before suppressing the adapter's synthesized success, including a
+	// second zero-output generation whose terminal is missing while A is off.
+	noAnswer := cont.completeNoUsableAnswer(c, "claude_collect")
 	if cont != nil && cont.suppressFinalTerminal() {
 		claudeResp, err = withClaudeSuccessfulTerminalSuppressed(claudeResp)
 		if err != nil {
@@ -1281,7 +1284,7 @@ returnResponse:
 		}
 	}
 
-	if cont.completeNoUsableAnswer(c, "claude_collect") {
+	if noAnswer {
 		claudeResp, err = sjson.SetBytes(claudeResp, "type", "error")
 		if err == nil {
 			claudeResp, err = sjson.SetBytes(claudeResp, "error", cont.responseFailure().protocolError("messages"))

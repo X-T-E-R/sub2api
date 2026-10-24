@@ -1,30 +1,38 @@
 /**
  * Antigravity thought-only policy (Task24).
  *
- * Two independent switches, both off in source:
+ * Independent response switches, all off in source:
  * - `suppress_thought_only_stop` (A): a response that produced thinking only, with no
  *   visible text or tool call, keeps its thinking/signature/usage but does not emit the
  *   successful terminal signal, so the downstream client applies its own policy.
  * - `continue_thought_only` (B): the gateway resends the received thinking/signature as
  *   the assistant tail exactly once, with no added system/user text.
  *
- * The global pair persists server-side in one settings key. Each account may override
- * either switch through Account.Extra; a missing or null value inherits the global one,
- * and an explicit false always wins over a global true.
+ * - `continue_zero_output`: global-only, appends one user Continue. after clean EOF
+ *   with no actual output and no refusal/error terminal. Empty carriers and usage
+ *   metadata are not actual content. The single extra-call budget is shared with B.
+ *
+ * All switches persist server-side in one settings key. Accounts may override only
+ * A/B through Account.Extra; missing/null inherits and explicit false wins.
  */
 export interface AntigravityThoughtPolicySettings {
   suppress_thought_only_stop: boolean;
   continue_thought_only: boolean;
+  /** Global only: one user Continue. after a completed, strictly zero-output response. */
+  continue_zero_output: boolean;
 }
 
-/** Switch names as used by the settings API and by the flat Account.Extra keys. */
-export type AntigravityThoughtPolicyKey = keyof AntigravityThoughtPolicySettings;
+/** The legacy A/B keys are the only switches with account overrides. */
+export type AntigravityThoughtPolicyKey =
+  | "suppress_thought_only_stop"
+  | "continue_thought_only";
 
-/** Source default: both switches off, which preserves the pre-policy gateway behavior. */
+/** Source default: all switches off, preserving existing behavior. */
 export const ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS: Readonly<AntigravityThoughtPolicySettings> =
   Object.freeze({
     suppress_thought_only_stop: false,
     continue_thought_only: false,
+    continue_zero_output: false,
   });
 
 /**
@@ -59,10 +67,11 @@ function readOverrideFlag(raw: unknown): boolean | null {
 export function normalizeAntigravityThoughtPolicySettings(
   value: unknown,
 ): AntigravityThoughtPolicySettings {
-  const source = (value ?? {}) as Partial<Record<AntigravityThoughtPolicyKey, unknown>>;
+  const source = (value ?? {}) as Partial<Record<keyof AntigravityThoughtPolicySettings, unknown>>;
   return {
     suppress_thought_only_stop: source.suppress_thought_only_stop === true,
     continue_thought_only: source.continue_thought_only === true,
+    continue_zero_output: source.continue_zero_output === true,
   };
 }
 

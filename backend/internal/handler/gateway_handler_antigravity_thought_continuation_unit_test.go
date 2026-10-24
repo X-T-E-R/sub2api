@@ -35,6 +35,18 @@ func TestGatewayChatCompletionsAntigravityThoughtAppendedFailureKeepsBillingAndS
 	runGatewayThoughtPartialCase(t, gatewayThoughtCase{})
 }
 
+func TestGatewayChatCompletionsAntigravityZeroOutputContinueKeepsBillingAndSlots(t *testing.T) {
+	settings := service.NewSettingService(handlerThoughtSettingRepo{}, nil)
+	previous := service.ResolveAntigravityThoughtPolicy(context.Background(), nil)
+	t.Cleanup(func() {
+		require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings(previous)))
+	})
+	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{ContinueZeroOutput: true}))
+	// Existing helper checks a failed second dispatch: exactly 2 calls, one
+	// billing record with 8/0 usage and each user/account slot closed once.
+	runGatewayThoughtPartialCase(t, gatewayThoughtCase{empty: true, zeroOutput: true})
+}
+
 func TestGatewayChatCompletionsAntigravityNoUsableAnswerKeepsBillingAndSlots(t *testing.T) {
 	runGatewayThoughtPartialCase(t, gatewayThoughtCase{noAnswer: true})
 }
@@ -66,6 +78,7 @@ func TestGatewayChatCompletionsAntigravityProviderFailureKeepsBillingAndSlots(t 
 type gatewayThoughtCase struct {
 	noAnswer   bool
 	empty      bool
+	zeroOutput bool
 	generation string
 	wantCode   string
 	wantStatus int
@@ -83,6 +96,9 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 		ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive,
 	}
 	account := handlerThoughtAccount()
+	if tc.zeroOutput {
+		account.Extra[service.AntigravityContinueThoughtOnlyExtraKey] = false
+	}
 	if noAnswer {
 		account.Extra[service.AntigravitySuppressThoughtOnlyStopExtraKey] = true
 		account.Extra[service.AntigravityContinueThoughtOnlyExtraKey] = false

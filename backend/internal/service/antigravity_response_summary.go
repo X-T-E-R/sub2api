@@ -222,6 +222,7 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 		"account_id": c.account.ID, "protocol": c.delivery.Protocol, "stream": c.delivery.Stream,
 		"downstream_thinking_events": c.delivery.ThinkingEvents, "downstream_text_events": c.delivery.TextEvents, "downstream_tool_events": c.delivery.ToolEvents,
 		"effective_a": c.policy.SuppressThoughtOnlyStop, "effective_b": c.policy.ContinueThoughtOnly,
+		"effective_continue_zero_output": c.policy.ContinueZeroOutput, "zero_output_continuation_used": c.zeroOutputContinuationUsed(),
 		"a_decision": decision, "a_reason": reason, "outcome": reason, "terminal_authority": authority,
 	}
 	errorCode := ""
@@ -234,6 +235,12 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 	fields["continuation_eligible"] = errorCode == antigravityThinkingOnlyCode
 	if g != nil {
 		fields["upstream_finish_reason"] = safeAntigravityFinishReason(g.finishReason)
+		actualThinking := false
+		for _, part := range g.tail {
+			actualThinking = actualThinking || (part.thought && part.text != "")
+		}
+		fields["actual_upstream_thinking"] = actualThinking
+		fields["actual_upstream_content"] = g.hasContentCarrier || g.hasVisibleText || g.hasToolCall || g.hasGrounding
 		fields["detector_visible"] = g.hasVisibleText
 		fields["detector_tool"] = g.hasToolCall
 		fields["detector_grounding"] = g.hasGrounding

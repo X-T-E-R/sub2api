@@ -36,7 +36,7 @@ func TestAntigravityThoughtPolicySettingsAPI(t *testing.T) {
 	require.False(t, gjson.Get(r.Body.String(), "data.suppress_thought_only_stop").Bool())
 	require.False(t, gjson.Get(r.Body.String(), "data.continue_thought_only").Bool())
 
-	valid := `{"suppress_thought_only_stop":true,"continue_thought_only":false}`
+	valid := `{"suppress_thought_only_stop":true,"continue_thought_only":false,"continue_zero_output":false}`
 	r = call(http.MethodPut, valid)
 	require.Equal(t, http.StatusOK, r.Code)
 	require.True(t, gjson.Get(r.Body.String(), "data.suppress_thought_only_stop").Bool())
@@ -58,6 +58,8 @@ func TestAntigravityThoughtPolicySettingsAPI(t *testing.T) {
 		`{"suppress_thought_only_stop":"true","continue_thought_only":true}`,
 		`{"suppress_thought_only_stop":1,"continue_thought_only":true}`,
 		`{"suppress_thought_only_stop":true,"continue_thought_only":true,"unknown":true}`,
+		`{"suppress_thought_only_stop":true,"continue_thought_only":false,"continue_zero_output":null}`,
+		`{"suppress_thought_only_stop":true,"continue_thought_only":false,"continue_zero_output":"true"}`,
 		valid + `{}`,
 	} {
 		require.Equal(t, http.StatusBadRequest, call(http.MethodPut, body).Code, body)
@@ -66,13 +68,24 @@ func TestAntigravityThoughtPolicySettingsAPI(t *testing.T) {
 
 	// Explicit false/false round-trips: an off switch is stored, not dropped.
 	require.Equal(t, http.StatusOK, call(http.MethodPut, `{"suppress_thought_only_stop":false,"continue_thought_only":false}`).Code)
-	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false}`, repo.values[service.SettingKeyAntigravityThoughtPolicy])
+	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false,"continue_zero_output":false}`, repo.values[service.SettingKeyAntigravityThoughtPolicy])
+
+	// New switch is global, explicit, and survives a legacy A/B-only save.
+	r = call(http.MethodPut, `{"suppress_thought_only_stop":true,"continue_thought_only":false,"continue_zero_output":true}`)
+	require.Equal(t, http.StatusOK, r.Code)
+	require.True(t, gjson.Get(r.Body.String(), "data.continue_zero_output").Bool())
+	r = call(http.MethodPut, `{"suppress_thought_only_stop":false,"continue_thought_only":false}`)
+	require.Equal(t, http.StatusOK, r.Code)
+	require.True(t, gjson.Get(r.Body.String(), "data.continue_zero_output").Bool())
+	r = call(http.MethodPut, `{"suppress_thought_only_stop":false,"continue_thought_only":false,"continue_zero_output":false}`)
+	require.Equal(t, http.StatusOK, r.Code)
+	require.False(t, gjson.Get(r.Body.String(), "data.continue_zero_output").Bool())
 
 	// A failed write must not answer with values that were never persisted.
 	repo.writeErr = errors.New("write unavailable")
 	r = call(http.MethodPut, valid)
 	require.Equal(t, http.StatusInternalServerError, r.Code)
-	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false}`, repo.values[service.SettingKeyAntigravityThoughtPolicy])
+	require.Equal(t, `{"suppress_thought_only_stop":false,"continue_thought_only":false,"continue_zero_output":false}`, repo.values[service.SettingKeyAntigravityThoughtPolicy])
 	repo.writeErr = nil
 	r = call(http.MethodGet, "")
 	require.Equal(t, http.StatusOK, r.Code)

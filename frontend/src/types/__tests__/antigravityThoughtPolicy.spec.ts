@@ -21,6 +21,7 @@ describe("antigravity thought policy contract", () => {
     expect(ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS).toEqual({
       suppress_thought_only_stop: false,
       continue_thought_only: false,
+      continue_zero_output: false,
     });
   });
 
@@ -51,6 +52,7 @@ describe("antigravity thought policy contract", () => {
 
   it("resolves each switch independently and lets an explicit false win", () => {
     const globalOn: AntigravityThoughtPolicySettings = {
+      ...ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS,
       suppress_thought_only_stop: true,
       continue_thought_only: true,
     };
@@ -58,10 +60,10 @@ describe("antigravity thought policy contract", () => {
     expect(resolveAntigravityThoughtPolicy({}, globalOn)).toEqual(globalOn);
     expect(
       resolveAntigravityThoughtPolicy({ [SUPPRESS_KEY]: false }, globalOn),
-    ).toEqual({ suppress_thought_only_stop: false, continue_thought_only: true });
+    ).toEqual({ ...globalOn, suppress_thought_only_stop: false });
     expect(
       resolveAntigravityThoughtPolicy({ [CONTINUE_KEY]: false }, globalOn),
-    ).toEqual({ suppress_thought_only_stop: true, continue_thought_only: false });
+    ).toEqual({ ...globalOn, continue_thought_only: false });
     expect(
       resolveAntigravityThoughtPolicy(
         { [SUPPRESS_KEY]: false, [CONTINUE_KEY]: false },
@@ -71,12 +73,17 @@ describe("antigravity thought policy contract", () => {
     expect(
       resolveAntigravityThoughtPolicy(
         {},
-        { suppress_thought_only_stop: false, continue_thought_only: false },
+        { ...ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS },
       ),
     ).toEqual(ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS);
     expect(
       resolveAntigravityThoughtPolicy({ [CONTINUE_KEY]: true }, ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS),
-    ).toEqual({ suppress_thought_only_stop: false, continue_thought_only: true });
+    ).toEqual({ ...ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS, continue_thought_only: true });
+  });
+
+  it("keeps zero-output continuation global-only", () => {
+    const global = { ...ANTIGRAVITY_THOUGHT_POLICY_DEFAULTS, continue_zero_output: true };
+    expect(resolveAntigravityThoughtPolicy({ antigravity_continue_zero_output: false }, global)).toEqual(global);
   });
 
   it("writes a tri-state without touching other account extra keys", () => {

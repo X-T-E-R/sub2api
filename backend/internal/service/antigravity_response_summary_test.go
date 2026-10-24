@@ -34,6 +34,8 @@ func TestAntigravityResponseSummaryIsOnceAndPayloadFree(t *testing.T) {
 	require.EqualValues(t, 1, fields["downstream_thinking_events"])
 	require.EqualValues(t, 0, fields["downstream_text_events"])
 	require.EqualValues(t, 0, fields["downstream_tool_events"])
+	require.Equal(t, true, fields["actual_upstream_thinking"])
+	require.Equal(t, true, fields["actual_upstream_content"])
 	require.Equal(t, true, fields["effective_a"])
 	require.Equal(t, false, fields["effective_b"])
 	require.Equal(t, "messages", fields["protocol"])
@@ -105,4 +107,25 @@ func TestAntigravityResponseSummaryCountsActualProtocolContent(t *testing.T) {
 			require.Equal(t, tt.tool, s.ToolEvents)
 		})
 	}
+}
+
+func TestAntigravityResponseSummarySeparatesEmptyCarrierFromActualThinking(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	ctx := logger.IntoContext(context.Background(), zap.New(core))
+	line := `data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"private-signature-only"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"thoughtsTokenCount":3}}}`
+	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(line)}}
+	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{}, upstream)
+	body, c, _ := newAntigravityThoughtClaudeRequest(true)
+	c.Request = c.Request.WithContext(ctx)
+	_, err := svc.Forward(ctx, c, antigravityThoughtAccount(nil), body, false)
+	require.NoError(t, err)
+	entries := logs.FilterMessage("antigravity.response_summary").All()
+	require.Len(t, entries, 1)
+	fields := entries[0].ContextMap()
+	require.Equal(t, false, fields["actual_upstream_thinking"])
+	require.Equal(t, false, fields["actual_upstream_content"])
+	require.Equal(t, false, fields["zero_output_continuation_used"])
+	encoded, err := json.Marshal(fields)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "private-signature-only")
 }

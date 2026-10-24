@@ -33,6 +33,9 @@ import (
 // A also reports empty STOP or thinking-only clean EOF without a terminal as
 // retryable failures. B never continues either shape. Read errors, cancellations,
 // refusals, grounding and output-limit stops retain their own semantics.
+// ContinueZeroOutput independently appends one user Continue. after a clean EOF
+// candidate with no actual output (STOP or missing finish), excluding explicit
+// failure terminals. It shares the one-append budget without changing A/B.
 
 // antigravitySuccessfulFinishReason is the only normal completion eligible for B.
 // A may instead report missing-terminal thinking at clean EOF as a partial failure.
@@ -162,11 +165,15 @@ func (p antigravityThoughtTailPart) rebuildWithoutRaw() []byte {
 // antigravityThoughtGeneration observes one upstream generation: its terminal signal, the
 // thinking it produced, whether it produced visible content or tool calls, and its usage.
 type antigravityThoughtGeneration struct {
-	sawResponse  bool
-	sawPayload   bool
-	hasThinking  bool
-	finishReason string
-	readFailed   bool
+	sawResponse bool
+	sawPayload  bool
+	// Actual content excludes the zero-output path. Empty placeholders and
+	// signature-only carriers do not; explicit upstream errors are separate.
+	hasContentCarrier bool
+	hasUpstreamError  bool
+	hasThinking       bool
+	finishReason      string
+	readFailed        bool
 
 	// tail holds every received thinking part and signature carrier in the original order,
 	// verbatim: a signature is never moved onto another part, a carrier is never merged into
@@ -217,6 +224,7 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 		return
 	}
 	g.sawPayload = true
+	g.hasUpstreamError = g.hasUpstreamError || parsed.Get("error").Exists()
 	if reason := parsed.Get("promptFeedback.blockReason").String(); reason != "" && reason != "BLOCK_REASON_UNSPECIFIED" {
 		g.hasRefusal = true
 	}
@@ -239,11 +247,17 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 	for _, part := range candidate.Get("content.parts").Array() {
 		g.observePart(part)
 	}
+	for _, key := range []string{"groundingMetadata", "citationMetadata"} {
+		if metadata := candidate.Get(key); metadata.IsObject() && len(metadata.Map()) > 0 {
+			g.hasContentCarrier = true
+		}
+	}
 	g.observeGrounding(candidate.Get("groundingMetadata"))
 	g.observeUsageMetadata(parsed)
 }
 
 func (g *antigravityThoughtGeneration) observePart(part gjson.Result) {
+	g.hasContentCarrier = g.hasContentCarrier || antigravityPartHasContentCarrier(part)
 	if !part.IsObject() {
 		return
 	}
@@ -541,7 +555,7 @@ func (c *antigravityThoughtContinuation) withholdSuccessfulTerminal() bool {
 	if c.generation.failureCode(c.policy) != "" {
 		return true
 	}
-	return c.policy.ContinueThoughtOnly && !c.extraUsed && c.generation.thoughtOnlySuccessful()
+	return c.canContinue()
 }
 
 // suppressFinalTerminal reports whether the response must end without a successful
@@ -574,13 +588,11 @@ func (c *antigravityThoughtContinuation) effectiveGeneration() *antigravityThoug
 // canContinue reports whether the single appended generation is still available for this
 // response.
 func (c *antigravityThoughtContinuation) canContinue() bool {
-	if c == nil || !c.policy.ContinueThoughtOnly || c.extraUsed || c.generation == nil {
+	if c == nil || c.extraUsed || c.generation == nil {
 		return false
 	}
-	if !c.generation.thoughtOnlySuccessful() {
-		return false
-	}
-	return c.generation.replayableTail() != nil
+	return (c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful()) ||
+		(c.policy.ContinueThoughtOnly && c.generation.thoughtOnlySuccessful())
 }
 
 // cumulativeUsage folds the finished generations into the usage of the generation in
@@ -596,8 +608,9 @@ func (c *antigravityThoughtContinuation) cumulativeUsage(last ClaudeUsage) Claud
 //
 // The appended request reuses the exact original upstream request envelope (same project,
 // requestId, model, session, system instruction, tools, generation config and headers) and
-// only appends the received thinking/signature as the final model turn. It is sent through
-// the normal HTTPUpstream with the same account, proxy and concurrency slot; the retry
+// only appends either one user Continue. for zero output, or B's received thinking
+// model tail. It is sent through the normal HTTPUpstream with the same account,
+// proxy and concurrency slot; the retry
 // loop, scheduler, sticky identity and capture range are deliberately not re-entered.
 func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previous *http.Response) (*http.Response, ClaudeUsage, error) {
 	if c == nil {
@@ -606,8 +619,16 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	if !c.canContinue() {
 		return nil, ClaudeUsage{}, errAntigravityThoughtContinuationUnavailable
 	}
-	tail := c.generation.replayableTail()
-	body, err := appendAntigravityThinkingTail(c.body, tail)
+	if err := ctx.Err(); err != nil {
+		return nil, ClaudeUsage{}, err
+	}
+	var body []byte
+	var err error
+	if c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful() {
+		body, err = appendAntigravityUserContinue(c.body)
+	} else {
+		body, err = appendAntigravityThinkingTail(c.body, c.generation.replayableTail())
+	}
 	if err != nil {
 		return nil, ClaudeUsage{}, err
 	}
