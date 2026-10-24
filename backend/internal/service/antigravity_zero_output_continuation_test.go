@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func forwardZeroFixture(t *testing.T, svc *AntigravityGatewayService, protocol string, stream bool) (*ForwardResult, error, string) {
+func forwardZeroFixture(t *testing.T, svc *AntigravityGatewayService, protocol string, stream bool) (*ForwardResult, string, error) {
 	t.Helper()
 	body := []byte(`{"model":"client-alias","stream":` + fmt.Sprint(stream) + `,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"question"}],"input":"question","contents":[{"role":"user","parts":[{"text":"question"}]}]}`)
 	c, recorder := newAntigravityCompatContext(http.MethodPost, "/fixture", body)
@@ -36,7 +36,7 @@ func forwardZeroFixture(t *testing.T, svc *AntigravityGatewayService, protocol s
 		}
 		result, err = svc.ForwardGemini(context.Background(), c, account, "gemini-3.1-pro-high", action, stream, body, false)
 	}
-	return result, err, recorder.Body.String()
+	return result, recorder.Body.String(), err
 }
 
 func TestAntigravityZeroOutputContinueProtocols(t *testing.T) {
@@ -47,7 +47,7 @@ func TestAntigravityZeroOutputContinueProtocols(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/stream=%t/on=%t", protocol, stream, on), func(t *testing.T) {
 					upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(antigravityEmptyStopLine), antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine)}}
 					svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: on}, upstream)
-					result, err, wire := forwardZeroFixture(t, svc, protocol, stream)
+					result, wire, err := forwardZeroFixture(t, svc, protocol, stream)
 					if !on && stream && (protocol == "chat" || protocol == "responses") {
 						// Legacy A/B-off compat streams keep their existing empty-stream
 						// recovery signal; the new disabled switch must not alter it.
@@ -93,7 +93,7 @@ func TestAntigravityZeroOutputContinueEmptyPlaceholders(t *testing.T) {
 			antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine),
 		}}
 		svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true}, upstream)
-		_, err, wire := forwardZeroFixture(t, svc, "messages", true)
+		_, wire, err := forwardZeroFixture(t, svc, "messages", true)
 		require.NoError(t, err)
 		require.Equal(t, 2, upstream.callCount)
 		require.Contains(t, wire, "answer")
@@ -107,7 +107,7 @@ func TestAntigravityZeroOutputContinueMissingTerminalAndPositiveUsage(t *testing
 			t.Run(fmt.Sprintf("%s/stream=%t", protocol, stream), func(t *testing.T) {
 				upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(line), antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine)}}
 				svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true}, upstream)
-				result, err, wire := forwardZeroFixture(t, svc, protocol, stream)
+				result, wire, err := forwardZeroFixture(t, svc, protocol, stream)
 				require.NoError(t, err)
 				require.NotNil(t, result)
 				require.Equal(t, 2, upstream.callCount)
@@ -126,7 +126,7 @@ func TestAntigravityZeroOutputContinueMissingTerminalAndPositiveUsage(t *testing
 		antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine),
 	}}
 	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true}, upstream)
-	result, err, _ := forwardZeroFixture(t, svc, "messages", true)
+	result, _, err := forwardZeroFixture(t, svc, "messages", true)
 	require.NoError(t, err)
 	require.Equal(t, 2, upstream.callCount)
 	require.Equal(t, 28, result.Usage.InputTokens)
@@ -196,7 +196,7 @@ func TestAntigravityZeroOutputContinueSecondFailureStops(t *testing.T) {
 					}
 					upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(antigravityEmptyStopLine), next}}
 					svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true, ContinueThoughtOnly: true}, upstream)
-					result, err, wire := forwardZeroFixture(t, svc, protocol, stream)
+					result, wire, err := forwardZeroFixture(t, svc, protocol, stream)
 					require.Error(t, err)
 					require.NotNil(t, result)
 					require.Equal(t, 2, upstream.callCount)
