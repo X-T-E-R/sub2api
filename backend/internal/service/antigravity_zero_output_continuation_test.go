@@ -122,7 +122,7 @@ func TestAntigravityZeroOutputContinueMissingTerminalAndPositiveUsage(t *testing
 	// UNSPECIFIED has the same clean-EOF eligibility, and trailing positive usage
 	// does not turn empty parts into actual output.
 	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{
-		antigravityThoughtStreamResponse(`data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}}`, `data: {"response":{"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`),
+		antigravityThoughtStreamResponse(`data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"FINISH_REASON_UNSPECIFIED","groundingMetadata":{"webSearchQueries":[],"groundingChunks":[]}}]}}`, `data: {"response":{"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`),
 		antigravityThoughtStreamResponse(antigravityThoughtGenerationTwoLine),
 	}}
 	svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true}, upstream)

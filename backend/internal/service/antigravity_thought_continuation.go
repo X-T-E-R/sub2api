@@ -247,11 +247,6 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 	for _, part := range candidate.Get("content.parts").Array() {
 		g.observePart(part)
 	}
-	for _, key := range []string{"groundingMetadata", "citationMetadata"} {
-		if metadata := candidate.Get(key); metadata.IsObject() && len(metadata.Map()) > 0 {
-			g.hasContentCarrier = true
-		}
-	}
 	g.observeGrounding(candidate.Get("groundingMetadata"))
 	g.observeUsageMetadata(parsed)
 }
