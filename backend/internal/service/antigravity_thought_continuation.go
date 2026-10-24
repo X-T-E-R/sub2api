@@ -235,7 +235,7 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 	}
 
 	candidate := candidates.Array()[0]
-	g.sawResponse = true
+	g.sawResponse = g.sawResponse || candidate.IsObject()
 	for _, rating := range candidate.Get("safetyRatings").Array() {
 		if rating.Get("blocked").Bool() {
 			g.hasRefusal = true

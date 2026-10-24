@@ -162,6 +162,7 @@ func TestAntigravityZeroOutputContinueExcludesAnyOutputAndNonSTOP(t *testing.T) 
 		})
 	}
 	for name, line := range map[string]string{
+		"null candidate": `data: {"response":{"candidates":[null]}}`,
 		"safety rating":  `data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP","safetyRatings":[{"blocked":true}]}]}}`,
 		"prompt refusal": `data: {"response":{"promptFeedback":{"blockReason":"SAFETY"}}}`,
 		"grounding":      `data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["query"]}}]}}`,
