@@ -380,6 +380,7 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 		body         string
 		wantUpstream int
 		wantStop     string
+		wantCode     string
 	}{
 		{
 			name:         "output limit",
@@ -391,13 +392,13 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 			name:         "refusal",
 			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `]},"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}}`,
 			wantUpstream: 1,
-			wantStop:     `"stop_reason":"end_turn"`,
+			wantCode:     "antigravity_safety",
 		},
 		{
 			name:         "blocked thinking without terminal",
 			body:         `data: {"response":{"candidates":[{"content":{"parts":[` + thinkingPart + `]},"safetyRatings":[{"blocked":true}]}]}}`,
 			wantUpstream: 1,
-			wantStop:     `"stop_reason":"end_turn"`,
+			wantCode:     "antigravity_safety",
 		},
 		{
 			name:         "grounded thinking without terminal",
@@ -409,7 +410,7 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 			name:         "empty refusal",
 			body:         `data: {"response":{"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":4}}}`,
 			wantUpstream: 1,
-			wantStop:     `"stop_reason":"end_turn"`,
+			wantCode:     "antigravity_safety",
 		},
 		{
 			name:         "empty output limit",
@@ -443,8 +444,17 @@ func TestAntigravityThoughtPolicyLeavesNonEligibleResponsesUntouched(t *testing.
 
 			_, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
 
-			require.NoError(t, err)
 			require.Equal(t, tt.wantUpstream, upstream.callCount, "ineligible responses are never continued")
+			if tt.wantCode != "" {
+				// A refusal ends explicitly and stays non-retryable; it never becomes a
+				// synthesized end_turn and never starts the appended generation.
+				require.True(t, IsAntigravityNoUsableAnswerError(err), "err=%v", err)
+				require.Equal(t, tt.wantCode, antigravityThoughtContinuationFromGin(c).responseFailure().Code)
+				require.NotContains(t, recorder.Body.String(), `"stop_reason":"end_turn"`)
+				require.Contains(t, recorder.Body.String(), `"code":"`+tt.wantCode+`"`)
+				return
+			}
+			require.NoError(t, err)
 			require.Contains(t, recorder.Body.String(), tt.wantStop)
 		})
 	}
@@ -706,7 +716,7 @@ func TestAntigravityThoughtSuppressionOnCompatStreams(t *testing.T) {
 			// A failure explicitly ends as response.failed and retains real usage,
 			// rather than allowing an intermediary to synthesize successful completion.
 			absent:    []string{"response.completed"},
-			expectOne: []string{"response.output_item.done", "response.created", "encrypted_content", "response.failed", `"status":"failed"`, `"input_tokens":8`, `"code":"server_error"`},
+			expectOne: []string{"response.output_item.done", "response.created", "encrypted_content", "response.failed", `"status":"failed"`, `"input_tokens":8`, `"code":"antigravity_thinking_only"`},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

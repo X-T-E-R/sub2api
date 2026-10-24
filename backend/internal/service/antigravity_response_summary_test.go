@@ -38,8 +38,10 @@ func TestAntigravityResponseSummaryIsOnceAndPayloadFree(t *testing.T) {
 	require.Equal(t, false, fields["effective_b"])
 	require.Equal(t, "messages", fields["protocol"])
 	require.Equal(t, "STOP", fields["upstream_finish_reason"])
-	require.Equal(t, "retryable_error", fields["a_decision"])
+	require.Equal(t, "explicit_error", fields["a_decision"])
 	require.Equal(t, "thinking_only", fields["a_reason"])
+	require.Equal(t, "antigravity_thinking_only", fields["error_code"])
+	require.Equal(t, true, fields["continuation_eligible"])
 	require.Equal(t, "public-gateway-id", fields["request_id"])
 	require.Equal(t, "public-client-id", fields["client_request_id"])
 	for key, value := range fields {
@@ -75,7 +77,10 @@ func TestAntigravityResponseSummaryRecordsPolicyOffUsableContent(t *testing.T) {
 	entries := logs.FilterMessage("antigravity.response_summary").All()
 	require.Len(t, entries, 1)
 	require.EqualValues(t, 1, entries[0].ContextMap()["downstream_text_events"])
-	require.Equal(t, "policy_off", entries[0].ContextMap()["a_reason"])
+	require.Equal(t, "policy_off", entries[0].ContextMap()["a_decision"])
+	require.Equal(t, "visible_content", entries[0].ContextMap()["a_reason"])
+	require.Equal(t, "", entries[0].ContextMap()["error_code"])
+	require.Equal(t, false, entries[0].ContextMap()["continuation_eligible"])
 }
 
 func TestAntigravityResponseSummaryCountsActualProtocolContent(t *testing.T) {

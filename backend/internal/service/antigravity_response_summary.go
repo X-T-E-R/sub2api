@@ -195,44 +195,43 @@ func (c *antigravityThoughtContinuation) startResponse(ginCtx *gin.Context, prot
 }
 func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[string]any {
 	g := c.effectiveGeneration()
-	reason := "eligible_not_finalized"
+	reason := g.outcome()
 	decision := "skipped"
-	switch {
-	case c.continuationFailed:
-		reason = "continuation_failed"
-	case c.noUsableAnswerErr != nil:
-		decision = "retryable_error"
-		reason = "thinking_only"
-		if g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED" {
-			reason = "missing_terminal"
-		} else if !g.thoughtOnlySuccessful() {
-			reason = "empty"
-		}
-	case !c.policy.SuppressThoughtOnlyStop:
-		reason = "policy_off"
-	case ginCtx.Request.Context().Err() != nil:
+	if ginCtx.Request.Context().Err() != nil {
 		reason = "canceled"
-	case c.delivery.ProtocolError:
+	} else if c.continuationFailed {
+		reason = "continuation_failed"
+	} else if c.noUsableAnswerErr != nil {
+		decision = "explicit_error"
+	} else if !c.policy.SuppressThoughtOnlyStop {
+		decision = "policy_off"
+	} else if c.delivery.ProtocolError && (g == nil || !g.readFailed) {
 		reason = "protocol_error"
-	case g == nil || !g.sawResponse:
-		reason = "no_candidate"
-	case g.hasRefusal:
-		reason = "refusal"
-	case g.hasVisibleText:
-		reason = "visible_content"
-	case g.hasToolCall:
-		reason = "tool"
-	case g.hasGrounding:
-		reason = "grounding"
-	case !g.noUsableAnswerEligible():
-		reason = "explicit_terminal"
+	}
+	authority := "missing"
+	if g != nil {
+		if g.readFailed {
+			authority = "read_error"
+		} else if g.finishReason != "" && g.finishReason != "FINISH_REASON_UNSPECIFIED" {
+			authority = "explicit"
+		} else if g.hasVisibleText || g.hasToolCall || g.hasGrounding {
+			authority = "clean_eof_compat"
+		}
 	}
 	fields := map[string]any{
 		"account_id": c.account.ID, "protocol": c.delivery.Protocol, "stream": c.delivery.Stream,
 		"downstream_thinking_events": c.delivery.ThinkingEvents, "downstream_text_events": c.delivery.TextEvents, "downstream_tool_events": c.delivery.ToolEvents,
 		"effective_a": c.policy.SuppressThoughtOnlyStop, "effective_b": c.policy.ContinueThoughtOnly,
-		"a_decision": decision, "a_reason": reason,
+		"a_decision": decision, "a_reason": reason, "outcome": reason, "terminal_authority": authority,
 	}
+	errorCode := ""
+	if c.noUsableAnswerErr != nil {
+		errorCode = c.noUsableAnswerErr.Code
+	}
+	fields["error_code"] = errorCode
+	// Only an authoritative clean-EOF thinking-only response is a candidate for
+	// one client-continuation decision. Nothing else is pre-authorised to retry.
+	fields["continuation_eligible"] = errorCode == antigravityThinkingOnlyCode
 	if g != nil {
 		fields["upstream_finish_reason"] = safeAntigravityFinishReason(g.finishReason)
 		fields["detector_visible"] = g.hasVisibleText
@@ -263,7 +262,7 @@ func stringKey(key ctxkey.Key) string {
 }
 func safeAntigravityFinishReason(value string) string {
 	switch value {
-	case "", "STOP", "FINISH_REASON_UNSPECIFIED", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS":
+	case "", "STOP", "FINISH_REASON_UNSPECIFIED", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL", "MALFORMED_RESPONSE", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS":
 		return value
 	default:
 		return "UNRECOGNIZED"

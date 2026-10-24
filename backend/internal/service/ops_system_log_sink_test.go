@@ -429,7 +429,7 @@ func TestOpsSystemLogSink_AntigravitySummaryIndexAndFlushProjection(t *testing.T
 		think, text := 0, 1
 		if i == 1 {
 			id = "recovery-public-id"
-			decision = "retryable_error"
+			decision = "explicit_error"
 			reason = "thinking_only"
 			think, text = 1, 0
 		}

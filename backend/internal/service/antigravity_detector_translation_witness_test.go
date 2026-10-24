@@ -79,6 +79,14 @@ func TestAntigravityRenderableGroundingAndContentRemainUsable(t *testing.T) {
 			svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true}, upstream)
 			body, c, recorder := newAntigravityThoughtClaudeRequest(true)
 			_, err := svc.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)
+			if shape.finish == "SAFETY" {
+				// A refusal is a distinct non-retryable terminal, not a normal end_turn.
+				require.True(t, IsAntigravityNoUsableAnswerError(err))
+				require.Equal(t, "antigravity_safety", antigravityThoughtContinuationFromGin(c).responseFailure().Code)
+				require.NotContains(t, recorder.Body.String(), `"stop_reason":"end_turn"`)
+				require.Contains(t, recorder.Body.String(), `"code":"antigravity_safety"`)
+				return
+			}
 			require.NoError(t, err)
 			require.Contains(t, recorder.Body.String(), shape.want)
 			require.NotContains(t, recorder.Body.String(), "event: error")

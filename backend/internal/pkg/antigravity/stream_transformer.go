@@ -57,6 +57,9 @@ type StreamingProcessor struct {
 	// message_delta（stop_reason 为 null，且不发 message_stop）：下游仍能拿到真实用量，
 	// 但不会被当成成功完成。
 	usageOnlyTerminal bool
+	// terminalFailureSent makes abnormal Finish idempotent without changing the
+	// existing successful-terminal withholding policy.
+	terminalFailureSent bool
 }
 
 // NewStreamingProcessor 创建流式响应处理器
@@ -114,6 +117,7 @@ func (p *StreamingProcessor) ResetGenerationUsage() {
 	p.cacheReadTokens = 0
 	p.imageOutputTokens = 0
 	p.finishReason = ""
+	p.terminalFailureSent = false
 }
 
 // CurrentUsage reports the usage accumulated for the generation in flight plus any
@@ -170,9 +174,15 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 		return nil
 	}
 
-	// 解包 v1internal 响应
+	// 解包 v1internal 响应。直接 Gemini 响应也可能没有 candidates（例如
+	// promptFeedback block），因此用 response 字段区分两种 wire 形状。
+	var envelope struct {
+		Response json.RawMessage `json:"response"`
+	}
+	hasResponseEnvelope := json.Unmarshal([]byte(data), &envelope) == nil && len(envelope.Response) > 0 && string(envelope.Response) != "null"
+
 	var v1Resp V1InternalResponse
-	if err := json.Unmarshal([]byte(data), &v1Resp); err != nil {
+	if err := json.Unmarshal([]byte(data), &v1Resp); err != nil || (!hasResponseEnvelope && len(v1Resp.Response.Candidates) == 0) {
 		// 尝试直接解析为 GeminiResponse
 		var directResp GeminiResponse
 		if err2 := json.Unmarshal([]byte(data), &directResp); err2 != nil {
@@ -214,24 +224,17 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 		p.captureGrounding(geminiResp.Candidates[0].GroundingMetadata)
 	}
 
-	// 检查是否结束
-	if len(geminiResp.Candidates) > 0 {
-		finishReason := geminiResp.Candidates[0].FinishReason
-		if finishReason == "MALFORMED_FUNCTION_CALL" {
-			log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in stream for model %s", p.originalModel)
-			if geminiResp.Candidates[0].Content != nil {
-				if b, err := json.Marshal(geminiResp.Candidates[0].Content); err == nil {
-					log.Printf("[Antigravity] Malformed content: %s", string(b))
-				}
-			}
-		}
-		if finishReason != "" {
-			// Gemini can send usage-only frames after finishReason. Keep streaming
-			// content, but emit the Anthropic terminal only when Finish drains EOF,
-			// otherwise clients stop before receiving the final cache accounting.
-			p.finishReason = finishReason
-			_, _ = result.Write(p.finishContent())
-		}
+	// 检查是否结束。promptFeedback block 可能没有 candidate，仍然是显式安全终态。
+	finishReason := terminalFailureReason(geminiResp)
+	if finishReason == "MALFORMED_FUNCTION_CALL" {
+		log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in stream for model %s", p.originalModel)
+	}
+	if finishReason != "" {
+		// Gemini can send usage-only frames after finishReason. Keep streaming
+		// content, but emit the Anthropic terminal only when Finish drains EOF,
+		// otherwise clients stop before receiving the final cache accounting.
+		p.finishReason = finishReason
+		_, _ = result.Write(p.finishContent())
 	}
 
 	return result.Bytes()
@@ -248,7 +251,7 @@ func (p *StreamingProcessor) Finish() ([]byte, *ClaudeUsage) {
 	}
 
 	var result bytes.Buffer
-	if !p.messageStopSent {
+	if !p.messageStopSent && !p.terminalFailureSent {
 		_, _ = result.Write(p.emitFinish(p.finishReason))
 	}
 
@@ -645,7 +648,10 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 	var result bytes.Buffer
 	_, _ = result.Write(p.finishContent())
 
-	// 确定 stop_reason
+	failureCode := TerminalFailureCode(finishReason)
+
+	// 外部 withhold 是 A/B continuation 的既有策略：只按 usage-only 设置处理，
+	// 统一错误事件由 service 负责，converter 不重复发送。
 	if p.withholdSuccessfulTerminal {
 		// Task24: 下游需要自行决定是否接续，因此成功终态（成功 stop_reason 与
 		// message_stop）不发；内容块收尾、trailing signature 与 grounding 文本已在上方
@@ -657,11 +663,22 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 		return result.Bytes()
 	}
 
+	if failureCode != "" {
+		// An abnormal explicit terminal is a billable partial response. Preserve
+		// all content/signature carriers and usage, but never emit a successful
+		// stop_reason or message_stop before the standard Anthropic error event.
+		_, _ = result.Write(p.emitUsageOnlyDelta())
+		_, _ = result.Write(p.emitTerminalFailure(failureCode))
+		p.terminalFailureSent = true
+		return result.Bytes()
+	}
+
 	stopReason := "end_turn"
-	if p.usedTool {
-		stopReason = "tool_use"
-	} else if finishReason == "MAX_TOKENS" {
+	if finishReason == "MAX_TOKENS" {
+		// MAX_TOKENS takes precedence over a partial tool call.
 		stopReason = "max_tokens"
+	} else if p.usedTool {
+		stopReason = "tool_use"
 	}
 
 	usage := p.CurrentUsage()
@@ -716,6 +733,17 @@ func (p *StreamingProcessor) emitUsageOnlyDelta() []byte {
 	}
 
 	return p.formatSSE("message_delta", deltaEvent)
+}
+
+func (p *StreamingProcessor) emitTerminalFailure(code string) []byte {
+	return p.formatSSE("error", ClaudeError{
+		Type: "error",
+		Error: ErrorDetail{
+			Type:    "api_error",
+			Code:    code,
+			Message: TerminalFailureMessage(code),
+		},
+	})
 }
 
 // formatSSE 格式化 SSE 事件

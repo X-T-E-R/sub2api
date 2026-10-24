@@ -104,13 +104,14 @@ type ImageSource struct {
 // ClaudeResponse Claude Messages API 响应
 type ClaudeResponse struct {
 	ID           string              `json:"id"`
-	Type         string              `json:"type"` // "message"
+	Type         string              `json:"type"` // "message" or "error"
 	Role         string              `json:"role"` // "assistant"
 	Model        string              `json:"model"`
 	Content      []ClaudeContentItem `json:"content"`
-	StopReason   string              `json:"stop_reason,omitempty"`   // end_turn, tool_use, max_tokens
+	StopReason   *string             `json:"stop_reason"`             // null for an upstream terminal failure
 	StopSequence *string             `json:"stop_sequence,omitempty"` // null 或具体值
 	Usage        ClaudeUsage         `json:"usage"`
+	Error        *ErrorDetail        `json:"error,omitempty"`
 }
 
 // ClaudeContentItem Claude 响应内容项
@@ -162,6 +163,7 @@ type ClaudeError struct {
 // ErrorDetail 错误详情
 type ErrorDetail struct {
 	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 

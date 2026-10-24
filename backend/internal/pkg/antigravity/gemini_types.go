@@ -149,10 +149,29 @@ type V1InternalResponse struct {
 
 // GeminiResponse Gemini 响应
 type GeminiResponse struct {
-	Candidates    []GeminiCandidate    `json:"candidates,omitempty"`
-	UsageMetadata *GeminiUsageMetadata `json:"usageMetadata,omitempty"`
-	ResponseID    string               `json:"responseId,omitempty"`
-	ModelVersion  string               `json:"modelVersion,omitempty"`
+	Candidates     []GeminiCandidate     `json:"candidates,omitempty"`
+	PromptFeedback *GeminiPromptFeedback `json:"promptFeedback,omitempty"`
+	UsageMetadata  *GeminiUsageMetadata  `json:"usageMetadata,omitempty"`
+	ResponseID     string                `json:"responseId,omitempty"`
+	ModelVersion   string                `json:"modelVersion,omitempty"`
+}
+
+// GeminiPromptFeedback describes a request-level block. Gemini can return this
+// object without candidates when the prompt is rejected before generation.
+type GeminiPromptFeedback struct {
+	BlockReason   string               `json:"blockReason,omitempty"`
+	SafetyRatings []GeminiSafetyRating `json:"safetyRatings,omitempty"`
+}
+
+// GeminiSafetyRating carries the provider's safety metadata without making it
+// part of the terminal error message or logs.
+type GeminiSafetyRating struct {
+	Category         string  `json:"category,omitempty"`
+	Probability      string  `json:"probability,omitempty"`
+	ProbabilityScore float64 `json:"probabilityScore,omitempty"`
+	Severity         string  `json:"severity,omitempty"`
+	SeverityScore    float64 `json:"severityScore,omitempty"`
+	Blocked          bool    `json:"blocked,omitempty"`
 }
 
 // GeminiCandidate Gemini 候选响应
@@ -161,6 +180,7 @@ type GeminiCandidate struct {
 	FinishReason      string                   `json:"finishReason,omitempty"`
 	Index             int                      `json:"index,omitempty"`
 	GroundingMetadata *GeminiGroundingMetadata `json:"groundingMetadata,omitempty"`
+	SafetyRatings     []GeminiSafetyRating     `json:"safetyRatings,omitempty"`
 }
 
 // GeminiTokenDetail Gemini token 详情（按模态分类）

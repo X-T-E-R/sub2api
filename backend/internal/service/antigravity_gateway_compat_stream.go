@@ -22,7 +22,7 @@ type antigravityCompatStreamAdapter interface {
 	// successful completion frame; the close-out frames and usage are still written.
 	Finalize(*antigravityClientWriter, bool)
 	WriteError(*antigravityClientWriter, string)
-	FinalizeRetryableFailure(*antigravityClientWriter)
+	FinalizeFailure(*antigravityClientWriter, *AntigravityNoUsableAnswerError)
 }
 
 // isResponsesTerminalEvent reports the Responses protocol's terminal frames. They carry
@@ -90,9 +90,10 @@ func (a *antigravityChatStreamAdapter) Finalize(writer *antigravityClientWriter,
 	writer.Write([]byte("data: [DONE]\n\n"))
 }
 
-func (a *antigravityChatStreamAdapter) FinalizeRetryableFailure(writer *antigravityClientWriter) {
+func (a *antigravityChatStreamAdapter) FinalizeFailure(writer *antigravityClientWriter, failure *AntigravityNoUsableAnswerError) {
 	a.Finalize(writer, true)
-	writer.Fprintf("data: {\"error\":{\"type\":\"server_error\",\"code\":\"thought_only_response\",\"message\":%q}}\n\n", antigravityNoUsableAnswerMessage)
+	data, _ := json.Marshal(map[string]any{"error": failure.protocolError("chat")})
+	writer.Fprintf("data: %s\n\n", data)
 }
 
 func (a *antigravityChatStreamAdapter) WriteError(writer *antigravityClientWriter, reason string) {
@@ -141,14 +142,14 @@ func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWr
 	}
 }
 
-func (a *antigravityResponsesStreamAdapter) FinalizeRetryableFailure(writer *antigravityClientWriter) {
+func (a *antigravityResponsesStreamAdapter) FinalizeFailure(writer *antigravityClientWriter, failure *AntigravityNoUsableAnswerError) {
 	for _, event := range apicompat.FinalizeAnthropicResponsesStream(a.anthropicState) {
 		if isResponsesTerminalEvent(event.Type) {
 			event.Type = "response.failed"
 			if event.Response != nil {
 				event.Response.Status = "failed"
 				event.Response.IncompleteDetails = nil
-				event.Response.Error = &apicompat.ResponsesError{Code: "server_error", Message: antigravityNoUsableAnswerMessage}
+				event.Response.Error = &apicompat.ResponsesError{Code: failure.Code, Message: failure.message()}
 			}
 		}
 		a.emitResponseEvent(event, writer)
@@ -254,7 +255,7 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 	finalEvents, usage := s.processor.Finish()
 	mergeAntigravityCompatUsage(s.usage, usage)
 	s.consumeClaudeEvents(finalEvents)
-	noAnswer := IsAntigravityNoUsableAnswerError(s.continuation.failureError())
+	noAnswer := (s.continuation.responseFailure() != nil)
 	if noAnswer {
 		// Empty STOP has no content event to release the buffered message/usage.
 		// Publish those real frames before the explicit failed terminal, without
@@ -271,8 +272,8 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 		}
 		return nil, antigravityCompatEmptyStreamError()
 	}
-	if IsAntigravityNoUsableAnswerError(s.continuation.failureError()) {
-		s.adapter.FinalizeRetryableFailure(s.writer)
+	if s.continuation.responseFailure() != nil {
+		s.adapter.FinalizeFailure(s.writer, s.continuation.responseFailure())
 	} else {
 		s.adapter.Finalize(s.writer, s.suppressSuccessfulTerminal())
 	}
@@ -457,7 +458,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			if !open {
 				cont := session.continuation
-				eligibleNoAnswer := cont != nil && cont.policy.SuppressThoughtOnlyStop && cont.effectiveGeneration().noUsableAnswerEligible()
+				eligibleNoAnswer := cont != nil && cont.effectiveGeneration().failureCode(cont.policy) != ""
 				if !eligibleNoAnswer && !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
 				}
@@ -640,6 +641,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatReadError(
 	if disconnect, handled := handleStreamReadError(err, session.writer.Disconnected(), prefix); handled {
 		return session.collectResult(disconnect), nil
 	}
+	session.continuation.markReadFailure()
 	if errors.Is(err, bufio.ErrTooLong) {
 		logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (%s): max_size=%d error=%v", prefix, maxLineSize, err)
 		writeAntigravityCompatStreamError(c, session.adapter, session.writer, "response_too_large")

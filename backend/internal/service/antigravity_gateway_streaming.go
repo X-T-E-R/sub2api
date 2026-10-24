@@ -377,7 +377,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				noAnswer := !cw.Disconnected() && cont.completeNoUsableAnswer(c, "gemini_stream")
 				flushHeld(cont != nil && cont.suppressFinalTerminal())
 				if noAnswer {
-					data, _ := json.Marshal(map[string]any{"error": antigravityNoUsableAnswerGoogleError()})
+					data, _ := json.Marshal(map[string]any{"error": antigravityNoUsableAnswerGoogleError(cont.responseFailure())})
 					cw.Fprintf("event: error\ndata: %s\n\n", data)
 				}
 				return result(cw.Disconnected()), cont.failureError()
@@ -397,6 +397,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 					flushHeld(cont != nil && cont.suppressFinalTerminal())
 					return result(disconnect), nil
 				}
+				cont.markReadFailure()
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity): max_size=%d error=%v", maxLineSize, ev.err)
 					sendErrorEvent("response_too_large")
@@ -638,6 +639,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 					cont.recordFailure(c, "gemini_collect_read", ev.err)
 					goto returnResponse
 				}
+				cont.markReadFailure()
 				return nil, ev.err
 			}
 
@@ -725,9 +727,10 @@ returnResponse:
 
 	// 选择最后一个有效响应
 	finalResponse := pickGeminiCollectResult(last, lastWithParts)
+	cont.reconcileCollectedTerminal(finalResponse)
 
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
-	if last == nil && lastWithParts == nil {
+	if last == nil && lastWithParts == nil && !cont.completeNoUsableAnswer(c, "gemini_collect") {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (gemini non-stream), triggering failover")
 		return nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
@@ -771,8 +774,8 @@ returnResponse:
 
 	status := http.StatusOK
 	if cont.completeNoUsableAnswer(c, "gemini_collect") {
-		status = http.StatusBadGateway
-		finalResponse["error"] = antigravityNoUsableAnswerGoogleError()
+		status = cont.responseFailure().status()
+		finalResponse["error"] = antigravityNoUsableAnswerGoogleError(cont.responseFailure())
 	}
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
@@ -1126,6 +1129,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 					cont.recordFailure(c, "claude_collect_read", ev.err)
 					goto returnResponse
 				}
+				cont.markReadFailure()
 				return nil, nil, ev.err
 			}
 
@@ -1194,7 +1198,7 @@ returnResponse:
 	}
 
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
-	if !meaningfulResponse {
+	if !meaningfulResponse && !cont.completeNoUsableAnswer(c, "claude_collect") {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (claude non-stream), triggering failover")
 		return nil, nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
@@ -1205,6 +1209,7 @@ returnResponse:
 
 	// 选择最后一个有效响应
 	finalResponse := pickGeminiCollectResult(last, lastWithParts)
+	cont.reconcileCollectedTerminal(finalResponse)
 
 	// 将收集的所有 parts 合并到最终响应中
 	if len(collectedParts) > 0 {
@@ -1249,7 +1254,7 @@ returnResponse:
 	if cont.completeNoUsableAnswer(c, "claude_collect") {
 		claudeResp, err = sjson.SetBytes(claudeResp, "type", "error")
 		if err == nil {
-			claudeResp, err = sjson.SetBytes(claudeResp, "error", map[string]string{"type": "api_error", "message": antigravityNoUsableAnswerMessage})
+			claudeResp, err = sjson.SetBytes(claudeResp, "error", cont.responseFailure().protocolError("messages"))
 		}
 		if err != nil {
 			return nil, nil, err
@@ -1288,8 +1293,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 			// The protocol failure is already encoded; preserve partial content and billable usage.
 			if claudeResp != nil {
 				status := http.StatusOK
-				if IsAntigravityNoUsableAnswerError(err) {
-					status = http.StatusBadGateway
+				if antigravityThoughtContinuationFromGin(c).responseFailure() != nil {
+					status = antigravityThoughtContinuationFromGin(c).responseFailure().status()
 				}
 				writeClaudeResponse(c, claudeResp, status)
 			}
@@ -1490,7 +1495,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		finalEvents, agUsage := processor.Finish()
 		if len(finalEvents) > 0 {
 			cw.Write(finalEvents)
-		} else if !processor.MessageStartSent() && !cw.Disconnected() {
+		} else if !noAnswer && !processor.MessageStartSent() && !cw.Disconnected() {
 			// 整个流未收到任何可解析的上游数据（全部 SSE 行均无法被 JSON 解析），
 			// 触发 failover 在同账号重试，避免向客户端发出缺少 message_start 的残缺流
 			logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Claude-Stream] empty stream response (no valid events parsed), triggering failover")
@@ -1501,7 +1506,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			}
 		}
 		if noAnswer {
-			writeAntigravityNoUsableAnswerAnthropic(cw)
+			writeAntigravityNoUsableAnswerAnthropic(cw, cont.responseFailure())
 		}
 		return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, cont.failureError()
 	}
@@ -1541,6 +1546,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				if disconnect, handled := handleStreamReadError(ev.err, cw.Disconnected(), "antigravity claude"); handled {
 					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs, clientDisconnect: disconnect}, nil
 				}
+				cont.markReadFailure()
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity): max_size=%d error=%v", maxLineSize, ev.err)
 					sendErrorEvent("response_too_large")

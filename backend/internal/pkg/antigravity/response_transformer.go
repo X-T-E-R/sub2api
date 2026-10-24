@@ -12,7 +12,13 @@ import (
 
 // TransformGeminiToClaude 将 Gemini 响应转换为 Claude 格式（非流式）
 func TransformGeminiToClaude(geminiResp []byte, originalModel string) ([]byte, *ClaudeUsage, error) {
-	// 解包 v1internal 响应
+	// 解包 v1internal 响应。一个被 promptFeedback 拒绝的 v1internal 响应可以
+	// 没有 candidates，所以不能仅凭 candidates 为空就误判成 direct GeminiResponse。
+	var envelope struct {
+		Response json.RawMessage `json:"response"`
+	}
+	hasResponseEnvelope := json.Unmarshal(geminiResp, &envelope) == nil && len(envelope.Response) > 0 && string(envelope.Response) != "null"
+
 	var v1Resp V1InternalResponse
 	if err := json.Unmarshal(geminiResp, &v1Resp); err != nil {
 		// 尝试直接解析为 GeminiResponse
@@ -23,8 +29,9 @@ func TransformGeminiToClaude(geminiResp []byte, originalModel string) ([]byte, *
 		v1Resp.Response = directResp
 		v1Resp.ResponseID = directResp.ResponseID
 		v1Resp.ModelVersion = directResp.ModelVersion
-	} else if len(v1Resp.Response.Candidates) == 0 {
-		// 第一次解析成功但 candidates 为空，说明是直接的 GeminiResponse 格式
+	} else if len(v1Resp.Response.Candidates) == 0 && !hasResponseEnvelope {
+		// 第一次解析成功但 candidates 为空，且没有 v1internal response 字段，
+		// 说明是直接的 GeminiResponse 格式。
 		var directResp GeminiResponse
 		if err2 := json.Unmarshal(geminiResp, &directResp); err2 != nil {
 			return nil, nil, fmt.Errorf("parse gemini response as direct: %w", err2)
@@ -256,24 +263,19 @@ func (p *NonStreamingProcessor) flushThinking() {
 
 // buildResponse 构建最终响应
 func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, responseID, originalModel string) *ClaudeResponse {
-	var finishReason string
-	if len(geminiResp.Candidates) > 0 {
-		finishReason = geminiResp.Candidates[0].FinishReason
-		if finishReason == "MALFORMED_FUNCTION_CALL" {
-			log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in response for model %s", originalModel)
-			if geminiResp.Candidates[0].Content != nil {
-				if b, err := json.Marshal(geminiResp.Candidates[0].Content); err == nil {
-					log.Printf("[Antigravity] Malformed content: %s", string(b))
-				}
-			}
-		}
+	finishReason := terminalFailureReason(geminiResp)
+	if finishReason == "MALFORMED_FUNCTION_CALL" {
+		log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in response for model %s", originalModel)
 	}
+	failureCode := TerminalFailureCode(finishReason)
 
 	stopReason := "end_turn"
-	if p.hasToolCall {
-		stopReason = "tool_use"
-	} else if finishReason == "MAX_TOKENS" {
+	if finishReason == "MAX_TOKENS" {
+		// A budget exhaustion is terminal even when the partial response contains
+		// a tool call; never report it as a usable tool request.
 		stopReason = "max_tokens"
+	} else if p.hasToolCall {
+		stopReason = "tool_use"
 	}
 
 	// 注意：Gemini 的 promptTokenCount 包含 cachedContentTokenCount，
@@ -296,15 +298,25 @@ func (p *NonStreamingProcessor) buildResponse(geminiResp *GeminiResponse, respon
 		respID = generateAnthropicMsgID()
 	}
 
-	return &ClaudeResponse{
+	response := &ClaudeResponse{
 		ID:         respID,
 		Type:       "message",
 		Role:       "assistant",
 		Model:      originalModel,
 		Content:    p.contentBlocks,
-		StopReason: stopReason,
+		StopReason: &stopReason,
 		Usage:      usage,
 	}
+	if failureCode != "" {
+		response.Type = "error"
+		response.StopReason = nil
+		response.Error = &ErrorDetail{
+			Type:    "api_error",
+			Code:    failureCode,
+			Message: TerminalFailureMessage(failureCode),
+		}
+	}
+	return response
 }
 
 // HasRenderableGrounding reports whether the Messages renderer emits visible

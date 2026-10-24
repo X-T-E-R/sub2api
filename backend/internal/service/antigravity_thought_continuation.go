@@ -163,7 +163,10 @@ func (p antigravityThoughtTailPart) rebuildWithoutRaw() []byte {
 // thinking it produced, whether it produced visible content or tool calls, and its usage.
 type antigravityThoughtGeneration struct {
 	sawResponse  bool
+	sawPayload   bool
+	hasThinking  bool
 	finishReason string
+	readFailed   bool
 
 	// tail holds every received thinking part and signature carrier in the original order,
 	// verbatim: a signature is never moved onto another part, a carrier is never merged into
@@ -209,6 +212,13 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 	if inner := parsed.Get("response"); inner.Exists() && inner.IsObject() {
 		parsed = inner
 	}
+	if !parsed.IsObject() {
+		return
+	}
+	g.sawPayload = true
+	if reason := parsed.Get("promptFeedback.blockReason").String(); reason != "" && reason != "BLOCK_REASON_UNSPECIFIED" {
+		g.hasRefusal = true
+	}
 	candidates := parsed.Get("candidates")
 	if !candidates.IsArray() || len(candidates.Array()) == 0 {
 		g.observeUsageMetadata(parsed)
@@ -217,9 +227,6 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 
 	candidate := candidates.Array()[0]
 	g.sawResponse = true
-	if parsed.Get("promptFeedback.blockReason").String() != "" {
-		g.hasRefusal = true
-	}
 	for _, rating := range candidate.Get("safetyRatings").Array() {
 		if rating.Get("blocked").Bool() {
 			g.hasRefusal = true
@@ -252,6 +259,7 @@ func (g *antigravityThoughtGeneration) observePart(part gjson.Result) {
 	signature := part.Get("thoughtSignature").String()
 	thought := part.Get("thought").Bool()
 	if thought {
+		g.hasThinking = g.hasThinking || strings.TrimSpace(textField.String()) != ""
 		// Every received thinking part is kept as it came, with its own signature carrier.
 		g.tail = append(g.tail, antigravityThoughtTailPart{
 			text:      textField.String(),
@@ -319,15 +327,14 @@ func (g *antigravityThoughtGeneration) thoughtOnlySuccessful() bool {
 	return g.noUsableAnswerEligible() && g.finishReason == antigravitySuccessfulFinishReason && len(g.replayableTail()) > 0
 }
 
-// noUsableAnswerEligible is A's response shape, finalized only at clean EOF:
-// empty/thinking-only STOP, or actual thinking without an upstream terminal.
-// B still requires STOP and actual thinking, never an empty or missing-terminal turn.
+// noUsableAnswerEligible is A's response shape, finalized only at clean EOF.
+// An empty response is not made valid by the absence of replayable thinking.
+// B separately requires STOP and actual thinking.
 func (g *antigravityThoughtGeneration) noUsableAnswerEligible() bool {
-	if g == nil || !g.sawResponse || g.hasVisibleText || g.hasToolCall || g.hasGrounding || g.hasRefusal {
+	if g == nil || g.readFailed || g.hasVisibleText || g.hasToolCall || g.hasGrounding || g.hasRefusal {
 		return false
 	}
-	return g.finishReason == antigravitySuccessfulFinishReason ||
-		((g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED") && len(g.replayableTail()) > 0)
+	return g.finishReason == antigravitySuccessfulFinishReason || g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED"
 }
 
 // replayableTail returns the model tail for the appended generation, or nil when the
@@ -523,7 +530,7 @@ func (c *antigravityThoughtContinuation) withholdSuccessfulTerminal() bool {
 	if c == nil || c.generation == nil {
 		return false
 	}
-	if c.policy.SuppressThoughtOnlyStop && c.generation.noUsableAnswerEligible() {
+	if c.generation.failureCode(c.policy) != "" {
 		return true
 	}
 	return c.policy.ContinueThoughtOnly && !c.extraUsed && c.generation.thoughtOnlySuccessful()
@@ -540,14 +547,7 @@ func (c *antigravityThoughtContinuation) suppressFinalTerminal() bool {
 	if c.continuationFailed {
 		return true
 	}
-	if !c.policy.SuppressThoughtOnlyStop {
-		return false
-	}
-	generation := c.effectiveGeneration()
-	if generation == nil {
-		return false
-	}
-	return generation.noUsableAnswerEligible()
+	return c.noUsableAnswerErr != nil || c.effectiveGeneration().failureCode(c.policy) != ""
 }
 
 // effectiveGeneration is the generation the downstream body describes: the appended
