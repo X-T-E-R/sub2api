@@ -195,7 +195,9 @@ func TestPromptFeedbackBlockedResponsesUseSafetyFailure(t *testing.T) {
 				require.NoError(t, err)
 				var response map[string]any
 				require.NoError(t, json.Unmarshal(body, &response))
-				require.Equal(t, "antigravity_safety", response["error"].(map[string]any)["code"])
+				failure, ok := response["error"].(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, "antigravity_safety", failure["code"])
 				return
 			}
 
@@ -209,7 +211,9 @@ func TestPromptFeedbackBlockedResponsesUseSafetyFailure(t *testing.T) {
 					errorEvent = event
 				}
 			}
-			require.Equal(t, "antigravity_safety", errorEvent["error"].(map[string]any)["code"])
+			failure, ok := errorEvent["error"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "antigravity_safety", failure["code"])
 		})
 	}
 }
