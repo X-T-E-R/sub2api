@@ -88,6 +88,28 @@ func TestAntigravityTerminalOutcomeForward(t *testing.T) {
 	}
 }
 
+func TestAntigravityNoPayloadKeepsEmptyStreamRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		wantA bool
+	}{
+		{name: "no upstream data"},
+		{name: "SSE controls only", lines: []string{": keepalive", "data: [DONE]"}},
+		{name: "non-object data", lines: []string{"data: null", "data: []"}},
+		{name: "candidate payload without finish", lines: []string{`data: {"response":{"candidates":[{"content":{"parts":[]}}]}}`}, wantA: true},
+		{name: "usage-only payload", lines: []string{`data: {"response":{"usageMetadata":{"promptTokenCount":8}}}`}, wantA: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			generation := newAntigravityThoughtGeneration()
+			for _, line := range tc.lines {
+				generation.observeLine(line)
+			}
+			require.Equal(t, tc.wantA, generation.noUsableAnswerEligible())
+		})
+	}
+}
+
 // A missing finish reason without text or tool is A's missing-terminal shape;
 // delivered content and tool calls keep their existing compatible semantics.
 func TestAntigravityMissingTerminalContentCompatibility(t *testing.T) {

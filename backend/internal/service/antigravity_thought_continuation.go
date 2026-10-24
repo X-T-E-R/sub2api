@@ -331,7 +331,8 @@ func (g *antigravityThoughtGeneration) thoughtOnlySuccessful() bool {
 // An empty response is not made valid by the absence of replayable thinking.
 // B separately requires STOP and actual thinking.
 func (g *antigravityThoughtGeneration) noUsableAnswerEligible() bool {
-	if g == nil || g.readFailed || g.hasVisibleText || g.hasToolCall || g.hasGrounding || g.hasRefusal {
+	// No upstream object belongs to empty-stream recovery, not terminal classification.
+	if g == nil || !g.sawPayload || g.readFailed || g.hasVisibleText || g.hasToolCall || g.hasGrounding || g.hasRefusal {
 		return false
 	}
 	return g.finishReason == antigravitySuccessfulFinishReason || g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED"
