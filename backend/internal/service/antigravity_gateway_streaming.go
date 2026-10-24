@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -203,6 +204,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	cont := antigravityThoughtContinuationFromGin(c)
 	usage := &ClaudeUsage{}
 	var firstTokenMs *int
+	sawUpstreamObject := false
 
 	type scanEvent struct {
 		line string
@@ -351,6 +353,21 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				if !sawUpstreamObject && c.Request.Context().Err() != nil {
+					return result(true), nil
+				}
+				if !sawUpstreamObject && !cw.Disconnected() {
+					if !c.Writer.Written() {
+						return nil, &UpstreamFailoverError{
+							StatusCode:             http.StatusBadGateway,
+							ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
+							RetryableOnSameAccount: true,
+						}
+					}
+					// A keepalive may have committed HTTP 200; report failure without replay.
+					sendErrorEvent("empty_stream_response")
+					return result(false), errors.New("empty stream response after client output")
+				}
 				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A
 				// 的有效设置决定，第一代 usage 照常入账。
 				if cont != nil && cont.canContinue() && !cw.Disconnected() {
@@ -415,7 +432,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 				if payload == "" || payload == "[DONE]" {
-					emitFrame(line+"\n", "")
+					if sawUpstreamObject {
+						emitFrame(line+"\n", "")
+					}
 					continue
 				}
 
@@ -424,6 +443,11 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				if parseErr == nil && inner != nil {
 					payload = string(inner)
 				}
+
+				if !gjson.ParseBytes(inner).IsObject() {
+					continue
+				}
+				sawUpstreamObject = true
 
 				// 解析 usage
 				if u := extractGeminiUsage(inner); u != nil {
@@ -472,7 +496,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				continue
 			}
 
-			emitFrame(line+"\n", "")
+			if sawUpstreamObject {
+				emitFrame(line+"\n", "")
+			}
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
@@ -780,6 +806,10 @@ returnResponse:
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
+	}
+	// Final counters and retained modality details must describe the same billable response.
+	if finalUsage := extractGeminiUsage(respBody); finalUsage != nil {
+		usage = finalUsage
 	}
 	c.Data(status, "application/json", respBody)
 

@@ -180,6 +180,7 @@ type antigravityThoughtGeneration struct {
 	hasRefusal           bool
 	claudeUsage          ClaudeUsage
 	rawUsageMetadata     map[string]int64
+	rawUsageDetails      map[string]json.RawMessage
 }
 
 func newAntigravityThoughtGeneration() *antigravityThoughtGeneration {
@@ -315,6 +316,12 @@ func (g *antigravityThoughtGeneration) observeUsageMetadata(parsed gjson.Result)
 	usage.ForEach(func(key, value gjson.Result) bool {
 		if value.Type == gjson.Number {
 			raw[key.String()] = value.Int()
+		} else {
+			// Usage-only frames may omit modality arrays; retain the last supplied details.
+			if g.rawUsageDetails == nil {
+				g.rawUsageDetails = make(map[string]json.RawMessage)
+			}
+			g.rawUsageDetails[key.String()] = json.RawMessage(value.Raw)
 		}
 		return true
 	})

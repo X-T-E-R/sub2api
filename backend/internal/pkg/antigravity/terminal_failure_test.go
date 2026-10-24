@@ -169,10 +169,13 @@ func TestNonStreamingAbnormalTerminalReturnsPartialErrorBody(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, float64(11), responseUsage["input_tokens"])
 	require.NotContains(t, string(body), `"stop_reason":"end_turn"`)
-	content := response["content"].([]any)
+	content, ok := response["content"].([]any)
+	require.True(t, ok)
 	require.Len(t, content, 1)
-	require.Equal(t, "partial", content[0].(map[string]any)["text"])
-	require.Equal(t, "sig-partial", content[0].(map[string]any)["signature"])
+	part, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "partial", part["text"])
+	require.Equal(t, "sig-partial", part["signature"])
 }
 
 func TestPromptFeedbackBlockedResponsesUseSafetyFailure(t *testing.T) {

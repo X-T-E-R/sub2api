@@ -11,7 +11,13 @@ func (c *antigravityThoughtContinuation) reconcileCollectedTerminal(response map
 		return
 	}
 	if g.rawUsageMetadata != nil {
-		usage := make(map[string]any, len(g.rawUsageMetadata))
+		usage, ok := response["usageMetadata"].(map[string]any)
+		if !ok {
+			usage = make(map[string]any, len(g.rawUsageMetadata)+len(g.rawUsageDetails))
+		}
+		for key, value := range g.rawUsageDetails {
+			usage[key] = value
+		}
 		for key, value := range g.rawUsageMetadata {
 			usage[key] = value
 		}
