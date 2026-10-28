@@ -129,3 +129,40 @@ func TestAntigravityResponseSummarySeparatesEmptyCarrierFromActualThinking(t *te
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "private-signature-only")
 }
+
+func TestAntigravityResponseSummaryKeepsPerGenerationUsage(t *testing.T) {
+	for _, second := range []struct {
+		name, line           string
+		present              bool
+		input, output, cache int
+	}{
+		{"metered", `data: {"response":{"candidates":[{"content":{"parts":[{"text":"private-answer-sentinel"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":380744,"cachedContentTokenCount":378695,"candidatesTokenCount":4}}}`, true, 2049, 4, 378695},
+		{"no_metadata", `data: {"response":{"candidates":[{"content":{"parts":[]}}]}}`, false, 0, 0, 0},
+		{"no_response", "", false, 0, 0, 0},
+	} {
+		t.Run(second.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.InfoLevel)
+			ctx := logger.IntoContext(context.Background(), zap.New(core))
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCachedZeroOutputResponse(), antigravityThoughtStreamResponse(second.line)}}
+			svc := newAntigravityThoughtTestService(t, AntigravityThoughtPolicySettings{ContinueZeroOutput: true}, upstream)
+			body, c, _ := newAntigravityThoughtClaudeRequest(false)
+			c.Request = c.Request.WithContext(ctx)
+			_, _ = svc.Forward(ctx, c, antigravityThoughtAccount(nil), body, false)
+			entries := logs.FilterMessage("antigravity.response_summary").All()
+			require.Len(t, entries, 1)
+			fields := entries[0].ContextMap()
+			require.Equal(t, true, fields["continuation_response_received"])
+			require.Equal(t, true, fields["initial_usage_present"])
+			require.EqualValues(t, 2049, fields["initial_input_tokens"])
+			require.EqualValues(t, 0, fields["initial_output_tokens"])
+			require.EqualValues(t, 378694, fields["initial_cache_read_tokens"])
+			require.Equal(t, second.present, fields["continuation_usage_present"])
+			require.EqualValues(t, second.input, fields["continuation_input_tokens"])
+			require.EqualValues(t, second.output, fields["continuation_output_tokens"])
+			require.EqualValues(t, second.cache, fields["continuation_cache_read_tokens"])
+			encoded, err := json.Marshal(fields)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "private-answer-sentinel")
+		})
+	}
+}

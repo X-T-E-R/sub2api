@@ -603,8 +603,9 @@ func (c *antigravityThoughtContinuation) cumulativeUsage(last ClaudeUsage) Claud
 //
 // The appended request reuses the exact original upstream request envelope (same project,
 // requestId, model, session, system instruction, tools, generation config and headers) and
-// only appends either one user Continue. for zero output, or B's received thinking
-// model tail. It is sent through the normal HTTPUpstream with the same account,
+// adds one user Continue. instruction for zero output (coalescing a final user
+// turn), or appends B's received thinking model tail. It is sent through the normal
+// HTTPUpstream with the same account,
 // proxy and concurrency slot; the retry
 // loop, scheduler, sticky identity and capture range are deliberately not re-entered.
 func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previous *http.Response) (*http.Response, ClaudeUsage, error) {

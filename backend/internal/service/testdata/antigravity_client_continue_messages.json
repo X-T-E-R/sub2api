@@ -1,0 +1,60 @@
+[
+  {
+    "name": "ordinary_user_after_empty_assistant",
+    "initial": {
+      "model": "client-alias",
+      "messages": [{"role":"user","content":[{"type":"text","text":"question","cache_control":{"type":"ephemeral"}}]}],
+      "max_tokens": 4096,
+      "thinking": {"type":"adaptive","display":"summarized"},
+      "output_config": {"effort":"high"},
+      "system": [{"type":"text","text":"fixture system","cache_control":{"type":"ephemeral"}}],
+      "tools": [{"name":"lookup","description":"fixture tool","input_schema":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}],
+      "metadata": {"user_id":"session_fixture"},
+      "stream": false
+    },
+    "continued": {
+      "model": "client-alias",
+      "messages": [{"role":"user","content":[{"type":"text","text":"question"},{"type":"text","text":"Continue.","cache_control":{"type":"ephemeral"}}]}],
+      "max_tokens": 4096,
+      "thinking": {"type":"adaptive","display":"summarized"},
+      "output_config": {"effort":"high"},
+      "system": [{"type":"text","text":"fixture system","cache_control":{"type":"ephemeral"}}],
+      "tools": [{"name":"lookup","description":"fixture tool","input_schema":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}],
+      "metadata": {"user_id":"session_fixture"},
+      "stream": false
+    }
+  },
+  {
+    "name": "tool_result_user_after_empty_assistant",
+    "initial": {
+      "model": "client-alias",
+      "messages": [
+        {"role":"user","content":[{"type":"text","text":"question"}]},
+        {"role":"assistant","content":[{"type":"tool_use","id":"call_lookup","name":"lookup","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_lookup","content":[{"type":"text","text":"tool result"}],"cache_control":{"type":"ephemeral"}}]}
+      ],
+      "max_tokens": 4096,
+      "thinking": {"type":"adaptive","display":"summarized"},
+      "output_config": {"effort":"high"},
+      "system": [{"type":"text","text":"fixture system","cache_control":{"type":"ephemeral"}}],
+      "tools": [{"name":"lookup","description":"fixture tool","input_schema":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}],
+      "metadata": {"user_id":"session_fixture"},
+      "stream": false
+    },
+    "continued": {
+      "model": "client-alias",
+      "messages": [
+        {"role":"user","content":[{"type":"text","text":"question"}]},
+        {"role":"assistant","content":[{"type":"tool_use","id":"call_lookup","name":"lookup","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_lookup","content":[{"type":"text","text":"tool result"}]},{"type":"text","text":"Continue.","cache_control":{"type":"ephemeral"}}]}
+      ],
+      "max_tokens": 4096,
+      "thinking": {"type":"adaptive","display":"summarized"},
+      "output_config": {"effort":"high"},
+      "system": [{"type":"text","text":"fixture system","cache_control":{"type":"ephemeral"}}],
+      "tools": [{"name":"lookup","description":"fixture tool","input_schema":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}],
+      "metadata": {"user_id":"session_fixture"},
+      "stream": false
+    }
+  }
+]

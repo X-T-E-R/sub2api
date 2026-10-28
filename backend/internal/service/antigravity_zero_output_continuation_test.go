@@ -71,13 +71,15 @@ func TestAntigravityZeroOutputContinueProtocols(t *testing.T) {
 					require.Equal(t, 4, result.Usage.OutputTokens)
 					require.Contains(t, wire, "answer")
 					require.NotContains(t, wire, `"error"`)
-					// Removing precisely the appended user turn reconstructs the original
-					// prepared envelope byte-for-byte in meaning, including model/config/tools.
+					// Adjacent user instructions share one turn, as in a fresh Messages
+					// client request. Removing only Continue. restores the prepared envelope.
 					first, second := upstream.requestBodies[0], upstream.requestBodies[1]
 					contents := gjson.GetBytes(second, "request.contents").Array()
-					require.Len(t, contents, len(gjson.GetBytes(first, "request.contents").Array())+1)
-					require.JSONEq(t, `{"role":"user","parts":[{"text":"Continue."}]}`, contents[len(contents)-1].Raw)
-					restored, deleteErr := sjson.DeleteBytes(second, fmt.Sprintf("request.contents.%d", len(contents)-1))
+					require.Len(t, contents, len(gjson.GetBytes(first, "request.contents").Array()))
+					last := len(contents) - 1
+					parts := contents[last].Get("parts").Array()
+					require.JSONEq(t, `{"text":"Continue."}`, parts[len(parts)-1].Raw)
+					restored, deleteErr := sjson.DeleteBytes(second, fmt.Sprintf("request.contents.%d.parts.%d", last, len(parts)-1))
 					require.NoError(t, deleteErr)
 					require.JSONEq(t, string(first), string(restored))
 				})
@@ -115,7 +117,7 @@ func TestAntigravityZeroOutputContinueMissingTerminalAndPositiveUsage(t *testing
 				require.Equal(t, 28, result.Usage.InputTokens)
 				require.Equal(t, 9, result.Usage.OutputTokens)
 				require.NotContains(t, string(upstream.requestBodies[1]), "signature-only", "no fabricated/replayed assistant tail")
-				require.Equal(t, "user", gjson.GetBytes(upstream.requestBodies[1], "request.contents.1.role").String())
+				require.Equal(t, "Continue.", gjson.GetBytes(upstream.requestBodies[1], "request.contents.0.parts.1.text").String())
 			})
 		}
 	}

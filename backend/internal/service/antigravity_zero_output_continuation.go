@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -49,13 +50,24 @@ func antigravityPartHasContentCarrier(part gjson.Result) bool {
 	return hasContent
 }
 
-// Preserve the complete prepared upstream envelope. No model turn or empty user
-// turn is fabricated; the only added content is one legal non-empty user turn.
+// Preserve the prepared envelope and add only the user Continue. instruction.
+// Messages clients coalesce adjacent user messages before sending them; match
+// that representation, including a user turn containing real tool results.
+// No model turn, received signature or empty assistant placeholder is invented.
 func appendAntigravityUserContinue(body []byte) ([]byte, error) {
-	if !gjson.ValidBytes(body) || !gjson.GetBytes(body, "request.contents").IsArray() {
+	contents := gjson.GetBytes(body, "request.contents")
+	if !gjson.ValidBytes(body) || !contents.IsArray() {
 		return nil, errors.New("missing Antigravity request contents")
 	}
+	turns := contents.Array()
+	part := map[string]any{"text": "Continue."}
+	if len(turns) > 0 {
+		last := turns[len(turns)-1]
+		if last.Get("role").String() == "user" && last.Get("parts").IsArray() {
+			return sjson.SetBytes(body, fmt.Sprintf("request.contents.%d.parts.-1", len(turns)-1), part)
+		}
+	}
 	return sjson.SetBytes(body, "request.contents.-1", map[string]any{
-		"role": "user", "parts": []any{map[string]any{"text": "Continue."}},
+		"role": "user", "parts": []any{part},
 	})
 }

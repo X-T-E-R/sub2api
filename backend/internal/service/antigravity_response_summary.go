@@ -225,6 +225,20 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 		"effective_continue_zero_output": c.policy.ContinueZeroOutput, "zero_output_continuation_used": c.zeroOutputContinuationUsed(),
 		"a_decision": decision, "a_reason": reason, "outcome": reason, "terminal_authority": authority,
 	}
+	if c.extraUsed {
+		fields["continuation_response_received"] = c.extraObserved
+		for prefix, generation := range map[string]*antigravityThoughtGeneration{
+			"initial": c.finishedGeneration, "continuation": c.generation,
+		} {
+			if generation == nil {
+				continue
+			}
+			fields[prefix+"_usage_present"] = generation.rawUsageMetadata != nil
+			fields[prefix+"_input_tokens"] = generation.claudeUsage.InputTokens
+			fields[prefix+"_output_tokens"] = generation.claudeUsage.OutputTokens
+			fields[prefix+"_cache_read_tokens"] = generation.claudeUsage.CacheReadInputTokens
+		}
+	}
 	errorCode := ""
 	if c.noUsableAnswerErr != nil {
 		errorCode = c.noUsableAnswerErr.Code
