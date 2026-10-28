@@ -3,7 +3,7 @@ name: Publish Antigravity zero-output image
 on:
   push:
     tags:
-      - "xter-image-antigravity-zero-output-64f05af76"
+      - "xter-image-antigravity-zero-output-2dc8640c1"
 
 permissions:
   contents: read
@@ -11,8 +11,8 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/x-t-e-r/sub2api
-  SOURCE_COMMIT: 64f05af76c5ca62547c68c8b49693f0ba0b328b0
-  VERSION: antigravity-zero-output-64f05af76
+  SOURCE_COMMIT: 2dc8640c1d9b23e8c9cf24b332baaba463bde2ca
+  VERSION: antigravity-zero-output-2dc8640c1
   WORKFLOW_FILE: .github/workflows/publish-antigravity-cache-image.yml
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${GITHUB_REF}" == "refs/tags/xter-image-antigravity-zero-output-64f05af76" ]]
+          [[ "${GITHUB_REF}" == "refs/tags/xter-image-antigravity-zero-output-2dc8640c1" ]]
           [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
           read -r -a lineage <<< "$(git rev-list --parents -n 1 HEAD)"
           [[ ${#lineage[@]} -eq 2 ]]
@@ -63,7 +63,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/x-t-e-r/sub2api:antigravity-zero-output-64f05af76
+            ghcr.io/x-t-e-r/sub2api:antigravity-zero-output-2dc8640c1
             ghcr.io/x-t-e-r/sub2api:latest
           labels: |
             org.opencontainers.image.source=https://github.com/X-T-E-R/sub2api
