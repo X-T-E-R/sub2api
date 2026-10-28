@@ -254,19 +254,15 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		return
 	}
 
-	// 3) select account (sticky session based on request body)
-	// 优先使用 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）
-	sessionHash := extractGeminiCLISessionHash(c, body)
-	if sessionHash == "" {
-		// Fallback: 使用通用的会话哈希生成逻辑（适用于其他客户端）
-		parsedReq, _ := service.ParseGatewayRequest(service.NewRequestBodyRef(body), domain.PlatformGemini)
-		if parsedReq != nil {
-			parsedReq.SessionContext = &service.SessionContext{
-				ClientIP:  ip.GetClientIP(c),
-				UserAgent: c.GetHeader("User-Agent"),
-				APIKeyID:  apiKey.ID,
-			}
-		}
+	// 3) Explicit sessions outrank CLI/content guesses. Every source uses the
+	// authenticated scope; the CLI compatibility seed must not bypass it.
+	parsedReq, _ := service.ParseGatewayRequest(service.NewRequestBodyRef(body), domain.PlatformGemini)
+	setGatewaySessionContext(c, apiKey, parsedReq)
+	hasExplicitSession := parsedReq.HasExplicitSessionIdentity()
+	var sessionHash string
+	if cliSeed := extractGeminiCLISessionHash(c, body); !hasExplicitSession && cliSeed != "" {
+		sessionHash = h.gatewayService.GenerateScopedSessionHash(parsedReq, "gemini_cli", cliSeed)
+	} else {
 		sessionHash = h.gatewayService.GenerateSessionHash(parsedReq)
 	}
 	sessionKey := sessionHash
@@ -294,7 +290,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	var geminiPrefixHash string
 	var geminiSessionUUID string
 	var matchedDigestChain string
-	useDigestFallback := sessionBoundAccountID == 0
+	// A new explicit session is independent even if its prompt matches an old
+	// conversation. Digest recovery is only for requests without such an anchor.
+	useDigestFallback := !hasExplicitSession && sessionBoundAccountID == 0
 
 	if useDigestFallback {
 		// 解析 Gemini 请求体

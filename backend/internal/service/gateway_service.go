@@ -259,6 +259,13 @@ func parseDebugEnvBool(raw string) bool {
 }
 
 func shortSessionHash(sessionHash string) string {
+	// Keep the digest visible after adding a version/provider namespace. In
+	// particular, truncating "gemini:v2:..." directly would log only a constant.
+	if strings.HasPrefix(sessionHash, "gemini:v2:") {
+		sessionHash = strings.TrimPrefix(sessionHash, "gemini:v2:")
+	} else {
+		sessionHash = strings.TrimPrefix(sessionHash, "v2:")
+	}
 	if sessionHash == "" {
 		return ""
 	}
@@ -890,28 +897,23 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 		return ""
 	}
 
-	// 1. 最高优先级：从 metadata.user_id 提取 session_xxx
+	// Explicit conversation identity outranks moving cache-control markers.
+	if source, seed := gatewayExplicitSessionIdentity(parsed); seed != "" {
+		hash := s.GenerateScopedSessionHash(parsed, source, seed)
+		slog.Info("sticky.hash_source", "source", source, "hash", hash)
+		return hash
+	}
 	if parsed.MetadataUserID != "" {
-		uid := ParseMetadataUserID(parsed.MetadataUserID)
-		if uid != nil && uid.SessionID != "" {
-			slog.Info("sticky.hash_source",
-				"source", "metadata_user_id",
-				"session_id", uid.SessionID,
-				"device_id", uid.DeviceID,
-				"is_new_format", uid.IsNewFormat,
-			)
-			return uid.SessionID
-		}
 		slog.Info("sticky.hash_metadata_parse_failed",
-			"metadata_user_id", parsed.MetadataUserID,
-			"parsed_nil", uid == nil,
+			"metadata_user_id_len", len(parsed.MetadataUserID),
+			"parsed_nil", true,
 		)
 	}
 
-	// 2. 提取带 cache_control: {type: "ephemeral"} 的内容
+	// Content-derived seeds are compatibility fallbacks, not session anchors.
 	cacheableContent := s.extractCacheableContent(parsed)
 	if cacheableContent != "" {
-		hash := s.hashContent(cacheableContent)
+		hash := s.GenerateScopedSessionHash(parsed, "cacheable_content", cacheableContent)
 		slog.Info("sticky.hash_source",
 			"source", "cacheable_content",
 			"hash", hash,
@@ -939,7 +941,7 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 		appendResponsesSessionAnchorFromRaw(&combined, parsed.InputRaw())
 	}
 	if combined.Len() > 0 {
-		hash := s.hashContent(combined.String())
+		hash := s.GenerateScopedSessionHash(parsed, "message_content_fallback", combined.String())
 		slog.Info("sticky.hash_source",
 			"source", "message_content_fallback",
 			"hash", hash,

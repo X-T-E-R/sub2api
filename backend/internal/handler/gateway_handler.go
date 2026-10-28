@@ -274,11 +274,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}
 
 	// 计算粘性会话hash
-	parsedReq.SessionContext = &service.SessionContext{
-		ClientIP:  ip.GetClientIP(c),
-		UserAgent: c.GetHeader("User-Agent"),
-		APIKeyID:  apiKey.ID,
-	}
+	setGatewaySessionContext(c, apiKey, parsedReq)
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 
 	// [DEBUG-STICKY] 打印会话 hash 生成结果
@@ -2170,11 +2166,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	}
 
 	// 计算粘性会话 hash
-	parsedReq.SessionContext = &service.SessionContext{
-		ClientIP:  ip.GetClientIP(c),
-		UserAgent: c.GetHeader("User-Agent"),
-		APIKeyID:  apiKey.ID,
-	}
+	setGatewaySessionContext(c, apiKey, parsedReq)
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 
 	// 选择支持该模型的账号

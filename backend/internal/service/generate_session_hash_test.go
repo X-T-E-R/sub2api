@@ -89,7 +89,8 @@ func TestGenerateSessionHash_MetadataHasHighestPriority(t *testing.T) {
 	parsed := mustParseSessionHashRequest(t, anthropicSessionBody("You are a helpful assistant.", []any{msg("user", "hello")}, metadata), nil)
 
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", hash, "metadata session_id should have highest priority")
+	require.Equal(t, svc.GenerateSessionHash(&ParsedRequest{MetadataUserID: metadata}), hash, "metadata session_id should outrank system/messages")
+	require.NotEqual(t, "123e4567-e89b-12d3-a456-426614174000", hash, "raw unscoped bindings must not be reused")
 }
 
 func TestGenerateSessionHash_SystemPlusMessages(t *testing.T) {
@@ -167,13 +168,15 @@ func TestGenerateSessionHash_SameSessionContextProducesSameHash(t *testing.T) {
 	require.Equal(t, h1, h2, "same messages + same SessionContext should produce identical hash")
 }
 
-func TestGenerateSessionHash_MetadataOverridesSessionContext(t *testing.T) {
+func TestGenerateSessionHash_MetadataIgnoresNetworkNoiseWithinAuthenticatedScope(t *testing.T) {
 	svc := &GatewayService{}
 	metadata := "user_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2_account__session_123e4567-e89b-12d3-a456-426614174000"
 	parsed := mustParseSessionHashRequest(t, anthropicSessionBody(nil, []any{msg("user", "hello")}, metadata), &SessionContext{ClientIP: "192.168.1.1", UserAgent: "Mozilla/5.0", APIKeyID: 100})
-
+	otherNetwork := &ParsedRequest{MetadataUserID: metadata, SessionContext: &SessionContext{ClientIP: "10.0.0.1", UserAgent: "other", APIKeyID: 100}}
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", hash, "metadata session_id should take priority over SessionContext")
+	require.Equal(t, hash, svc.GenerateSessionHash(otherNetwork))
+	otherNetwork.SessionContext.APIKeyID = 101
+	require.NotEqual(t, hash, svc.GenerateSessionHash(otherNetwork), "metadata must not bypass API key isolation")
 }
 
 func TestGenerateSessionHash_MetadataJSON_HasHighestPriority(t *testing.T) {
@@ -182,7 +185,8 @@ func TestGenerateSessionHash_MetadataJSON_HasHighestPriority(t *testing.T) {
 	parsed := mustParseSessionHashRequest(t, anthropicSessionBody("You are a helpful assistant.", []any{msg("user", "hello")}, metadata), nil)
 
 	hash := svc.GenerateSessionHash(parsed)
-	require.Equal(t, "c72554f2-1234-5678-abcd-123456789abc", hash, "JSON format metadata session_id should have highest priority")
+	require.Equal(t, svc.GenerateSessionHash(&ParsedRequest{MetadataUserID: metadata}), hash, "JSON metadata should outrank system/messages")
+	require.NotEqual(t, "c72554f2-1234-5678-abcd-123456789abc", hash, "JSON metadata must also use the scoped namespace")
 }
 
 func TestGenerateSessionHash_NilSessionContextBackwardCompatible(t *testing.T) {
@@ -268,14 +272,17 @@ func TestGenerateSessionHash_ResponsesInputDoesNotOverrideHigherPrioritySources(
 	t.Run("metadata user id", func(t *testing.T) {
 		metadata := "user_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2_account__session_123e4567-e89b-12d3-a456-426614174000"
 		parsed := mustParseResponsesSessionHashRequest(t, `{"metadata":{"user_id":"`+metadata+`"},"input":"hello"}`, ctx)
-		require.Equal(t, "123e4567-e89b-12d3-a456-426614174000", svc.GenerateSessionHash(parsed))
+		other := mustParseResponsesSessionHashRequest(t, `{"metadata":{"user_id":"`+metadata+`"},"input":"different"}`, ctx)
+		require.Equal(t, svc.GenerateSessionHash(parsed), svc.GenerateSessionHash(other))
 	})
 
 	t.Run("cache control", func(t *testing.T) {
 		body := `{"system":[{"type":"text","text":"stable cache anchor","cache_control":{"type":"ephemeral"}}],"input":"hello"}`
 		first := mustParseResponsesSessionHashRequest(t, body, ctx)
-		second := mustParseResponsesSessionHashRequest(t, body, &SessionContext{ClientIP: "9.8.7.6", UserAgent: "other", APIKeyID: 2})
+		second := mustParseResponsesSessionHashRequest(t, `{"system":[{"type":"text","text":"stable cache anchor","cache_control":{"type":"ephemeral"}}],"input":"different"}`, ctx)
 		require.Equal(t, svc.GenerateSessionHash(first), svc.GenerateSessionHash(second))
+		second.SessionContext = &SessionContext{APIKeyID: 2}
+		require.NotEqual(t, svc.GenerateSessionHash(first), svc.GenerateSessionHash(second), "cache seeds must not bypass API key isolation")
 	})
 }
 
@@ -461,7 +468,7 @@ func TestGenerateSessionHash_ArraySystemPrompt(t *testing.T) {
 	require.NotEmpty(t, h, "array system prompt should produce a hash")
 }
 
-func TestGenerateSessionHash_CacheControlOverridesSessionContext(t *testing.T) {
+func TestGenerateSessionHash_CacheControlRetainsAuthenticatedScope(t *testing.T) {
 	svc := &GatewayService{}
 	system := []any{map[string]any{"type": "text", "text": "You are a tool-specific assistant.", "cache_control": map[string]any{"type": "ephemeral"}}}
 	body := anthropicSessionBody(system, []any{msg("user", "hello")}, "")
@@ -469,8 +476,9 @@ func TestGenerateSessionHash_CacheControlOverridesSessionContext(t *testing.T) {
 	parsed2 := mustParseSessionHashRequest(t, body, &SessionContext{ClientIP: "2.2.2.2", UserAgent: "ua2", APIKeyID: 200})
 
 	h1 := svc.GenerateSessionHash(parsed1)
-	h2 := svc.GenerateSessionHash(parsed2)
-	require.Equal(t, h1, h2, "cache_control ephemeral has higher priority, SessionContext should not affect result")
+	require.NotEqual(t, h1, svc.GenerateSessionHash(parsed2), "shared cache text must not merge API keys")
+	parsed2.SessionContext.APIKeyID = 100
+	require.Equal(t, h1, svc.GenerateSessionHash(parsed2), "network noise does not affect a cache seed within its scope")
 }
 
 func TestGenerateSessionHash_EmptyMessages(t *testing.T) {

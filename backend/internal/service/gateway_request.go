@@ -43,13 +43,15 @@ var (
 	sessionUserAgentVersionPattern = regexp.MustCompile(`\bv?\d+(?:\.\d+){1,3}\b`)
 )
 
-// SessionContext 粘性会话上下文，用于区分不同来源的请求。
-// 仅在 GenerateSessionHash 第 3 级 fallback（消息内容 hash）时混入，
-// 避免不同用户发送相同消息产生相同 hash 导致账号集中。
+// SessionContext carries the authenticated scope for every sticky seed.
+// ClientSessionID is an explicit session header; IP/UA only disambiguate the
+// content fallback and must not destabilize an explicit conversation identity.
 type SessionContext struct {
-	ClientIP  string
-	UserAgent string
-	APIKeyID  int64
+	ClientIP        string
+	UserAgent       string
+	APIKeyID        int64
+	Platform        string
+	ClientSessionID string
 }
 
 type jsonRange struct {
@@ -288,7 +290,7 @@ type ParsedRequest struct {
 	OutputEffort    string          // output_config.effort（Claude API 的推理强度控制）
 	Speed           string          // Anthropic speed（当前可计费值为 "fast"）
 	MaxTokens       int             // max_tokens 值（用于探测请求拦截）
-	SessionContext  *SessionContext // 可选：请求上下文区分因子（nil 时行为不变）
+	SessionContext  *SessionContext // 入口填充的认证作用域及显式会话头
 
 	protocol      string    // 当前 Body 的协议格式，用于 Body 替换后刷新 raw range
 	systemRange   jsonRange // system/systemInstruction.parts 的 raw JSON 范围，绑定 Body 当前内容
