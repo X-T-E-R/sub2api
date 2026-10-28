@@ -121,9 +121,10 @@ func assertAntigravityReportedUsage(t *testing.T, protocol string, stream bool, 
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			candidate := gjson.Get(payload, "usage")
-			if protocol == "gemini" {
+			switch protocol {
+			case "gemini":
 				candidate = gjson.Get(payload, "usageMetadata")
-			} else if protocol == "responses" {
+			case "responses":
 				candidate = gjson.Get(payload, "response.usage")
 			}
 			if candidate.IsObject() {
