@@ -877,15 +877,18 @@ func jsonNumberAsInt64(value any) (int64, bool) {
 	}
 }
 
-// antigravityAddUsageBaselineToResponse does the same for an already decoded response
-// object, which is how the non-streaming Gemini route emits its single body.
+// antigravityAddUsageBaselineToResponse adds finished generations to a collected
+// appended response. The appended generation may omit its own usageMetadata;
+// the finished generations remain billable even then. Callers exclude a fallback
+// body from the first generation, whose usage already contains this baseline.
 func antigravityAddUsageBaselineToResponse(response map[string]any, baseline map[string]int64) {
 	if len(response) == 0 || len(baseline) == 0 {
 		return
 	}
-	usage, ok := response["usageMetadata"].(map[string]any)
-	if !ok || len(usage) == 0 {
-		return
+	usage, _ := response["usageMetadata"].(map[string]any)
+	if usage == nil {
+		usage = make(map[string]any, len(baseline))
+		response["usageMetadata"] = usage
 	}
 	for key, value := range baseline {
 		if value == 0 {

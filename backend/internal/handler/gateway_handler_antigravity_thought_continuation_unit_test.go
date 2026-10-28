@@ -5,6 +5,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -36,15 +37,42 @@ func TestGatewayChatCompletionsAntigravityThoughtAppendedFailureKeepsBillingAndS
 }
 
 func TestGatewayChatCompletionsAntigravityZeroOutputContinueKeepsBillingAndSlots(t *testing.T) {
+	enableAntigravityContinueZeroOutput(t)
+	// Existing helper checks a failed second dispatch: exactly 2 calls, one
+	// billing record with 8/0 usage and each user/account slot closed once.
+	runGatewayThoughtPartialCase(t, gatewayThoughtCase{empty: true, zeroOutput: true})
+}
+
+func TestGatewayMessagesAntigravityZeroOutputContinueKeepsBillingAndSlots(t *testing.T) {
+	enableAntigravityContinueZeroOutput(t)
+	runGatewayThoughtPartialCase(t, gatewayThoughtCase{
+		messages: true, empty: true, zeroOutput: true, expectFailure: true,
+		generation:       `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":380743,"cachedContentTokenCount":378694,"candidatesTokenCount":0}}}`,
+		secondGeneration: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}}`,
+		wantCode:         "antigravity_empty_response", wantStatus: http.StatusBadGateway,
+		wantInput: 2049, wantCache: 378694, wantOutput: 0,
+	})
+}
+
+func TestGatewayMessagesAntigravityZeroOutputUsageKeepsBillingAndSlots(t *testing.T) {
+	enableAntigravityContinueZeroOutput(t)
+	runGatewayThoughtPartialCase(t, gatewayThoughtCase{
+		messages: true, empty: true, zeroOutput: true, expectFailure: true,
+		generation:       `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":380743,"cachedContentTokenCount":378694,"candidatesTokenCount":0}}}`,
+		secondGeneration: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":380744,"cachedContentTokenCount":378695,"candidatesTokenCount":0}}}`,
+		wantCode:         "antigravity_empty_response", wantStatus: http.StatusBadGateway,
+		wantInput: 4098, wantCache: 757389, wantOutput: 0,
+	})
+}
+
+func enableAntigravityContinueZeroOutput(t *testing.T) {
+	t.Helper()
 	settings := service.NewSettingService(handlerThoughtSettingRepo{}, nil)
 	previous := service.ResolveAntigravityThoughtPolicy(context.Background(), nil)
 	t.Cleanup(func() {
 		require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings(previous)))
 	})
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{ContinueZeroOutput: true}))
-	// Existing helper checks a failed second dispatch: exactly 2 calls, one
-	// billing record with 8/0 usage and each user/account slot closed once.
-	runGatewayThoughtPartialCase(t, gatewayThoughtCase{empty: true, zeroOutput: true})
 }
 
 func TestGatewayChatCompletionsAntigravityNoUsableAnswerKeepsBillingAndSlots(t *testing.T) {
@@ -76,14 +104,19 @@ func TestGatewayChatCompletionsAntigravityProviderFailureKeepsBillingAndSlots(t 
 }
 
 type gatewayThoughtCase struct {
-	noAnswer   bool
-	empty      bool
-	zeroOutput bool
-	generation string
-	wantCode   string
-	wantStatus int
-	wantOutput int
-	wantText   string
+	noAnswer         bool
+	empty            bool
+	zeroOutput       bool
+	messages         bool
+	expectFailure    bool
+	generation       string
+	secondGeneration string
+	wantCode         string
+	wantStatus       int
+	wantInput        int
+	wantCache        int
+	wantOutput       int
+	wantText         string
 }
 
 func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
@@ -125,6 +158,10 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	upstream := &handlerThoughtUpstream{
 		responses: []*http.Response{handlerThoughtStream(generation)},
 		errors:    []error{nil, errors.New("dial tcp: connection refused")},
+	}
+	if tc.secondGeneration != "" {
+		upstream.responses = append(upstream.responses, handlerThoughtStream(tc.secondGeneration))
+		upstream.errors = []error{nil, nil}
 	}
 	antigravityService := service.NewAntigravityGatewayService(
 		nil,
@@ -187,10 +224,15 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	}
 
 	body := []byte(`{"model":"client-alias","messages":[{"role":"user","content":"question"}],"stream":false}`)
+	path := "/v1/chat/completions"
+	if tc.messages {
+		body = []byte(`{"model":"client-alias","max_tokens":64,"messages":[{"role":"user","content":"question"}],"stream":false}`)
+		path = "/v1/messages"
+	}
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	ctx := context.WithValue(context.Background(), ctxkey.Group, group)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(ctx)
+	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)).WithContext(ctx)
 	c.Request.Header.Set("Content-Type", "application/json")
 	apiKey := &service.APIKey{
 		ID: 9302, UserID: 9303, GroupID: &groupID, Group: group, Status: service.StatusActive,
@@ -199,7 +241,11 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 10})
 
-	h.ChatCompletions(c)
+	if tc.messages {
+		h.Messages(c)
+	} else {
+		h.ChatCompletions(c)
+	}
 
 	// 下游：第一代的合法内容 + 非成功终态，没有成功完成信号，也没有第二个错误响应体。
 	wantStatus := http.StatusOK
@@ -222,9 +268,15 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	} else {
 		require.NotContains(t, wire, "reasoning_content", "do not invent thinking in a truly empty result")
 	}
-	require.Contains(t, wire, `"finish_reason":null`, "追加生成失败不得伪装成成功完成")
-	require.NotContains(t, wire, `"finish_reason":"stop"`)
-	if noAnswer {
+	if tc.messages {
+		require.Contains(t, wire, `"stop_reason":null`, "非流式 Messages 终态必须保持非成功")
+		require.NotContains(t, wire, `"stop_reason":"end_turn"`)
+	} else {
+		require.Contains(t, wire, `"finish_reason":null`, "追加生成失败不得伪装成成功完成")
+		require.NotContains(t, wire, `"finish_reason":"stop"`)
+	}
+	expectsFailure := noAnswer || tc.expectFailure
+	if expectsFailure {
 		code := tc.wantCode
 		if code == "" {
 			code = "antigravity_thinking_only"
@@ -233,9 +285,17 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 			}
 		}
 		require.Contains(t, wire, `"code":"`+code+`"`)
-		require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error"`)), "one protocol error, no generic duplicate")
-		require.Contains(t, wire, `"prompt_tokens":8`)
-		require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.completion_tokens").Int())
+		if tc.messages {
+			require.True(t, json.Valid(recorder.Body.Bytes()), "Messages error response must be one valid JSON document")
+			require.Equal(t, "error", gjson.Get(wire, "type").String())
+			require.Equal(t, int64(tc.wantInput), gjson.Get(wire, "usage.input_tokens").Int())
+			require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.output_tokens").Int())
+			require.Equal(t, int64(tc.wantCache), gjson.Get(wire, "usage.cache_read_input_tokens").Int())
+		} else {
+			require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error"`)), "one protocol error, no generic duplicate")
+			require.Contains(t, wire, `"prompt_tokens":8`)
+			require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.completion_tokens").Int())
+		}
 	} else {
 		require.NotContains(t, wire, "answer")
 		require.NotContains(t, wire, `"error"`, "Task24 终态错误已被视为已告知，不再补写错误响应")
@@ -249,10 +309,17 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	require.Equal(t, int64(1), concurrencyCache.accountAcquires.Load(), "账号槽位只获取一次")
 	require.Equal(t, int64(1), concurrencyCache.accountReleases.Load(), "账号槽位必须释放一次，不能泄漏")
 
-	// 计费：第一代用量经由 Handler 的错误分支入账（usageLogRepo.Create seam）。
-	require.Len(t, usageLogRepo.created, 1, "第一代恰好入账一次")
-	require.Equal(t, 8, usageLogRepo.created[0].InputTokens, "入账的是第一代的真实用量")
+	// 计费：累计实测用量经由 Handler 的错误分支入账（usageLogRepo.Create seam）。
+	require.Len(t, usageLogRepo.created, 1, "请求恰好入账一次")
+	wantInput := tc.wantInput
+	if wantInput == 0 {
+		wantInput = 8
+	}
+	require.Equal(t, wantInput, usageLogRepo.created[0].InputTokens, "入账的是累计实测用量")
 	require.Equal(t, wantOutput, usageLogRepo.created[0].OutputTokens)
+	if tc.messages || tc.wantCache != 0 {
+		require.Equal(t, tc.wantCache, usageLogRepo.created[0].CacheReadTokens)
+	}
 	require.Equal(t, account.ID, usageLogRepo.created[0].AccountID)
 }
 
