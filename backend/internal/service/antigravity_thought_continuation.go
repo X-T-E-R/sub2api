@@ -883,7 +883,7 @@ func jsonNumberAsInt64(value any) (int64, bool) {
 // the finished generations remain billable even then. Callers exclude a fallback
 // body from the first generation, whose usage already contains this baseline.
 func antigravityAddUsageBaselineToResponse(response map[string]any, baseline map[string]int64) {
-	if len(response) == 0 || len(baseline) == 0 {
+	if response == nil || len(baseline) == 0 {
 		return
 	}
 	usage, _ := response["usageMetadata"].(map[string]any)

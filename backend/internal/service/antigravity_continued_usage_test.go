@@ -36,6 +36,13 @@ func TestAntigravityContinuedUsageAcrossProtocols(t *testing.T) {
 			wantInput: 2049, wantCache: 378694,
 		},
 		{
+			name: "second_empty_response_object_without_usage",
+			second: func() *http.Response {
+				return antigravityThoughtStreamResponse(`data: {"response":{}}`)
+			},
+			wantInput: 2049, wantCache: 378694,
+		},
+		{
 			name: "second_missing_terminal_without_usage",
 			second: func() *http.Response {
 				return antigravityThoughtStreamResponse(`data: {"response":{"candidates":[{"content":{"parts":[]}}]}}`)
