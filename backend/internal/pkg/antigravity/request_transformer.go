@@ -52,6 +52,9 @@ type TransformOptions struct {
 	// True means a suffix, template, or effort override already selected the model,
 	// so output_config.effort must not also be written as thinkingLevel.
 	EffortResolvedByMapping bool
+	// SessionID is the authenticated, explicitly session-scoped gateway identity.
+	// Empty retains the existing metadata/content fallback for direct callers.
+	SessionID string
 }
 
 func DefaultTransformOptions() TransformOptions {
@@ -229,6 +232,9 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// 如果提供了 metadata.user_id，优先使用
 	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
 		innerRequest.SessionID = claudeReq.Metadata.UserID
+	}
+	if opts.SessionID != "" {
+		innerRequest.SessionID = opts.SessionID
 	}
 
 	// 6. 包装为 v1internal 请求
