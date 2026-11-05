@@ -1,0 +1,41 @@
+{
+  "state": "carrier_verified_image_and_backup_ready_waiting_authorized_production_window",
+  "source": {
+    "commit": "16cd6eab05b4ef605d08d7980c2d2853741d5a17",
+    "parent": "2dc8640c1d9b23e8c9cf24b332baaba463bde2ca",
+    "context": "git archive of source commit, not the worktree or current main HEAD",
+    "build_task": "bash-lvgqc29h",
+    "platform": "linux/amd64"
+  },
+  "image": {
+    "tag": "sub2api-argon-keepalive:16cd6eab0",
+    "runtime_id_after_archive_load": "sha256:a04689c655a9293b2805ab65e94c1c6439179c03fe4c5faa90b7a3e5d7094b73",
+    "config_digest": "sha256:c9dfd2d331abefa756c60529a9fdf9ba0c680ae41c382d5d447e73d098ab0490",
+    "archive": "E:/kiki-wt/sub2-argon-sse-524-20261106/.agent/release/argon-keepalive-20261106/sub2api-argon-keepalive-16cd6eab0-linux-amd64.tar.gz",
+    "archive_bytes": 44340133,
+    "archive_transfer_sha256": "9dcf3a471865c6907964b69be2a49cd87e09b18dc4ba965f425458cf94ddbeb5",
+    "archive_task": "bash-ht1vv7je",
+    "local_load_and_version": "docker image load --input archive; image ID a04689c6; docker run --rm --network none --entrypoint /app/sub2api tag -version => 0.1.183, source commit 16cd6eab05b4ef605d08d7980c2d2853741d5a17, build date 2026-11-05T19:45:46Z",
+    "gcp_staged_by_parent": {
+      "task": "bash-sruky0ue",
+      "archive": "/opt/sub2api-argon-keepalive-20261106/sub2api-argon-keepalive-16cd6eab0-linux-amd64.tar.gz",
+      "probe": "created, network none, never started; .Image=a04689c6 and OCI revision=16cd6eab0; probe then removed",
+      "active_app_changed": false
+    }
+  },
+  "ingress": {
+    "public": "inet/output priority -101: effective/file-system UID 33 new SYN to 127.0.0.1:17861 gets TCP reset before DNAT; root is not matched",
+    "private": "native bridge/forward priority -1: match ingress and egress logical bridge br-522fc2807c92, TCP dport 8080, initial SYN only, DROP; no Sub2 IP pin",
+    "temporary_tables": "one per-run name in inet and bridge, added/deleted in single netlink batches; ownership and exact rules checked from nft JSON",
+    "target_kernel": "GCP Debian 6.1.0-54-cloud-amd64, nft 1.0.6; native bridge TCP reset unsupported even though table/chain and bridge DROP work; no dependency on absent br_netfilter sysctls",
+    "target_fixture": "python -B run_target_netns_fixture.py, bash-nh133icw and final same rule repeat after table preflight change; two fresh connections blocked with both counters incrementing; existing public/private streams completed; root health bypass works before and after replacement/DNAT change; private replacement IP still gated, synthetic 5432 passed, both scoped tables removed, unrelated table preserved; no host network/rules or remote files modified",
+    "atomic_failure": "Docker Desktop Linux kernel lacks native bridge family; deliberately sending final mixed-family batch failed with neither table left behind"
+  },
+  "checks": {
+    "unit": "Python 3.11 Linux container; python -B -m unittest -v test_release.py; 14 passed in 14.689s; 26 apply and 32 rollback mutation interruptions, 20 apply and 18 rollback durable-phase interruptions; bounded drain, no-switch busy and proof failure reopen, restore failure retains gate, lost DELETE converges without a second switch",
+    "docker": "bash-fsh16jmw exit 0, 33.944s; real local Docker API clone, TERM, network detach/attach, health, switch/latest-binding rollback and accepted CREATE with lost ACK; 9 TCP exec samples; systemd and nft stubbed here, actual nft verified separately on target kernel",
+    "systemd": "command contract checked: system service, --no-block, Type=oneshot, 600s start/stop timeouts, ExecStopPost recovery; GCP production unit not started",
+    "backup_api": "parent confirmed lag receiver and GCP source compatibility both installed by 21:01:13Z; live old app source-check passed; carrier asserts actual old/new/rollback identities before reopening",
+    "provider_requests_by_this_owner": 0
+  }
+}
