@@ -1465,16 +1465,15 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamKeepaliveInterval > 0 {
 		keepaliveInterval = time.Duration(s.settingService.cfg.Gateway.StreamKeepaliveInterval) * time.Second
 	}
-	var keepaliveTicker *time.Ticker
-	if keepaliveInterval > 0 {
-		keepaliveTicker = time.NewTicker(keepaliveInterval)
-		defer keepaliveTicker.Stop()
-	}
+	// Upstream comments and unconvertible lines do not reach the client. Only
+	// flushed downstream output can postpone its keepalive.
+	var keepaliveTimer *time.Timer
 	var keepaliveCh <-chan time.Time
-	if keepaliveTicker != nil {
-		keepaliveCh = keepaliveTicker.C
+	if keepaliveInterval > 0 {
+		keepaliveTimer = time.NewTimer(keepaliveInterval)
+		defer keepaliveTimer.Stop()
+		keepaliveCh = keepaliveTimer.C
 	}
-	lastDataAt := time.Now()
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity claude")
 	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
@@ -1589,7 +1588,6 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				return nil, fmt.Errorf("stream read error: %w", ev.err)
 			}
 
-			lastDataAt = time.Now()
 			s.observeAntigravityGeminiSSELine(c, ev.line)
 			if cont != nil {
 				// 观察这一代上游响应，并决定成功终态是否允许发往下游。追加生成之前的
@@ -1606,7 +1604,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 					ms := int(time.Since(startTime).Milliseconds())
 					firstTokenMs = &ms
 				}
-				cw.Write(claudeEvents)
+				if cw.Write(claudeEvents) && keepaliveTimer != nil {
+					keepaliveTimer.Reset(keepaliveInterval)
+				}
 			}
 
 		case <-intervalCh:
@@ -1629,14 +1629,11 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			if cw.Disconnected() {
 				continue
 			}
-			if time.Since(lastDataAt) < keepaliveInterval {
-				continue
-			}
-			// SSE ping 事件：Anthropic 原生格式，客户端会正确处理，
-			// 同时保持连接活跃防止 Cloudflare Tunnel 等代理断开
-			if !cw.Fprintf("event: ping\ndata: {\"type\": \"ping\"}\n\n") {
+			// Preserve Anthropic's ping frame; this is transport activity only.
+			if cw.Fprintf("event: ping\ndata: {\"type\": \"ping\"}\n\n") {
+				keepaliveTimer.Reset(keepaliveInterval)
+			} else {
 				logger.LegacyPrintf("service.antigravity_gateway", "Client disconnected during keepalive ping (antigravity claude), continuing to drain upstream for billing")
-				continue
 			}
 		}
 	}
