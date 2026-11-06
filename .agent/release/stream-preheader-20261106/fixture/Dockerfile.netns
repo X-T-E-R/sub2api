@@ -1,0 +1,2 @@
+FROM python:3.11-slim-trixie
+RUN apt-get update && apt-get install -y --no-install-recommends nftables iproute2 procps && rm -rf /var/lib/apt/lists/*

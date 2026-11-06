@@ -1,0 +1,47 @@
+{
+  "state": "carrier_unbound_pending_replacement_pair",
+  "release": {
+    "name": "sub2-stream-preheader-20261106",
+    "root": "/opt/sub2api-stream-preheader-20261106",
+    "base_revision": "16cd6eab05b4ef605d08d7980c2d2853741d5a17",
+    "old_image_runtime_id": "sha256:a04689c655a9293b2805ab65e94c1c6439179c03fe4c5faa90b7a3e5d7094b73",
+    "candidate_binding": "unbound_until_parent_supplies_replacement_local_saved_or_loaded_oci_pair",
+    "prepare_guard": "release_identity_unbound; the revoked b4/9c16 pair is not eligible"
+  },
+  "revoked_candidate_reference": {
+    "source_revision": "b4cdd97ec77dbd821e42f194ee80159d9d5910ce",
+    "image_runtime_id": "sha256:9c16868f747946c0301a703cd6136b148e0b63aeef7c23e26cde8bca5e18052d",
+    "reason": "product HTTP passthrough response masking; do not bind or prepare",
+    "archive": "E:/kiki-wt/sub2-stream-preheader-20261106/.tmp/sub2api-stream-preheader-b4cdd97ec-linux-amd64.tar.gz",
+    "bytes": 44361603,
+    "transfer_sha256": "6afd8e8619cffbebe72b40cbce2f7af590d227a2ba5bcd006585f4f8ccda7174",
+    "build_task": "bash-x1212hjo",
+    "load_version_task": "bash-6iw6255k",
+    "version": "0.1.183",
+    "built_at": "2026-11-06T13:29:33Z",
+    "status": "reference_only"
+  },
+  "candidate_env": {
+    "append_exactly": "GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED=true",
+    "preserve": "all_existing_entries_and_order",
+    "rollback": "restore_original_old_snapshot_env"
+  },
+  "activation": {
+    "kiki_consumer": "pending_parent_acceptance",
+    "source_check_receiver_allowlist": "pending_owner_244",
+    "remote_stage": "pending_parent_acceptance",
+    "parent_approval": "pending"
+  },
+  "checks": {
+    "linux_unit_suite": "16 tests passed in local python:3.11-slim-trixie, network none, read-only clone bind",
+    "docker_fixture": "passed: actual local daemon; 3 lifecycle cases; 9 TCP exec samples; provider requests 0",
+    "native_bridge_fixture": "not_run; ingress_gate unchanged and prior evidence retained",
+    "remote_or_provider_execution": "not_run",
+    "production_evidence": "none_claimed"
+  },
+  "reference_only": {
+    "prior_release_receipt": "E:/kiki-wt/sub2-argon-sse-524-20261106/.agent/release/argon-keepalive-20261106/receipt.json",
+    "prior_candidate_archive": "E:/kiki-wt/sub2-argon-sse-524-20261106/.agent/release/argon-keepalive-20261106/sub2api-argon-keepalive-16cd6eab0-linux-amd64.tar.gz",
+    "prior_gcp_archive": "/opt/sub2api-argon-keepalive-20261106/sub2api-argon-keepalive-16cd6eab0-linux-amd64.tar.gz"
+  }
+}
