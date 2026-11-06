@@ -204,6 +204,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 	c.Request = c.Request.WithContext(service.WithAntigravityRequestEffort(c.Request.Context(), body))
 	setOpsRequestContext(c, modelName, stream)
+	service.ConfigureStreamPreheader(c, h.cfg, "gemini", stream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(stream, false)))
 	pricingCtx, pricingAt := service.WithGatewayTokenRequestPricing(c.Request.Context())
 	c.Request = c.Request.WithContext(pricingCtx)
@@ -581,6 +582,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				if service.StreamPreheaderCommitted(c) {
+					h.handleGeminiFailoverExhausted(c, failoverErr)
+					return
+				}
 				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
 				switch failoverAction {
 				case FailoverContinue:
@@ -595,8 +600,8 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 			// ForwardNative already wrote the response
 			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			// Task24：该错误类型不是 failover 错误，第一代已经下发的部分结果必须先入账。
-			if service.IsAntigravityPartialResponseError(err) {
+			// Terminal streams still account for usage observed before the failure.
+			if service.IsAntigravityPartialResponseError(err) || service.StreamPreheaderFinalized(c) {
 				submitUsage(result)
 			}
 			return
@@ -651,6 +656,9 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 
+	if service.FinishStreamPreheaderFailover(c, failoverErr) {
+		return
+	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 

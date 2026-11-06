@@ -296,6 +296,14 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
+		if StreamPreheaderConfigured(c) {
+			if !c.Writer.Written() {
+				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason)
+			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason); frame != "" {
+				cw.Write([]byte(frame))
+			}
+			return
+		}
 		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 
@@ -1488,6 +1496,14 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
+		if StreamPreheaderConfigured(c) {
+			if !c.Writer.Written() {
+				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason)
+			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason); frame != "" {
+				cw.Write([]byte(frame))
+			}
+			return
+		}
 		cw.Fprintf("event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 	}
 

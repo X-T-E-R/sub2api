@@ -196,7 +196,11 @@ func (s *GatewayService) executeBedrockUpstream(
 			return nil, err
 		}
 
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, nil)
+		var terminal bool
+		resp, err, terminal = s.doStreamUpstream(c, upstreamReq, proxyURL, account, nil, modelID)
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()

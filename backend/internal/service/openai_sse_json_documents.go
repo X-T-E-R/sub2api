@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -52,12 +51,12 @@ func splitOpenAIConcatenatedJSONDocuments(payload []byte) ([][]byte, bool) {
 }
 
 type openAISSEJSONDocumentScanner struct {
-	scanner *bufio.Scanner
+	scanner streamLineScanner
 	pending []string
 	current string
 }
 
-func newOpenAISSEJSONDocumentScanner(scanner *bufio.Scanner) *openAISSEJSONDocumentScanner {
+func newOpenAISSEJSONDocumentScanner(scanner streamLineScanner) *openAISSEJSONDocumentScanner {
 	return &openAISSEJSONDocumentScanner{scanner: scanner}
 }
 

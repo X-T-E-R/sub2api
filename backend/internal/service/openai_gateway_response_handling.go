@@ -318,11 +318,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return
 		}
 		errorEventSent = true
-		payload := `{"type":"error","sequence_number":0,"error":{"type":"upstream_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			return
 		}
+		if StreamPreheaderCommitted(c) {
+			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, streamPreheaderResponseMeta{id: responseID, model: originalModel})
+			return
+		}
+		payload := `{"type":"error","sequence_number":0,"error":{"type":"upstream_error","message":` + strconv.Quote(reason) + `,"code":` + strconv.Quote(reason) + `}}`
 		if _, err := writePendingString("data: " + payload + "\n\n"); err != nil {
 			clientDisconnected = true
 			return
@@ -400,6 +404,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if !sawTerminalEvent {
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
+			}
+			if StreamPreheaderCommitted(c) {
+				sendErrorEvent("Upstream stream ended before a terminal event")
 			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
@@ -948,6 +955,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
 					continue
 				}
+				markStreamPreheaderBodyHeartbeat(c)
 				flusher.Flush()
 				lastDownstreamWriteAt = time.Now()
 				continue
@@ -961,6 +969,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				clientDisconnected = true
 				logger.LegacyPrintf("service.openai_gateway", "Client disconnected during keepalive flush, continuing to drain upstream for billing")
 			} else {
+				markStreamPreheaderBodyHeartbeat(c)
 				lastDownstreamWriteAt = time.Now()
 			}
 		}

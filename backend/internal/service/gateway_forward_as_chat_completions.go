@@ -126,7 +126,10 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	}
 
 	// 11. Send request
-	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err, terminal := s.doStreamUpstream(c, upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), mappedModel)
+	if terminal {
+		return nil, err
+	}
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -378,13 +381,16 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	sawMessageStop := false
 
-	scanner := bufio.NewScanner(resp.Body)
+	source := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	source.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	scanner, stopKeepalive := newStreamPreheaderScanner(c, source)
+	defer stopKeepalive()
 
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
@@ -463,11 +469,19 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			continue
 		}
 
+		if StreamPreheaderConfigured(c) && event.Type == "error" && !sawMessageStop {
+			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed")
+		}
+		sawMessageStop = sawMessageStop || event.Type == "message_stop"
 		if processAnthropicEvent(&event) {
 			return resultWithUsage(), nil
 		}
 	}
 
+	if StreamPreheaderConfigured(c) && !sawMessageStop {
+		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before message_stop")
+	}
 	if err := scanner.Err(); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_cc stream: read error",

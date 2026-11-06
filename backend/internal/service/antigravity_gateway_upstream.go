@@ -79,7 +79,15 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	}
 
 	// 发送请求
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err, terminal := requestStreamPreheader(c, req, account,
+		func(request *http.Request) (*http.Response, error) {
+			return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+		}, func(response *http.Response, body []byte) {
+			s.handleUpstreamError(ctx, prefix, account, response.StatusCode, response.Header, body, originalModel, 0, "", false)
+		})
+	if terminal {
+		return nil, err
+	}
 	if err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s upstream request failed: %v", prefix, err)
 		return nil, fmt.Errorf("upstream request failed: %w", err)

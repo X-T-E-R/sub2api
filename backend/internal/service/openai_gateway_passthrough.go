@@ -357,11 +357,14 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 		telemetryAttempt := beginCodexHTTPAttempt(c, account)
 		upstreamStart := time.Now()
-		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err, terminal := s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
 		if resp != nil {
 			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
 		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 			// a failover so the handler switches to a healthy account.
@@ -1039,6 +1042,9 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 	}
 	if c == nil || c.Writer == nil {
 		return false
+	}
+	if StreamPreheaderCommitted(c) {
+		return true
 	}
 	// compact keepalive comments commit the HTTP response as 200, but they are
 	// not semantic model output and therefore must not block a safe retry.
@@ -1762,7 +1768,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	startTime time.Time,
 	originalModel string,
 	mappedModel string,
-) (*openaiStreamingResultPassthrough, error) {
+) (result *openaiStreamingResultPassthrough, resultErr error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -1838,8 +1844,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// 用 startOpenAISSEKeepalive 而不是 StartOpenAICompactSSEKeepalive：后者会检查
 	// compact 标记，而这里是普通 /v1/responses 透传。走到这一行时上游已回
 	// text/event-stream、SSE 响应头也已设好，处于流式上下文是确定的。
+	preheaderConfigured := StreamPreheaderConfigured(c)
 	stopKeepalive := func() {}
-	if s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
+	if !preheaderConfigured && s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
 		stopKeepalive = startOpenAISSEKeepalive(c,
 			time.Duration(s.cfg.Gateway.StreamKeepaliveInterval)*time.Second)
 	}
@@ -1894,10 +1901,18 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
-	scanBuf := getSSEScannerBuf64K()
-	scanner.Buffer(scanBuf[:0], maxLineSize)
-	defer putSSEScannerBuf64K(scanBuf)
-	documentScanner := newOpenAISSEJSONDocumentScanner(scanner)
+	if preheaderConfigured {
+		// The request thread may leave the parser before the read unblocks.
+		// This reader's buffer cannot be returned to the shared scanner pool.
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	} else {
+		scanBuf := getSSEScannerBuf64K()
+		scanner.Buffer(scanBuf[:0], maxLineSize)
+		defer putSSEScannerBuf64K(scanBuf)
+	}
+	lineScanner, stopBodyKeepalive := newStreamPreheaderScanner(c, scanner)
+	defer stopBodyKeepalive()
+	documentScanner := newOpenAISSEJSONDocumentScanner(lineScanner)
 
 	needModelReplace := strings.TrimSpace(originalModel) != "" && strings.TrimSpace(mappedModel) != "" && strings.TrimSpace(originalModel) != strings.TrimSpace(mappedModel)
 	resultWithUsage := func() *openaiStreamingResultPassthrough {
@@ -1910,6 +1925,20 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 	}
 
+	defer func() {
+		if resultErr == nil || sawTerminalEvent || failureDelivered || clientDisconnected || !StreamPreheaderCommitted(c) {
+			return
+		}
+		var failover *UpstreamFailoverError
+		if errors.As(resultErr, &failover) {
+			return // The handler preserves the typed failure's status and retry hint.
+		}
+		if flushPending {
+			_, _ = fmt.Fprintln(w)
+			flushPendingOutput()
+		}
+		_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event", streamPreheaderResponseMeta{id: responseID, model: originalModel})
+	}()
 	for documentScanner.Scan() {
 		line := documentScanner.Text()
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {

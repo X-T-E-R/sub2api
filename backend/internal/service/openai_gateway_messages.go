@@ -383,12 +383,16 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return nil, fmt.Errorf("build grok retry request: %w", err)
 			}
 		}
+		var terminal bool
 		if account.Platform == PlatformGrok {
 			var freshTransportRetryAttempted bool
-			resp, err, freshTransportRetryAttempted = s.doGrokUpstreamWithFreshConnectionRetry(upstreamReq, proxyURL, account, !freshTransportRetryUsed)
+			resp, err, terminal, freshTransportRetryAttempted = s.doGrokStreamUpstreamWithFreshConnectionRetry(c, upstreamReq, proxyURL, account, !freshTransportRetryUsed)
 			freshTransportRetryUsed = freshTransportRetryUsed || freshTransportRetryAttempted
 		} else {
-			resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+			resp, err, terminal = s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
+		}
+		if terminal {
+			return nil, err
 		}
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)

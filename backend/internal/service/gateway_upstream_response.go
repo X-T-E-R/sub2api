@@ -816,6 +816,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		if message == "" {
 			message = reason
 		}
+		if StreamPreheaderCommitted(c) {
+			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, reason, message)
+			return
+		}
 		body, err := json.Marshal(map[string]any{
 			"type": "error",
 			"error": map[string]string{
@@ -1007,6 +1011,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			if !ok {
 				// 上游完成，返回结果
 				if !sawTerminalEvent {
+					if StreamPreheaderCommitted(c) && !clientDisconnected {
+						sendErrorEvent("upstream_error", "Upstream stream ended before a terminal event")
+					}
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
@@ -1136,6 +1143,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				logger.LegacyPrintf("service.gateway", "Client disconnected during keepalive ping, continuing to drain upstream for billing")
 				continue
 			}
+			markStreamPreheaderBodyHeartbeat(c)
 			flusher.Flush()
 			lastDataAt = time.Now()
 			resetKeepaliveTimer()

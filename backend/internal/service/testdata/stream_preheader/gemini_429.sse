@@ -1,0 +1,4 @@
+: keepalive
+
+data: {"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"sub2api.gateway","metadata":{"retryAfter":"17"},"reason":"GATEWAY_STREAM_TERMINAL_ERROR"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"17s"}],"message":"Upstream rate limit exceeded","status":"RESOURCE_EXHAUSTED"}}
+

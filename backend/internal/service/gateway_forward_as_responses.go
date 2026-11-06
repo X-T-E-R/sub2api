@@ -139,7 +139,10 @@ func (s *GatewayService) ForwardAsResponses(
 	}
 
 	// 11. Send request
-	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err, terminal := s.doStreamUpstream(c, upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), mappedModel)
+	if terminal {
+		return nil, err
+	}
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -503,13 +506,16 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	sawMessageStop := false
 
-	scanner := bufio.NewScanner(resp.Body)
+	source := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	source.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	scanner, stopKeepalive := newStreamPreheaderScanner(c, source)
+	defer stopKeepalive()
 
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
@@ -620,11 +626,21 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			continue
 		}
 
+		if StreamPreheaderConfigured(c) && eventType == "error" && !sawMessageStop {
+			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed",
+				streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
+		}
+		sawMessageStop = sawMessageStop || event.Type == "message_stop"
 		if processEvent(&event) {
 			return resultWithUsage(), nil
 		}
 	}
 
+	if StreamPreheaderConfigured(c) && !sawMessageStop {
+		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before message_stop",
+			streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
+	}
 	if err := scanner.Err(); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_responses stream: read error",

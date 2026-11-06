@@ -1022,11 +1022,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Send request
 		telemetryAttempt := beginCodexHTTPAttempt(c, account)
 		upstreamStart := time.Now()
-		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err, terminal := s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
 		if resp != nil {
 			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
 		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		if terminal {
+			if headerGuard != nil {
+				headerGuard.close()
+			}
+			return nil, err
+		}
 		if headerGuard != nil && headerGuard.stopHeaderWait() {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()

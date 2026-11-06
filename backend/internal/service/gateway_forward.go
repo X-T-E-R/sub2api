@@ -387,7 +387,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		lastWireBody = wireBody
 
 		// 发送请求
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+		var terminal bool
+		resp, err, terminal = s.doStreamUpstream(c, upstreamReq, proxyURL, account, tlsProfile, reqModel)
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()

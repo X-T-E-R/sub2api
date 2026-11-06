@@ -149,8 +149,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		isStickySession: isStickySession, // Forward 由上层判断粘性会话
 		groupID:         0,               // Forward 方法没有 groupID，由上层处理粘性会话清除
 		sessionHash:     "",              // Forward 方法没有 sessionHash，由上层处理粘性会话清除
+		allowPreheader:  claudeReq.Stream,
 	})
 	if err != nil {
+		if StreamPreheaderFinalized(c) {
+			return nil, err
+		}
 		// 检查是否是账号切换信号，转换为 UpstreamFailoverError 让 Handler 切换账号
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
 			return nil, &UpstreamFailoverError{

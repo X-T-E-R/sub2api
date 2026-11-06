@@ -496,6 +496,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	service.SetOpenAIHTTPResponseOwner(c, subject.UserID, apiKey.ID)
 
 	setOpsRequestContext(c, reqModel, reqStream)
+	if !legacyCompact && !nativeV2 {
+		service.ConfigureStreamPreheader(c, h.cfg, "responses", reqStream)
+	}
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	if h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
 		return
@@ -1172,6 +1175,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
 	setOpsRequestContext(c, reqModel, reqStream)
+	service.ConfigureStreamPreheader(c, h.cfg, "messages", reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	if h.rejectIfCyberSessionBlocked(c, apiKey, body, reqModel, cyberBlockFormatAnthropic) {
 		return
@@ -1549,6 +1553,9 @@ func (h *OpenAIGatewayHandler) anthropicErrorResponse(c *gin.Context, status int
 // anthropicStreamingAwareError handles errors that may occur during streaming,
 // using Anthropic SSE error format.
 func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, status int, errType, message string, streamStarted bool) {
+	if service.FinishStreamPreheaderError(c, status, errType, message, nil) {
+		return
+	}
 	if streamStarted {
 		flusher, ok := c.Writer.(http.Flusher)
 		if ok {
@@ -1569,6 +1576,9 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
+	if failoverErr != nil && service.FinishStreamPreheaderFailover(c, failoverErr) {
+		return
+	}
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	}
@@ -1591,7 +1601,10 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 
 // ensureAnthropicErrorResponse writes a fallback Anthropic error if no response was written.
 func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, streamStarted bool) bool {
-	if c == nil || c.Writer == nil || c.Writer.Written() {
+	if c == nil || c.Writer == nil || service.StreamPreheaderFinalized(c) || service.IsResponseCommitted(c) {
+		return false
+	}
+	if c.Writer.Written() && !service.StreamPreheaderCommitted(c) {
 		return false
 	}
 	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
@@ -2918,6 +2931,9 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
 	}
+	if service.FinishStreamPreheaderFailover(c, failoverErr) {
+		return
+	}
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(
@@ -3074,6 +3090,9 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 	streamStarted bool,
 	countTowardsSLA bool,
 ) {
+	if service.FinishStreamPreheaderError(c, status, errType, message, nil) {
+		return
+	}
 	// body-signal compact 心跳可能已把响应头提交为 200：先停心跳（建立
 	// happens-before，接管 ResponseWriter），并升级为流内错误处理。
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
@@ -3224,7 +3243,7 @@ func openAIForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForwa
 }
 
 func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failoverErr *service.UpstreamFailoverError) bool {
-	if c == nil || c.Writer == nil {
+	if c == nil || c.Writer == nil || service.StreamPreheaderCommitted(c) || service.StreamPreheaderFinalized(c) {
 		return false
 	}
 	if c.Request != nil && !service.CodexSessionMayRetry(c.Request.Context(), failoverErr) {

@@ -39,6 +39,7 @@ type antigravityRetryLoopParams struct {
 	isStickySession bool   // 是否为粘性会话（用于账号切换时的缓存计费判断）
 	groupID         int64  // 用于模型级限流时清除粘性会话
 	sessionHash     string // 用于模型级限流时清除粘性会话
+	allowPreheader  bool   // only the initial inference loop, never continuation/rectification
 }
 
 // antigravityRetryLoopResult 重试循环的结果
@@ -550,13 +551,31 @@ urlFallbackLoop:
 				captureAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
 			}
 
-			resp, err = p.httpUpstream.Do(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency)
-			if captureAttempt != nil {
-				if resp != nil {
-					resp = captureAttempt.AttachResponse(resp)
-				} else if err != nil {
-					captureAttempt.MarkRequestError(err)
+			send := func(req *http.Request) (*http.Response, error) {
+				response, sendErr := p.httpUpstream.Do(req, p.proxyURL, p.account.ID, p.account.Concurrency)
+				if captureAttempt != nil && response != nil {
+					response = captureAttempt.AttachResponse(response)
 				}
+				if captureAttempt != nil && response == nil && sendErr != nil {
+					captureAttempt.MarkRequestError(sendErr)
+				}
+				return response, sendErr
+			}
+			if p.allowPreheader {
+				var terminal bool
+				resp, err, terminal = requestStreamPreheader(p.c, upstreamReq, p.account, send, func(response *http.Response, body []byte) {
+					status := response.StatusCode
+					if handled, _, _ := s.applyErrorPolicy(p, status, response.Header, body); !handled &&
+						!s.handleAntigravityModelRateLimitBeforePolicy(p, status, response.Header, body) {
+						s.handleUpstreamError(p.ctx, p.prefix, p.account, status, response.Header, body,
+							p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
+					}
+				})
+				if terminal {
+					return nil, err
+				}
+			} else {
+				resp, err = send(upstreamReq)
 			}
 			if err == nil && resp == nil {
 				err = errors.New("upstream returned nil response")

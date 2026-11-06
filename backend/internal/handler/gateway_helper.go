@@ -376,7 +376,9 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 	}
 
 	// Determine if ping is needed (streaming + ping format defined)
-	needPing := isStream && h.pingFormat != ""
+	// Opt-in preheader SSE begins only after billing, account admission and
+	// request construction; a queue heartbeat must not commit a premature 200.
+	needPing := isStream && h.pingFormat != "" && !service.StreamPreheaderConfigured(c)
 
 	var flusher http.Flusher
 	if needPing {

@@ -176,6 +176,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		customUA = defaultGrokUpstreamUserAgent()
 	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
+	if StreamPreheaderFinalized(c) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +278,9 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
-	scanner := s.newUpstreamSSEScanner(resp.Body)
+	source := s.newUpstreamSSEScanner(resp.Body)
+	scanner, stopPreheader := newStreamPreheaderScanner(c, source)
+	defer stopPreheader()
 
 	var usage OpenAIUsage
 	var firstTokenMs *int

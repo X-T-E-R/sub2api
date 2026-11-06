@@ -94,6 +94,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
 	setOpsRequestContext(c, reqModel, reqStream)
+	service.ConfigureStreamPreheader(c, h.cfg, "chat", reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	pricingCtx, pricingAt := service.WithGatewayTokenRequestPricing(c.Request.Context())
 	c.Request = c.Request.WithContext(pricingCtx)
@@ -363,7 +364,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Error(err),
 			)
 			// Task24：该错误类型不是 failover 错误，第一代的用量必须先入账再返回。
-			if service.IsAntigravityPartialResponseError(err) {
+			if service.IsAntigravityPartialResponseError(err) || (service.StreamPreheaderFinalized(c) && result != nil && result.FirstTokenMs != nil) {
 				submitUsage(result)
 			}
 			return
@@ -386,6 +387,9 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
+	if lastErr != nil && service.FinishStreamPreheaderFailover(c, lastErr) {
+		return
+	}
 	if streamStarted {
 		return
 	}

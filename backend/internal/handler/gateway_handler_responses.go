@@ -90,6 +90,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
 	setOpsRequestContext(c, reqModel, reqStream)
+	service.ConfigureStreamPreheader(c, h.cfg, "responses", reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	requestCtx := c.Request.Context()
 	// 定价上下文无条件装配：/v1/responses 是 token 计费端点，声明生图工具的
@@ -351,7 +352,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				zap.Error(err),
 			)
 			// Task24：该错误类型不是 failover 错误，第一代的用量必须先入账再返回。
-			if service.IsAntigravityPartialResponseError(err) {
+			if service.IsAntigravityPartialResponseError(err) || (service.StreamPreheaderFinalized(c) && result != nil && result.FirstTokenMs != nil) {
 				submitUsage(result)
 			}
 			return
@@ -374,6 +375,9 @@ func (h *GatewayHandler) responsesErrorResponse(c *gin.Context, status int, code
 
 // handleResponsesFailoverExhausted writes a failover-exhausted error in Responses format.
 func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
+	if lastErr != nil && service.FinishStreamPreheaderFailover(c, lastErr) {
+		return
+	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
 	}

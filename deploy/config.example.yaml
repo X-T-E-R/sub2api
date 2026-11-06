@@ -489,6 +489,15 @@ gateway:
   # Stream keepalive interval (seconds), 0=disable
   # 流式 keepalive 间隔（秒），0=禁用
   stream_keepalive_interval: 10
+  # Opt in for admitted HTTP SSE on Messages, Gemini streamGenerateContent,
+  # Chat Completions and Responses on this deployment, without key or model filters.
+  # Uses stream_keepalive_interval (0 disables). The first heartbeat commits HTTP 200;
+  # a later upstream rejection is a terminal SSE error, not a new attempt.
+  # Enable after clients understand gateway_stream_terminal_error (Gemini uses
+  # google.rpc.ErrorInfo domain=sub2api.gateway, reason=GATEWAY_STREAM_TERMINAL_ERROR).
+  # Non-streaming, Images, compact's existing policy and native WebSockets are unchanged.
+  # Environment: GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED
+  stream_preheader_keepalive_enabled: false
   # Image stream data interval timeout (seconds), 0=disable; independent from ordinary text streams
   # 图片流数据间隔超时（秒），0=禁用；独立于普通文本流式
   image_stream_data_interval_timeout: 900

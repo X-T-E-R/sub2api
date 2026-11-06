@@ -1,6 +1,12 @@
 package service
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/codextelemetry"
+	"github.com/gin-gonic/gin"
+)
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
@@ -16,6 +22,43 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		}
 	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+}
+
+// doOpenAIStreamUpstream applies the opt-in preheader heartbeat around exactly
+// one OpenAI transport attempt. The send closure intentionally delegates to
+// doOpenAIUpstream so OAuth plugins retain ownership of the real transport.
+// Callers must stop their normal error/retry/failover path when terminal is true.
+func (s *OpenAIGatewayService) doOpenAIStreamUpstream(c *gin.Context, req *http.Request, proxyURL string, account *Account) (*http.Response, error, bool) {
+	return requestStreamPreheader(c, req, account,
+		func(request *http.Request) (*http.Response, error) {
+			return s.doOpenAIUpstream(request, proxyURL, account)
+		}, func(resp *http.Response, body []byte) {
+			s.observeOpenAIStreamUpstream(c, account, resp, body)
+		})
+}
+
+// observeOpenAIStreamUpstream retains the existing health/rate-limit and
+// telemetry effects when the preheader helper consumes a late HTTP error.
+func (s *OpenAIGatewayService) observeOpenAIStreamUpstream(c *gin.Context, account *Account, resp *http.Response, body []byte) {
+	if c == nil || c.Request == nil || account == nil {
+		return
+	}
+	if telemetryAttempt := codexTelemetryAttemptFromContext(c); telemetryAttempt != nil {
+		telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
+	}
+	ctx := c.Request.Context()
+	model := ""
+	if value, ok := c.Get(OpsUpstreamModelKey); ok {
+		model, _ = value.(string)
+	}
+	if account.Platform == PlatformGrok {
+		s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, model), account, resp.StatusCode, resp.Header, body)
+		if model != "" && shouldMarkGrokTeamModelRateLimit(resp.StatusCode, body) {
+			markGrokTeamModelRateLimit(account, model, resolveGrokTeamRateLimitUntil(time.Now().Add(grokTeamRateLimitDefaultTTL), time.Now()))
+		}
+		return
+	}
+	s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, model)
 }
 
 // doOpenAIAccountTestUpstream 让 OpenAI OAuth 账号测试与真实转发使用同一插件路径。

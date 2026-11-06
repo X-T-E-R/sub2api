@@ -2620,6 +2620,23 @@ func TestLoad_DefaultGatewayUsageRecordConfig(t *testing.T) {
 	}
 }
 
+func TestLoadStreamPreheaderKeepaliveExplicitOptIn(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED", "")
+	t.Setenv("GATEWAY_STREAM_KEEPALIVE_INTERVAL", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.Gateway.StreamPreheaderKeepaliveEnabled)
+	require.Equal(t, 10, cfg.Gateway.StreamKeepaliveInterval)
+
+	t.Setenv("GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED", "true")
+	t.Setenv("GATEWAY_STREAM_KEEPALIVE_INTERVAL", "0")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.True(t, cfg.Gateway.StreamPreheaderKeepaliveEnabled)
+	require.Zero(t, cfg.Gateway.StreamKeepaliveInterval)
+}
+
 func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()

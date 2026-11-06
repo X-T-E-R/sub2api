@@ -109,7 +109,11 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 			input.Body = input.Parsed.Body.Bytes()
 		}
 
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+		var terminal bool
+		resp, err, terminal = s.doStreamUpstream(c, upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), input.RequestModel)
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -363,7 +367,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	account *Account,
 	startTime time.Time,
 	model string,
-) (*streamingResult, error) {
+) (result *streamingResult, resultErr error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -400,6 +404,16 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawTerminalEvent := false
+	inPartialEvent := false
+	defer func() {
+		if resultErr == nil || sawTerminalEvent || clientDisconnected || !StreamPreheaderCommitted(c) {
+			return
+		}
+		if inPartialEvent {
+			_, _ = io.WriteString(w, "\n")
+		}
+		_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+	}()
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -480,7 +494,6 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 		}
 		keepaliveTimer.Reset(keepaliveInterval)
 	}
-	inPartialEvent := false
 
 	for {
 		select {
@@ -587,6 +600,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 				logger.LegacyPrintf("service.gateway", "[Anthropic passthrough] Client disconnected during keepalive ping, continue draining upstream for usage: account=%d", account.ID)
 				continue
 			}
+			markStreamPreheaderBodyHeartbeat(c)
 			flusher.Flush()
 			lastDataAt = time.Now()
 			resetKeepaliveTimer()

@@ -145,9 +145,13 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		}
 
 		var freshTransportRetryAttempted bool
-		resp, err, freshTransportRetryAttempted = s.doGrokUpstreamWithFreshConnectionRetry(upstreamReq, proxyURL, account, !freshTransportRetryUsed)
+		var terminal bool
+		resp, err, terminal, freshTransportRetryAttempted = s.doGrokStreamUpstreamWithFreshConnectionRetry(c, upstreamReq, proxyURL, account, !freshTransportRetryUsed)
 		freshTransportRetryUsed = freshTransportRetryUsed || freshTransportRetryAttempted
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 		}
@@ -605,6 +609,39 @@ func (s *OpenAIGatewayService) doGrokUpstreamWithFreshConnectionRetry(req *http.
 	)
 	resp, err = freshUpstream.DoFresh(replayed, proxyURL, account.ID, account.Concurrency)
 	return resp, err, true
+}
+
+// doGrokStreamUpstreamWithFreshConnectionRetry puts the preheader wait around
+// each individual transport attempt. A failed first attempt may receive one
+// fresh-connection retry, but that retry is not placed inside the heartbeat
+// helper's transport goroutine.
+func (s *OpenAIGatewayService) doGrokStreamUpstreamWithFreshConnectionRetry(c *gin.Context, req *http.Request, proxyURL string, account *Account, allowFreshRetry bool) (*http.Response, error, bool, bool) {
+	resp, err, terminal := s.doOpenAIStreamUpstream(c, req, proxyURL, account)
+	if terminal || err == nil || !allowFreshRetry || !isGrokFreshConnectionRetryableTransportError(err) {
+		return resp, err, terminal, false
+	}
+	freshUpstream, ok := s.httpUpstream.(HTTPUpstreamFreshConnection)
+	if !ok {
+		return nil, err, false, false
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	replayed, replayErr := replayHTTPRequest(req)
+	if replayErr != nil {
+		return nil, err, false, false
+	}
+	slog.Warn("grok_transport_fresh_connection_retry",
+		"account_id", account.ID,
+		"transport_error", sanitizeOpenAITransportErrorMessage(err.Error()),
+	)
+	resp, err, terminal = requestStreamPreheader(c, replayed, account,
+		func(request *http.Request) (*http.Response, error) {
+			return freshUpstream.DoFresh(request, proxyURL, account.ID, account.Concurrency)
+		}, func(response *http.Response, body []byte) {
+			s.observeOpenAIStreamUpstream(c, account, response, body)
+		})
+	return resp, err, terminal, true
 }
 
 func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {

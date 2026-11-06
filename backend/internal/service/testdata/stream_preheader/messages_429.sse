@@ -1,0 +1,6 @@
+event: ping
+data: {"type":"ping"}
+
+event: error
+data: {"error":{"code":"gateway_stream_terminal_error","message":"Upstream rate limit exceeded","retry_after":"17","status":429,"type":"rate_limit_error"},"type":"error"}
+

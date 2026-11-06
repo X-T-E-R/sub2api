@@ -785,7 +785,11 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		var terminal bool
+		resp, err, terminal = s.doStreamUpstream(c, upstreamReq, proxyURL, account, mappedModel)
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -1070,11 +1074,13 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int
+	var streamErr error
 	if req.Stream {
 		streamRes, err := s.handleStreamingResponse(c, resp, startTime, originalModel)
-		if err != nil {
+		if streamRes == nil {
 			return nil, err
 		}
+		streamErr = err
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs
 	} else {
@@ -1104,6 +1110,12 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	imageInputSize := s.extractImageInputSize(body)
 	imageSize := normalizeOpenAIImageSizeTier(imageInputSize)
 	imageCount := resolveGeminiImageCount(c, originalModel, mappedModel)
+	if streamErr != nil {
+		imageCount = observedGeminiImageOutputs(c)
+		if *usage == (ClaudeUsage{}) && imageCount == 0 {
+			return nil, streamErr
+		}
+	}
 
 	return &ForwardResult{
 		RequestID:                     requestID,
@@ -1118,7 +1130,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		ImageCount:                    imageCount,
 		ImageSize:                     imageSize,
 		ImageInputSize:                imageInputSize,
-	}, nil
+	}, streamErr
 }
 
 func isGeminiSignatureRelatedError(respBody []byte) bool {
@@ -1324,7 +1336,11 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		var terminal bool
+		resp, err, terminal = s.doStreamUpstream(c, upstreamReq, proxyURL, account, mappedModel)
+		if terminal {
+			return nil, err
+		}
 		if err != nil {
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -1569,12 +1585,14 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int
+	var streamErr error
 
 	if stream {
 		streamRes, err := s.handleNativeStreamingResponse(c, resp, startTime, isOAuth)
-		if err != nil {
+		if streamRes == nil {
 			return nil, err
 		}
+		streamErr = err
 		usage = streamRes.usage
 		firstTokenMs = streamRes.firstTokenMs
 	} else {
@@ -1605,6 +1623,12 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	imageInputSize := s.extractImageInputSize(body)
 	imageSize := normalizeOpenAIImageSizeTier(imageInputSize)
 	imageCount := resolveGeminiImageCount(c, originalModel, mappedModel)
+	if streamErr != nil {
+		imageCount = observedGeminiImageOutputs(c)
+		if *usage == (ClaudeUsage{}) && imageCount == 0 {
+			return nil, streamErr
+		}
+	}
 
 	return &ForwardResult{
 		RequestID:                     requestID,
@@ -1619,7 +1643,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		ImageCount:                    imageCount,
 		ImageSize:                     imageSize,
 		ImageInputSize:                imageInputSize,
-	}, nil
+	}, streamErr
 }
 
 // checkErrorPolicyInLoop 在重试循环内预检查错误策略。
@@ -2101,11 +2125,24 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 			},
 		},
 	}
-	writeSSE(c.Writer, "message_start", messageStart)
-	flusher.Flush()
+	preheaderConfigured := StreamPreheaderConfigured(c)
+	messageStarted, sawDone := false, false
+	startMessage := func() {
+		if !messageStarted {
+			writeSSE(c.Writer, "message_start", messageStart)
+			flusher.Flush()
+			messageStarted = true
+		}
+	}
+	if !preheaderConfigured {
+		startMessage()
+	}
 
 	var firstTokenMs *int
 	var usage ClaudeUsage
+	failIncomplete := func(status int, kind, message string) (*geminiStreamResult, error) {
+		return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, writeConfiguredStreamFailure(c, status, kind, message)
+	}
 	finishReason := ""
 	sawToolUse := false
 
@@ -2118,10 +2155,14 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	openToolName := ""
 	seenToolJSON := ""
 
-	reader := bufio.NewReader(resp.Body)
+	reader, stopKeepalive := newStreamPreheaderReader(c, bufio.NewReader(resp.Body))
+	defer stopKeepalive()
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
+			if preheaderConfigured {
+				return failIncomplete(http.StatusBadGateway, "upstream_error", "Upstream stream disconnected")
+			}
 			return nil, fmt.Errorf("stream read error: %w", err)
 		}
 
@@ -2133,6 +2174,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "" || payload == "[DONE]" {
+			sawDone = sawDone || payload == "[DONE]"
 			if errors.Is(err, io.EOF) {
 				break
 			}
@@ -2155,11 +2197,23 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 			continue
 		}
 
+		if preheaderConfigured {
+			if upstreamError := gjson.GetBytes(unwrappedBytes, "error"); upstreamError.Exists() {
+				status := int(upstreamError.Get("code").Int())
+				if status < 400 || status > 599 {
+					status = http.StatusBadGateway
+				}
+				return failIncomplete(status, streamPreheaderErrorType(status, unwrappedBytes), sanitizeUpstreamErrorMessage(upstreamError.Get("message").String()))
+			}
+		}
 		if fr := extractGeminiFinishReason(geminiResp); fr != "" {
 			finishReason = fr
 		}
 
 		parts := extractGeminiParts(geminiResp)
+		if len(parts) > 0 {
+			startMessage()
+		}
 		for _, part := range parts {
 			if text, ok := part["text"].(string); ok && text != "" {
 				// Close an open tool_use block before starting text, mirroring
@@ -2307,6 +2361,10 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 		}
 	}
 
+	if preheaderConfigured && finishReason == "" && !sawDone {
+		return failIncomplete(http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+	}
+	startMessage()
 	if openBlockIndex >= 0 {
 		writeSSE(c.Writer, "content_block_stop", map[string]any{
 			"type":  "content_block_stop",
@@ -2702,18 +2760,28 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 		return nil, errors.New("streaming not supported")
 	}
 
-	reader := bufio.NewReader(resp.Body)
+	reader, stopKeepalive := newStreamPreheaderReader(c, bufio.NewReader(resp.Body))
+	defer stopKeepalive()
 	usage := &ClaudeUsage{}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
 	var firstTokenMs *int
+	preheaderConfigured := StreamPreheaderConfigured(c)
+	sawTerminal, eventOpen := false, false
+	failIncomplete := func(message string) (*geminiNativeStreamResult, error) {
+		if eventOpen && c.Request.Context().Err() == nil {
+			_, _ = io.WriteString(c.Writer, "\n\n")
+		}
+		return &geminiNativeStreamResult{usage: usage, firstTokenMs: firstTokenMs}, writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", message)
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
+			eventOpen = trimmed != ""
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 				// Keepalive / done markers
@@ -2737,6 +2805,17 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 
 					if u := extractGeminiUsage(rawBytes); u != nil {
 						usage = u
+					}
+					if preheaderConfigured {
+						gjson.GetBytes(rawBytes, "candidates").ForEach(func(_, candidate gjson.Result) bool {
+							if candidate.Get("finishReason").String() != "" {
+								sawTerminal = true
+							}
+							return true
+						})
+						if gjson.GetBytes(rawBytes, "error").Exists() || gjson.GetBytes(rawBytes, "promptFeedback.blockReason").String() != "" {
+							sawTerminal = true
+						}
 					}
 					observer.ObserveGemini(rawBytes)
 					observeGeminiImageOutputs(c, rawBytes)
@@ -2765,10 +2844,16 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 			break
 		}
 		if err != nil {
+			if StreamPreheaderCommitted(c) && !sawTerminal {
+				return failIncomplete("Upstream stream disconnected")
+			}
 			return nil, err
 		}
 	}
 
+	if StreamPreheaderCommitted(c) && !sawTerminal {
+		return failIncomplete("Upstream stream ended before a terminal event")
+	}
 	return &geminiNativeStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
 }
 

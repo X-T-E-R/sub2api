@@ -168,8 +168,12 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		isStickySession: isStickySession, // ForwardGemini 由上层判断粘性会话
 		groupID:         forwardOpts.groupID,
 		sessionHash:     forwardOpts.sessionHash,
+		allowPreheader:  stream,
 	})
 	if err != nil {
+		if StreamPreheaderFinalized(c) {
+			return nil, err
+		}
 		// 检查是否是账号切换信号，转换为 UpstreamFailoverError 让 Handler 切换账号
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
 			return nil, &UpstreamFailoverError{

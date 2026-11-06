@@ -97,7 +97,10 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 		return nil, err
 	}
 
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err, terminal := s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
+	if terminal {
+		return nil, err
+	}
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 	}

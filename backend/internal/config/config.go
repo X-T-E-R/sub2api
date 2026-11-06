@@ -1056,6 +1056,9 @@ type GatewayConfig struct {
 	StreamDataIntervalTimeout int `mapstructure:"stream_data_interval_timeout"`
 	// StreamKeepaliveInterval: 流式 keepalive 间隔（秒），0表示禁用
 	StreamKeepaliveInterval int `mapstructure:"stream_keepalive_interval"`
+	// Opt in to SSE before upstream headers for admitted streaming HTTP requests.
+	// After the first heartbeat, final failures use the inbound protocol's SSE error.
+	StreamPreheaderKeepaliveEnabled bool `mapstructure:"stream_preheader_keepalive_enabled"`
 	// ImageStreamDataIntervalTimeout: 图片流数据间隔超时（秒），0表示禁用
 	ImageStreamDataIntervalTimeout int `mapstructure:"image_stream_data_interval_timeout"`
 	// ImageStreamKeepaliveInterval: 图片流式 keepalive 间隔（秒），0表示禁用
@@ -2516,6 +2519,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)
+	viper.SetDefault("gateway.stream_preheader_keepalive_enabled", false)
 	viper.SetDefault("gateway.image_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.image_nonstream_keepalive_interval", 0)

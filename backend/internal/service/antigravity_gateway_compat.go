@@ -181,6 +181,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 	}
 
 	result, err := s.antigravityRetryLoop(antigravityRetryLoopParams{
+		allowPreheader:  request.clientStream,
 		ctx:             ctx,
 		prefix:          call.prefix,
 		account:         account,
@@ -199,6 +200,9 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		sessionHash:     "",
 	})
 	if err != nil {
+		if StreamPreheaderFinalized(c) {
+			return nil, err
+		}
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 

@@ -657,6 +657,18 @@ func writeAntigravityCompatStreamError(
 	writer *antigravityClientWriter,
 	reason string,
 ) {
+	if StreamPreheaderConfigured(c) {
+		meta := streamPreheaderResponseMeta{}
+		if responses, ok := adapter.(*antigravityResponsesStreamAdapter); ok {
+			meta.id, meta.model = responses.anthropicState.ResponseID, responses.anthropicState.Model
+		}
+		if !c.Writer.Written() {
+			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, meta)
+		} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason, meta); frame != "" {
+			writer.Write([]byte(frame))
+		}
+		return
+	}
 	adapter.WriteError(writer, reason)
 	MarkResponseCommitted(c)
 }
