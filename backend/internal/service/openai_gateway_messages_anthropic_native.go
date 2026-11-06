@@ -271,7 +271,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	upstreamModel string,
 	reasoningEffort *string,
 	startTime time.Time,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, streamErr error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -308,6 +308,14 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawTerminalEvent := false
+	defer func() {
+		if streamErr != nil && StreamPreheaderConfigured(c) && c.Writer.Written() && !StreamPreheaderFinalized(c) && !sawTerminalEvent {
+			streamErr = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+		}
+		if StreamPreheaderFinalized(c) && *usage == (ClaudeUsage{}) {
+			result = nil
+		}
+	}()
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -424,8 +432,16 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			}
 
 			line := ev.line
+			if StreamPreheaderConfigured(c) && c.Writer.Written() && strings.TrimSpace(line) == "event: error" {
+				continue
+			}
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
+				if StreamPreheaderConfigured(c) && c.Writer.Written() && gjson.Get(trimmed, "error").Exists() {
+					parseSSEUsagePassthrough(data, usage)
+					redacted := s.redactAgentIdentitySensitiveBody(ctx, account, []byte(trimmed))
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), finishStreamPreheaderSSEError(c, redacted, resp.Header)
+				}
 				observer.ObserveAnthropic([]byte(trimmed))
 				if anthropicStreamEventIsTerminal("", trimmed) {
 					sawTerminalEvent = true
@@ -489,6 +505,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				resetKeepaliveTimer()
 				continue
 			}
+			markStreamPreheaderBodyHeartbeat(c)
 			if _, err := fmt.Fprint(w, "event: ping\ndata: {\"type\": \"ping\"}\n\n"); err != nil {
 				clientDisconnected = true
 				logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during keepalive ping, continue draining upstream for usage: account=%d", account.ID)

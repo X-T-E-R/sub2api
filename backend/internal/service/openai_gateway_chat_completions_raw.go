@@ -322,12 +322,20 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		}
 	}
 
+	var upstreamTerminalError error
 	for scanner.Scan() {
 		line := scanner.Text()
-		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
 			terminal.ObserveDataLine(trimmedPayload)
+			if StreamPreheaderConfigured(c) && c.Writer.Written() && gjson.Get(trimmedPayload, "error").Exists() {
+				if u := extractCCStreamUsage(payload); u != nil {
+					usage = *u
+				}
+				redacted := s.redactAgentIdentitySensitiveBody(c.Request.Context(), account, []byte(payload))
+				upstreamTerminalError = finishStreamPreheaderSSEError(c, redacted, resp.Header)
+				break
+			}
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
@@ -340,6 +348,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 				}
 			}
 		}
+		refusalDetector.ObserveSSELine(line)
 		line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
 		line = stripEmptyChatToolCallIdentityFromSSELine(line)
 
@@ -374,6 +383,17 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	scanErr := scanner.Err()
+	if StreamPreheaderConfigured(c) && c.Writer.Written() {
+		if upstreamTerminalError == nil && !terminal.sawDone && !terminal.sawFinishReason {
+			upstreamTerminalError = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+		}
+		if upstreamTerminalError != nil {
+			if !openAIStreamHasObservedUsage(&usage, 0, 0) {
+				return nil, upstreamTerminalError
+			}
+			return resultWithUsage(), upstreamTerminalError
+		}
+	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
 			zap.Error(scanErr),

@@ -935,7 +935,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	billingModel string,
 	upstreamModel string,
 	startTime time.Time,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, streamErr error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
@@ -1000,6 +1000,14 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		return out
 	}
 
+	defer func() {
+		if streamErr != nil && StreamPreheaderConfigured(c) && c.Writer.Written() && !StreamPreheaderFinalized(c) && terminalEventType == "" {
+			streamErr = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+		}
+		if StreamPreheaderFinalized(c) && !openAIStreamHasObservedUsage(&usage, 0, searchCount) {
+			result = nil
+		}
+	}()
 	// processDataLine handles a single "data: ..." SSE line from upstream.
 	processDataLine := func(payload string) bool {
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
@@ -1020,12 +1028,16 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			)
 			return false
 		}
-		observer.ObserveOpenAI([]byte(payload), event.Type)
-		s.parseSSEUsageBytesWithType([]byte(payload), event.Type, &usage)
-
 		eventType := strings.TrimSpace(event.Type)
 		isBareErrorEvent := eventType == "error"
-		isTerminalEvent := isOpenAICompatResponsesTerminalEvent(eventType) || isBareErrorEvent
+		terminateCommitted := StreamPreheaderConfigured(c) && c.Writer.Written() &&
+			(eventType == "response.failed" || isBareErrorEvent || gjson.Get(payload, "error").Exists())
+		if terminateCommitted {
+			payload = string(s.redactAgentIdentitySensitiveBody(c.Request.Context(), account, []byte(payload)))
+		}
+		observer.ObserveOpenAI([]byte(payload), event.Type)
+		s.parseSSEUsageBytesWithType([]byte(payload), event.Type, &usage)
+		isTerminalEvent := isOpenAICompatResponsesTerminalEvent(eventType) || isBareErrorEvent || terminateCommitted
 		if isTerminalEvent {
 			terminalEventType = eventType
 			if event.Response != nil {
@@ -1041,7 +1053,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			// cyber_policy 致命不可重试：标记供 handler 事后记录；以 Anthropic SSE error 事件
 			// 回写让客户端感知并停止重试（F4），丢弃后续转换输出。
-			if eventType == "response.failed" || isBareErrorEvent {
+			if eventType == "response.failed" || isBareErrorEvent || terminateCommitted {
 				payloadBytes := []byte(payload)
 				if hit, code, msg := detectOpenAICyberPolicy(payloadBytes); hit {
 					MarkOpsCyberPolicy(c, CyberPolicyMark{
@@ -1052,6 +1064,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 						UpstreamInTok:  usage.InputTokens,
 						UpstreamOutTok: usage.OutputTokens,
 					})
+					if terminateCommitted {
+						streamNonFailoverErr = finishStreamPreheaderSSEError(c, payloadBytes, resp.Header)
+						return true
+					}
 					if !clientDisconnected {
 						writeStreamHeaders()
 						clientMsg := msg
@@ -1066,6 +1082,11 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					return true
 				}
 				message := extractOpenAISSEErrorMessage(payloadBytes)
+				if terminateCommitted {
+					s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payloadBytes, message, resp.Header, upstreamModel)
+					streamNonFailoverErr = finishStreamPreheaderSSEError(c, payloadBytes, resp.Header)
+					return true
+				}
 				// Once Anthropic output has started, switching accounts would splice
 				// two model streams together. Surface a proper Anthropic error event
 				// instead of returning a failover error that the handler cannot retry.
@@ -1332,6 +1353,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			// Send Anthropic-format ping event
 			writeStreamHeaders()
+			markStreamPreheaderBodyHeartbeat(c)
 			if _, err := fmt.Fprint(c.Writer, "event: ping\ndata: {\"type\":\"ping\"}\n\n"); err != nil {
 				// Client disconnected
 				logger.L().Info("openai messages stream: client disconnected during keepalive",

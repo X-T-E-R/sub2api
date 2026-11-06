@@ -470,8 +470,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		}
 
 		if StreamPreheaderConfigured(c) && event.Type == "error" && !sawMessageStop {
-			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
-				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed")
+			return resultWithUsage(), finishStreamPreheaderSSEError(c, []byte(payload), resp.Header)
 		}
 		sawMessageStop = sawMessageStop || event.Type == "message_stop"
 		if processAnthropicEvent(&event) {

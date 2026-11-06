@@ -32,17 +32,14 @@ func (s *OpenAIGatewayService) doOpenAIStreamUpstream(c *gin.Context, req *http.
 	return requestStreamPreheader(c, req, account,
 		func(request *http.Request) (*http.Response, error) {
 			return s.doOpenAIUpstream(request, proxyURL, account)
-		}, func(resp *http.Response, body []byte) {
-			s.observeOpenAIStreamUpstream(c, account, resp, body)
+		}, func(resp *http.Response, body []byte) []byte {
+			return s.prepareOpenAIStreamUpstreamError(c, account, resp, body)
 		})
 }
 
-// observeOpenAIStreamUpstream retains the existing health/rate-limit and
-// telemetry effects when the preheader helper consumes a late HTTP error.
-func (s *OpenAIGatewayService) observeOpenAIStreamUpstream(c *gin.Context, account *Account, resp *http.Response, body []byte) {
-	if c == nil || c.Request == nil || account == nil {
-		return
-	}
+// Redact before health observers, Ops or client framing consume the late error.
+func (s *OpenAIGatewayService) prepareOpenAIStreamUpstreamError(c *gin.Context, account *Account, resp *http.Response, body []byte) []byte {
+	body = s.redactAgentIdentitySensitiveBody(c.Request.Context(), account, body)
 	if telemetryAttempt := codexTelemetryAttemptFromContext(c); telemetryAttempt != nil {
 		telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
 	}
@@ -56,9 +53,10 @@ func (s *OpenAIGatewayService) observeOpenAIStreamUpstream(c *gin.Context, accou
 		if model != "" && shouldMarkGrokTeamModelRateLimit(resp.StatusCode, body) {
 			markGrokTeamModelRateLimit(account, model, resolveGrokTeamRateLimitUntil(time.Now().Add(grokTeamRateLimitDefaultTTL), time.Now()))
 		}
-		return
+		return body
 	}
 	s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, model)
+	return body
 }
 
 // doOpenAIAccountTestUpstream 让 OpenAI OAuth 账号测试与真实转发使用同一插件路径。

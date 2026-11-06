@@ -376,7 +376,7 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 		c.Header("x-request-id", requestID)
 	}
 	streamResult, err := s.consumeAntigravityCompatSuccess(c, call, resp)
-	if err != nil && !IsAntigravityPartialResponseError(err) {
+	if err != nil && !IsAntigravityPartialResponseError(err) && !(StreamPreheaderFinalized(c) && antigravityPreheaderHasUsage(streamResult)) {
 		return nil, err
 	}
 	if streamResult == nil {

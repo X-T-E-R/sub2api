@@ -82,8 +82,9 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	resp, err, terminal := requestStreamPreheader(c, req, account,
 		func(request *http.Request) (*http.Response, error) {
 			return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
-		}, func(response *http.Response, body []byte) {
+		}, func(response *http.Response, body []byte) []byte {
 			s.handleUpstreamError(ctx, prefix, account, response.StatusCode, response.Header, body, originalModel, 0, "", false)
+			return body
 		})
 	if terminal {
 		return nil, err

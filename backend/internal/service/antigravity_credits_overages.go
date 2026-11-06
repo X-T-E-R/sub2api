@@ -166,6 +166,7 @@ func shouldMarkCreditsExhausted(resp *http.Response, respBody []byte, reqErr err
 type creditsOveragesRetryResult struct {
 	handled bool
 	resp    *http.Response
+	err     error
 }
 
 // attemptCreditsOveragesRetry 在确认免费配额耗尽后，尝试注入 AI Credits 继续请求。
@@ -192,7 +193,12 @@ func (s *AntigravityGatewayService) attemptCreditsOveragesRetry(
 		return &creditsOveragesRetryResult{handled: true}
 	}
 
-	creditsResp, err := p.httpUpstream.Do(creditsReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+	creditsResp, err, terminal := s.doAntigravityInference(p, creditsReq, nil, func(resp *http.Response, body []byte) {
+		s.recordCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, resp, body, nil)
+	})
+	if terminal {
+		return &creditsOveragesRetryResult{handled: true, err: err}
+	}
 	if err == nil && creditsResp != nil && creditsResp.StatusCode < 400 {
 		s.clearCreditsExhausted(p.ctx, p.account)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d credit_overages_success model=%s account=%d",
@@ -213,15 +219,18 @@ func (s *AntigravityGatewayService) handleCreditsRetryFailure(
 	reqErr error,
 ) {
 	var creditsRespBody []byte
+	if creditsResp != nil && creditsResp.Body != nil {
+		creditsRespBody, _ = io.ReadAll(io.LimitReader(creditsResp.Body, 64<<10))
+		_ = creditsResp.Body.Close()
+	}
+	s.recordCreditsRetryFailure(ctx, prefix, modelKey, account, creditsResp, creditsRespBody, reqErr)
+}
+
+func (s *AntigravityGatewayService) recordCreditsRetryFailure(ctx context.Context, prefix, modelKey string, account *Account, creditsResp *http.Response, creditsRespBody []byte, reqErr error) {
 	creditsStatusCode := 0
 	if creditsResp != nil {
 		creditsStatusCode = creditsResp.StatusCode
-		if creditsResp.Body != nil {
-			creditsRespBody, _ = io.ReadAll(io.LimitReader(creditsResp.Body, 64<<10))
-			_ = creditsResp.Body.Close()
-		}
 	}
-
 	if shouldMarkCreditsExhausted(creditsResp, creditsRespBody, reqErr) && account != nil {
 		s.setCreditsExhausted(ctx, account)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s credit_overages_failed model=%s account=%d marked_exhausted=true status=%d body=%s",

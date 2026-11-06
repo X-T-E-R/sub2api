@@ -27,6 +27,31 @@ import (
 	"go.uber.org/zap"
 )
 
+type openAINativeAnthropicPumpReader struct {
+	pump *anthropicNativeLinePump
+}
+
+func (r openAINativeAnthropicPumpReader) ReadString(byte) (string, error) {
+	return r.pump.next()
+}
+
+// newOpenAINativeAnthropicLineReader keeps the existing interval-aware pump
+// when preheader is disabled. For opt-in streams, the pump remains the pure
+// read source while newStreamPreheaderReader owns caller-thread Gin writes.
+func newOpenAINativeAnthropicLineReader(c *gin.Context, source *bufio.Scanner, interval time.Duration) (func() (string, error), func()) {
+	pump := newAnthropicNativeLinePump(source, interval)
+	if !StreamPreheaderConfigured(c) {
+		return pump.next, pump.stop
+	}
+	reader, stopReader := newStreamPreheaderReader(c, openAINativeAnthropicPumpReader{pump: pump})
+	return func() (string, error) {
+			return reader.ReadString('\n')
+		}, func() {
+			stopReader()
+			pump.stop()
+		}
+}
+
 // forwardResponsesViaNativeAnthropic serves OpenAI /v1/responses clients through
 // a CN provider's native Anthropic endpoint.
 //
@@ -332,6 +357,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 	var firstTokenMs *int
 	firstChunk := true
 	clientDisconnected := false
+	sawMessageStop := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -360,8 +386,8 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 	// WithoutCancel 且 http.Client 无整体 Timeout，无此界限则 scanner.Scan()
 	// 永久阻塞（见 anthropic native pump 文件注释）。
 	streamInterval := s.anthropicNativeStreamInterval()
-	pump := newAnthropicNativeLinePump(scanner, streamInterval)
-	defer pump.stop()
+	nextLine, stopReader := newOpenAINativeAnthropicLineReader(c, scanner, streamInterval)
+	defer stopReader()
 
 	logReadErr := func(err error) {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -377,7 +403,13 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			zap.String("request_id", requestID),
 			zap.Duration("interval", streamInterval),
 		)
-		return resultWithUsage(), fmt.Errorf("stream data interval timeout")
+		idleErr := fmt.Errorf("stream data interval timeout")
+		if StreamPreheaderConfigured(c) {
+			return resultWithUsage(), errors.Join(idleErr, writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				"upstream_error", "Upstream stream data interval timeout",
+				streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel}))
+		}
+		return resultWithUsage(), idleErr
 	}
 
 	// 与 CC 姊妹路径（handleCCStreamingFromNativeAnthropic.writeChunk）同语义：
@@ -425,12 +457,14 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 		}
 	}
 
+	var readErr error
 	for {
-		line, rerr := pump.next()
+		line, rerr := nextLine()
 		if rerr != nil {
 			if errors.Is(rerr, errAnthropicNativeStreamIdle) {
 				return onIdle()
 			}
+			readErr = rerr
 			logReadErr(rerr)
 			break
 		}
@@ -438,11 +472,12 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			continue
 		}
 
-		dataLine, rerr := pump.next()
+		dataLine, rerr := nextLine()
 		if rerr != nil {
 			if errors.Is(rerr, errAnthropicNativeStreamIdle) {
 				return onIdle()
 			}
+			readErr = rerr
 			logReadErr(rerr)
 			break
 		}
@@ -456,7 +491,39 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			continue
 		}
 
+		if event.Type == "error" && StreamPreheaderConfigured(c) && !sawMessageStop {
+			if event.Usage != nil {
+				mergeAnthropicUsage(&usage, *event.Usage)
+			}
+			if event.Message != nil {
+				mergeAnthropicUsage(&usage, event.Message.Usage)
+			}
+			meta := streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel}
+			if c.Writer.Written() {
+				return resultWithUsage(), finishStreamPreheaderSSEError(c, []byte(payload), resp.Header, meta)
+			}
+			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed", meta)
+		}
+
 		processAnthropicEvent(&event)
+		if event.Type == "message_stop" {
+			sawMessageStop = true
+			if StreamPreheaderConfigured(c) {
+				return resultWithUsage(), nil
+			}
+		}
+	}
+
+	if StreamPreheaderConfigured(c) && !sawMessageStop && !clientDisconnected &&
+		!errors.Is(readErr, context.Canceled) && !errors.Is(readErr, context.DeadlineExceeded) {
+		failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			"upstream_error", "Upstream stream ended before message_stop",
+			streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return resultWithUsage(), errors.Join(readErr, failureErr)
+		}
+		return resultWithUsage(), failureErr
 	}
 
 	// Finalize state machine（客户端已断开时仍推进，保证 usage 汇总完整；仅在

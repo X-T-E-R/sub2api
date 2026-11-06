@@ -364,7 +364,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Error(err),
 			)
 			// Task24：该错误类型不是 failover 错误，第一代的用量必须先入账再返回。
-			if service.IsAntigravityPartialResponseError(err) || (service.StreamPreheaderFinalized(c) && result != nil && result.FirstTokenMs != nil) {
+			if service.IsAntigravityPartialResponseError(err) || (service.StreamPreheaderFinalized(c) && result != nil && (result.Usage != (service.ClaudeUsage{}) || result.ImageCount > 0)) {
 				submitUsage(result)
 			}
 			return

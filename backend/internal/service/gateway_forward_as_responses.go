@@ -627,8 +627,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		}
 
 		if StreamPreheaderConfigured(c) && eventType == "error" && !sawMessageStop {
-			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
-				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed",
+			return resultWithUsage(), finishStreamPreheaderSSEError(c, []byte(payload), resp.Header,
 				streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
 		}
 		sawMessageStop = sawMessageStop || event.Type == "message_stop"

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -213,11 +214,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	scan := s.scanCCStream(c, resp, "openai messages chat fallback", requestID, startTime, emitChunk)
 	usage := scan.Usage
-
-	if scan.Err != nil {
-		// Broken upstream read: skip finalization so no synthetic message_stop
-		// masks the truncation, and surface the error to flag usage incomplete
-		// (mirrors forwardResponsesViaRawChatCompletions).
+	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
 			RequestID:        requestID,
 			Usage:            usage,
@@ -230,7 +227,35 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			Duration:         time.Since(startTime),
 			FirstTokenMs:     scan.FirstTokenMs,
 			ClientDisconnect: clientDisconnected,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}
+	}
+
+	if len(scan.SSEErrorPayload) > 0 && StreamPreheaderConfigured(c) {
+		meta := streamPreheaderResponseMeta{id: anthropicState.ResponseID, model: originalModel}
+		if c.Writer.Written() {
+			return resultWithUsage(), finishStreamPreheaderSSEError(c, scan.SSEErrorPayload, resp.Header, meta)
+		}
+		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			streamPreheaderErrorType(http.StatusBadGateway, scan.SSEErrorPayload), "Upstream stream failed", meta)
+	}
+
+	if scan.Err != nil && (!StreamPreheaderConfigured(c) || !scan.SawTerminal) {
+		// Broken upstream read: skip finalization so no synthetic message_stop
+		// masks the truncation, and surface the error to flag usage incomplete
+		// (mirrors forwardResponsesViaRawChatCompletions).
+		if StreamPreheaderConfigured(c) && !scan.SawTerminal && !clientDisconnected &&
+			!errors.Is(scan.Err, context.Canceled) && !errors.Is(scan.Err, context.DeadlineExceeded) {
+			failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				"upstream_error", "Upstream stream read failed before terminal event", streamPreheaderResponseMeta{id: anthropicState.ResponseID, model: originalModel})
+			return resultWithUsage(), errors.Join(fmt.Errorf("stream usage incomplete: %w", scan.Err), failureErr)
+		}
+		return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", scan.Err)
+	}
+
+	if StreamPreheaderConfigured(c) && !scan.SawTerminal && !clientDisconnected {
+		failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			"upstream_error", "Upstream stream ended before terminal event", streamPreheaderResponseMeta{id: anthropicState.ResponseID, model: originalModel})
+		return resultWithUsage(), failureErr
 	}
 
 	// Finalize: close open blocks + emit message_delta/message_stop.
@@ -249,21 +274,9 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}
 		c.Writer.Flush()
 	}
-	if !scan.SawDone {
+	if !scan.SawTerminal {
 		logCCStreamMissingDoneSentinel("openai messages chat fallback", requestID)
 	}
 
-	return &OpenAIForwardResult{
-		RequestID:        requestID,
-		Usage:            usage,
-		Model:            originalModel,
-		BillingModel:     billingModel,
-		UpstreamModel:    upstreamModel,
-		ReasoningEffort:  reasoningEffort,
-		ServiceTier:      resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		Stream:           true,
-		Duration:         time.Since(startTime),
-		FirstTokenMs:     scan.FirstTokenMs,
-		ClientDisconnect: clientDisconnected,
-	}, nil
+	return resultWithUsage(), nil
 }

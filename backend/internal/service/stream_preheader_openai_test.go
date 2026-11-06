@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,52 @@ func TestStreamPreheaderOpenAIPassthroughSuccess(t *testing.T) {
 			require.Equal(t, 8, out.result.Usage.InputTokens)
 			require.Equal(t, 3, out.result.Usage.OutputTokens)
 			require.EqualValues(t, 1, transport.calls.Load())
+		})
+	}
+}
+
+func TestStreamPreheaderOpenAILateSSEFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		usage bool
+	}{
+		{"error_with_usage", "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_original\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"rate limited\"},\"usage\":{\"input_tokens\":8,\"output_tokens\":3}}}\n\n", true},
+		{"truncation_after_usage", "data: {\"type\":\"response.in_progress\",\"usage\":{\"input_tokens\":8,\"output_tokens\":3}}\n\n", true},
+		{"heartbeat_only", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newAntigravityCompatContext("POST", "/v1/responses", nil)
+			cfg := &config.Config{Gateway: config.GatewayConfig{StreamPreheaderKeepaliveEnabled: true, StreamKeepaliveInterval: 1}}
+			ConfigureStreamPreheader(c, cfg, "responses", true)
+			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+			_, _ = c.Writer.WriteString(": gateway heartbeat\n\n")
+			c.Writer.Flush()
+			markStreamPreheaderBodyHeartbeat(c)
+			headers := http.Header{"Content-Type": {"text/event-stream"}, "Retry-After": {"17"}}
+			upstream := &geminiCompatHTTPUpstreamStub{response: &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(tc.body))}}
+			account := &Account{ID: 9302, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Credentials: map[string]any{"api_key": "fixture-token"}, Extra: map[string]any{"openai_passthrough": true}}
+			result, err := (&OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}).Forward(c.Request.Context(), c, account, []byte(`{"model":"gpt-5.2","input":"fixture question","stream":true}`))
+			require.Error(t, err)
+			require.True(t, StreamPreheaderFinalized(c))
+			if tc.usage {
+				require.NotNil(t, result)
+				require.Equal(t, 8, result.Usage.InputTokens)
+				require.Equal(t, 3, result.Usage.OutputTokens)
+			} else {
+				require.Nil(t, result)
+			}
+			wire := rec.Body.String()
+			require.Equal(t, 1, strings.Count(wire, streamPreheaderTerminalCode))
+			require.NotContains(t, wire, "response.completed")
+			if tc.name == "error_with_usage" {
+				require.Contains(t, wire, `"type":"rate_limit_error"`)
+				require.Contains(t, wire, `"status":429`)
+				require.Contains(t, wire, `"retry_after":"17"`)
+				require.Contains(t, wire, `"id":"resp_original"`)
+				require.Equal(t, 1, strings.Count(wire, `"error":`))
+			}
 		})
 	}
 }

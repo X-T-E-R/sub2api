@@ -862,6 +862,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 		}
 
+		if StreamPreheaderConfigured(c) && c.Writer.Written() && (eventName == "error" || gjson.Get(dataLine, "error").Exists()) {
+			s.parseSSEUsage(dataLine, usage)
+			return nil, dataLine, nil, finishStreamPreheaderSSEError(c, []byte(dataLine), resp.Header)
+		}
 		if eventName == "error" {
 			return nil, dataLine, nil, &sseStreamErrorEventError{RawData: dataLine}
 		}
@@ -1072,6 +1076,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				outputBlocks, data, usagePatch, err := processSSEEvent(pendingEventLines)
 				pendingEventLines = pendingEventLines[:0]
 				if err != nil {
+					if StreamPreheaderFinalized(c) {
+						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, err
+					}
 					if clientDisconnected {
 						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 					}

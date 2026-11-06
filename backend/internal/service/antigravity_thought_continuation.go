@@ -608,7 +608,11 @@ func (c *antigravityThoughtContinuation) cumulativeUsage(last ClaudeUsage) Claud
 // HTTPUpstream with the same account,
 // proxy and concurrency slot; the retry
 // loop, scheduler, sticky identity and capture range are deliberately not re-entered.
-func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previous *http.Response) (*http.Response, ClaudeUsage, error) {
+func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previous *http.Response, streaming ...*gin.Context) (*http.Response, ClaudeUsage, error) {
+	var stream *gin.Context
+	if len(streaming) > 0 {
+		stream = streaming[0]
+	}
 	if c == nil {
 		return nil, ClaudeUsage{}, errAntigravityThoughtContinuationUnavailable
 	}
@@ -653,7 +657,19 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	if c.service == nil || c.service.httpUpstream == nil {
 		return nil, finished, errors.New("antigravity upstream transport unavailable")
 	}
-	resp, err := c.service.httpUpstream.Do(req, c.proxyURL, c.account.ID, c.account.Concurrency)
+	send := func(request *http.Request) (*http.Response, error) {
+		return c.service.httpUpstream.Do(request, c.proxyURL, c.account.ID, c.account.Concurrency)
+	}
+	var resp *http.Response
+	if stream != nil && StreamPreheaderConfigured(stream) {
+		value, _ := stream.Get(streamPreheaderPolicyKey)
+		policy := value.(streamPreheaderPolicy)
+		// The legal append owns a fresh head wait, but its original failure and
+		// usage handling stay here, rather than entering the normal retry path.
+		resp, err, _ = waitForStreamHeaders(stream, req, policy.protocol, policy.interval, send)
+	} else {
+		resp, err = send(req)
+	}
 	if err != nil {
 		return nil, finished, fmt.Errorf("thought continuation request failed: %w", err)
 	}

@@ -223,8 +223,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		s.cacheReasoningItemsFromEvents(events)
 		writeEvents(events)
 	})
-
-	if scan.Err != nil {
+	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
 			RequestID:       requestID,
 			Usage:           scan.Usage,
@@ -236,7 +235,32 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			Stream:          true,
 			Duration:        time.Since(startTime),
 			FirstTokenMs:    scan.FirstTokenMs,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}
+	}
+
+	if len(scan.SSEErrorPayload) > 0 && StreamPreheaderConfigured(c) {
+		meta := streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel}
+		if c.Writer.Written() {
+			return resultWithUsage(), finishStreamPreheaderSSEError(c, scan.SSEErrorPayload, resp.Header, meta)
+		}
+		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			streamPreheaderErrorType(http.StatusBadGateway, scan.SSEErrorPayload), "Upstream stream failed", meta)
+	}
+
+	if scan.Err != nil && (!StreamPreheaderConfigured(c) || !scan.SawTerminal) {
+		if StreamPreheaderConfigured(c) && !scan.SawTerminal && !clientDisconnected &&
+			!errors.Is(scan.Err, context.Canceled) && !errors.Is(scan.Err, context.DeadlineExceeded) {
+			failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				"upstream_error", "Upstream stream read failed before terminal event", streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
+			return resultWithUsage(), errors.Join(fmt.Errorf("stream usage incomplete: %w", scan.Err), failureErr)
+		}
+		return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", scan.Err)
+	}
+
+	if StreamPreheaderConfigured(c) && !scan.SawTerminal && !clientDisconnected {
+		failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			"upstream_error", "Upstream stream ended before terminal event", streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
+		return resultWithUsage(), failureErr
 	}
 	if err := state.ValidateToolCallArguments(); err != nil {
 		return &OpenAIForwardResult{
@@ -265,22 +289,11 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			c.Writer.Flush()
 		}
 	}
-	if !scan.SawDone {
+	if !scan.SawTerminal {
 		logCCStreamMissingDoneSentinel("openai responses chat fallback", requestID)
 	}
 
-	return &OpenAIForwardResult{
-		RequestID:       requestID,
-		Usage:           scan.Usage,
-		Model:           originalModel,
-		BillingModel:    billingModel,
-		UpstreamModel:   upstreamModel,
-		ReasoningEffort: reasoningEffort,
-		ServiceTier:     resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		Stream:          true,
-		Duration:        time.Since(startTime),
-		FirstTokenMs:    scan.FirstTokenMs,
-	}, nil
+	return resultWithUsage(), nil
 }
 
 func chatChunkStartsResponsesOutput(chunk *apicompat.ChatCompletionsChunk) bool {

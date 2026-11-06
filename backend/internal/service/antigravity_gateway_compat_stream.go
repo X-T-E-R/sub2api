@@ -405,6 +405,10 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 	session := newAntigravityCompatStreamSession(originalModel, startTime, adapter, writer)
 	session.preContentKeepaliveInterval = interval
+	var terminalGeneration *antigravityThoughtGeneration
+	if StreamPreheaderConfigured(c) {
+		terminalGeneration = newAntigravityThoughtGeneration()
+	}
 	// Task24: A/B state for this request, nil while both effective switches are off.
 	session.continuation = antigravityThoughtContinuationFromGin(c)
 	events, stopScanner, maxLineSize := s.startAntigravityCompatScanner(resp.Body)
@@ -458,6 +462,10 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			if !open {
 				cont := session.continuation
+				if antigravityPreheaderIncomplete(terminalGeneration, cont) && !writer.Disconnected() {
+					writeAntigravityCompatStreamError(c, adapter, writer, "Upstream stream ended before a terminal event")
+					return session.collectResult(false), errStreamPreheaderTerminal
+				}
 				eligibleNoAnswer := cont != nil && (cont.effectiveGeneration().failureCode(cont.policy) != "" || cont.zeroOutputContinuationUsed())
 				if !eligibleNoAnswer && !session.hasMeaningfulData() && !writer.Disconnected() {
 					return handleAntigravityCompatEmptyStream(c, session)
@@ -465,7 +473,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A
 				// 的有效设置决定，第一代 usage 照常入账。
 				if cont := session.continuation; cont != nil && cont.canContinue() && !writer.Disconnected() {
-					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp, c)
 					if continueErr != nil {
 						// 追加生成失败：以协议不成功终态 + 错误帧结束，保留内容与累计 usage。
 						// 可计费结果与 Task24 终态错误一起返回，调用方先入账再返回错误。
@@ -483,6 +491,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner, maxLineSize = s.startAntigravityCompatScanner(nextResp.Body)
+						if terminalGeneration != nil {
+							terminalGeneration = newAntigravityThoughtGeneration()
+						}
 						continue
 					}
 				}
@@ -507,6 +518,13 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
+			if terminalGeneration != nil {
+				terminalGeneration.observeLine(event.line)
+				if payload, failed := streamPreheaderSSEErrorPayload(event.line); failed {
+					meta := antigravityCompatFailureMeta(adapter)
+					return session.collectResult(false), finishStreamPreheaderSSEError(c, payload, resp.Header, meta)
+				}
+			}
 			session.consume(event.line)
 
 		case <-timeoutCh:
@@ -648,6 +666,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatReadError(
 		return session.result(false), err
 	}
 	writeAntigravityCompatStreamError(c, session.adapter, session.writer, "stream_read_error")
+	if StreamPreheaderConfigured(c) {
+		return session.collectResult(false), fmt.Errorf("stream read error: %w", err)
+	}
 	return nil, fmt.Errorf("stream read error: %w", err)
 }
 
@@ -658,10 +679,7 @@ func writeAntigravityCompatStreamError(
 	reason string,
 ) {
 	if StreamPreheaderConfigured(c) {
-		meta := streamPreheaderResponseMeta{}
-		if responses, ok := adapter.(*antigravityResponsesStreamAdapter); ok {
-			meta.id, meta.model = responses.anthropicState.ResponseID, responses.anthropicState.Model
-		}
+		meta := antigravityCompatFailureMeta(adapter)
 		if !c.Writer.Written() {
 			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, meta)
 		} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason, meta); frame != "" {
@@ -713,4 +731,12 @@ func (s *AntigravityGatewayService) handleResponsesStreamingFromAntigravity(
 		newAntigravityResponsesStreamAdapter(originalModel),
 		"antigravity responses stream",
 	)
+}
+
+func antigravityCompatFailureMeta(adapter antigravityCompatStreamAdapter) streamPreheaderResponseMeta {
+	meta := streamPreheaderResponseMeta{}
+	if responses, ok := adapter.(*antigravityResponsesStreamAdapter); ok {
+		meta.id, meta.model = responses.anthropicState.ResponseID, responses.anthropicState.Model
+	}
+	return meta
 }

@@ -322,7 +322,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			clientDisconnected = true
 			return
 		}
-		if StreamPreheaderCommitted(c) {
+		if StreamPreheaderConfigured(c) && c.Writer.Written() {
 			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, streamPreheaderResponseMeta{id: responseID, model: originalModel})
 			return
 		}
@@ -405,7 +405,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
 			}
-			if StreamPreheaderCommitted(c) {
+			if StreamPreheaderConfigured(c) && c.Writer.Written() {
 				sendErrorEvent("Upstream stream ended before a terminal event")
 			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
@@ -481,7 +481,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
-			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			suppressCurrentEvent = (StreamPreheaderConfigured(c) && c.Writer.Written() && (eventType == "error" || eventType == "response.failed")) ||
+				(codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed")))
 		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
@@ -524,6 +525,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			cyberHit := false
 			if eventType == "response.failed" || eventType == "error" {
+				terminateCommitted := StreamPreheaderConfigured(c) && c.Writer.Written()
+				if terminateCommitted {
+					dataBytes = s.redactAgentIdentitySensitiveBody(ctx, account, dataBytes)
+				}
 				if codexFailureTerminal && eventType == "error" {
 					sawBareError = true
 					bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)
@@ -549,6 +554,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamInTok:  usage.InputTokens,
 						UpstreamOutTok: usage.OutputTokens,
 					})
+				}
+				if terminateCommitted {
+					if !cyberHit {
+						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
+					}
+					streamEarlyErr = finishStreamPreheaderSSEError(c, dataBytes, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
+					return
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted && !cyberHit {

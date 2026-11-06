@@ -248,6 +248,10 @@ type ccStreamScanState struct {
 	FirstTokenMs *int
 	// SawDone 表示上游发出了 [DONE] 哨兵。
 	SawDone bool
+	// SawTerminal 表示观察到 [DONE] 或非空 finish_reason。
+	SawTerminal bool
+	// SSEErrorPayload 保存 opt-in 路径观察到的上游 SSE error payload。
+	SSEErrorPayload []byte
 	// Err 为 scanner 读错误（客户端 context 取消不属于此类，会原样带出）。
 	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
 	// 把上游截断伪装成正常收尾。
@@ -255,9 +259,9 @@ type ccStreamScanState struct {
 }
 
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
-// 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
-// emit 回调做各自的协议转换与写出。读错误按既有约定过滤 context 取消类噪声后
-// 记入 Warn 日志。
+// 哨兵或上游 SSE error 处停止，保留最新 usage、记录首 token 时延并观察
+// finish_reason；每个解析成功的 chunk 交给 emit 回调做各自的协议转换与写出。
+// 读错误按既有约定过滤 context 取消类噪声后记入 Warn 日志。
 func (s *OpenAIGatewayService) scanCCStream(
 	c *gin.Context,
 	resp *http.Response,
@@ -268,7 +272,9 @@ func (s *OpenAIGatewayService) scanCCStream(
 ) ccStreamScanState {
 	var st ccStreamScanState
 
-	scanner := s.newUpstreamSSEScanner(resp.Body)
+	source := s.newUpstreamSSEScanner(resp.Body)
+	scanner, stopPreheader := newStreamPreheaderScanner(c, source)
+	defer stopPreheader()
 	for scanner.Scan() {
 		line := scanner.Text()
 		payload, ok := extractOpenAISSEDataLine(line)
@@ -279,8 +285,18 @@ func (s *OpenAIGatewayService) scanCCStream(
 		if payload == "" {
 			continue
 		}
+		if u := extractCCStreamUsage(payload); u != nil {
+			st.Usage = *u
+		}
+		if StreamPreheaderConfigured(c) {
+			if errorPayload, ok := streamPreheaderSSEErrorPayload(line); ok {
+				st.SSEErrorPayload = errorPayload
+				break
+			}
+		}
 		if payload == "[DONE]" {
 			st.SawDone = true
+			st.SawTerminal = true
 			break
 		}
 		// 观察上游 CC chunk 回显的 model / service_tier（计费以回显为准）。
@@ -288,10 +304,6 @@ func (s *OpenAIGatewayService) scanCCStream(
 		// 事件与无类型 body 报告实际处理档位）。
 		if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
 			observer.ObserveOpenAI([]byte(payload), "")
-		}
-
-		if u := extractCCStreamUsage(payload); u != nil {
-			st.Usage = *u
 		}
 
 		var chunk apicompat.ChatCompletionsChunk
@@ -305,6 +317,12 @@ func (s *OpenAIGatewayService) scanCCStream(
 		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {
 			ms := int(time.Since(startTime).Milliseconds())
 			st.FirstTokenMs = &ms
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+				st.SawTerminal = true
+				break
+			}
 		}
 		emit(&chunk)
 	}
@@ -321,7 +339,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 	return st
 }
 
-// logCCStreamMissingDoneSentinel 记录"上游未发 [DONE] 哨兵即结束"的 debug 日志。
+// logCCStreamMissingDoneSentinel 记录"上游未发 [DONE] 或 finish_reason 即结束"的 debug 日志。
 func logCCStreamMissingDoneSentinel(logPrefix, requestID string) {
 	logger.L().Debug(logPrefix+": upstream stream ended without done sentinel",
 		zap.String("request_id", requestID),

@@ -340,6 +340,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	imageCount := 0
 	var imageOutputSizes []string
 	var reasoningEffort *string
+	var streamErr error
 	for {
 		actualModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		if actualModel == "" {
@@ -436,7 +437,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 		if reqStream {
 			result, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
-			if handleErr != nil {
+			if handleErr != nil && !(StreamPreheaderFinalized(c) && result != nil && openAIStreamHasObservedUsage(result.usage, result.imageCount, 0)) {
 				if retryBody, fallbackModel, retry := s.applyOpenAIPassthroughCompactFallbackFromSignal(
 					c, account, requestedModel, body, handleErr, compactModelFallbackRetried, resp,
 				); retry {
@@ -456,6 +457,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				_ = resp.Body.Close()
 				return nil, handleErr
 			}
+			streamErr = handleErr
 			usage = result.usage
 			firstTokenMs = result.firstTokenMs
 			responseID = strings.TrimSpace(result.responseID)
@@ -492,7 +494,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 	defer func() { _ = resp.Body.Close() }()
 	serviceTier := extractOpenAIServiceTierFromBody(body)
-	s.bindHTTPResponseAccount(ctx, c, account, responseID)
+	if streamErr == nil {
+		s.bindHTTPResponseAccount(ctx, c, account, responseID)
+	}
 
 	// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 	if !account.IsShadow() {
@@ -531,7 +535,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		forwardResult.ImageOutputSizes = imageOutputSizes
 		forwardResult.BillingModel = imageBillingModel
 	}
-	return forwardResult, nil
+	return forwardResult, streamErr
 }
 
 func logOpenAIPassthroughInstructionsRejected(
@@ -1927,7 +1931,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 
 	defer func() {
-		if resultErr == nil || sawTerminalEvent || failureDelivered || clientDisconnected || !StreamPreheaderCommitted(c) {
+		if resultErr == nil || sawTerminalEvent || failureDelivered || StreamPreheaderFinalized(c) || clientDisconnected || !StreamPreheaderConfigured(c) || !c.Writer.Written() {
 			return
 		}
 		var failover *UpstreamFailoverError
@@ -1996,6 +2000,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 			cyberHit := false
 			if eventType == "response.failed" || eventType == "error" {
+				terminateCommitted := StreamPreheaderConfigured(c) && c.Writer.Written()
+				if terminateCommitted {
+					dataBytes = s.redactAgentIdentitySensitiveBody(ctx, account, dataBytes)
+				}
 				if codexFailureTerminal && eventType == "error" {
 					sawBareError = true
 					bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)
@@ -2022,6 +2030,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						UpstreamInTok:  usage.InputTokens,
 						UpstreamOutTok: usage.OutputTokens,
 					})
+				}
+				if terminateCommitted {
+					if !cyberHit {
+						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
+					}
+					return resultWithUsage(), finishStreamPreheaderSSEError(c, dataBytes, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
 				if !outputStarted && !cyberHit {

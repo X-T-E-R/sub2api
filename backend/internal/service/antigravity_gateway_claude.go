@@ -236,9 +236,13 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					handleError:     s.handleUpstreamError,
 					requestedModel:  originalModel,
 					isStickySession: isStickySession,
+					allowPreheader:  claudeReq.Stream,
 					groupID:         0,  // Forward 方法没有 groupID，由上层处理粘性会话清除
 					sessionHash:     "", // Forward 方法没有 sessionHash，由上层处理粘性会话清除
 				})
+				if StreamPreheaderFinalized(c) {
+					return nil, retryErr
+				}
 				if retryErr != nil {
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 						Platform:           account.Platform,
@@ -361,7 +365,11 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 							isStickySession: isStickySession,
 							groupID:         0,
 							sessionHash:     "",
+							allowPreheader:  claudeReq.Stream,
 						})
+						if StreamPreheaderFinalized(c) {
+							return nil, retryErr
+						}
 						if retryErr == nil {
 							retryResp := retryResult.resp
 							if retryResp.StatusCode < 400 {
@@ -504,7 +512,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
-			if IsAntigravityPartialResponseError(err) {
+			if IsAntigravityPartialResponseError(err) || (StreamPreheaderFinalized(c) && antigravityPreheaderHasUsage(streamRes)) {
 				return buildResult(streamRes, streamRes != nil), err
 			}
 			return nil, err

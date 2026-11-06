@@ -23,8 +23,9 @@ import (
 )
 
 type preheaderHandlerUpstream struct {
-	status int
-	calls  atomic.Int32
+	status    int
+	truncated bool
+	calls     atomic.Int32
 }
 
 func (s *preheaderHandlerUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
@@ -33,6 +34,9 @@ func (s *preheaderHandlerUpstream) Do(req *http.Request, _ string, _ int64, _ in
 	case <-time.After(1100 * time.Millisecond):
 	case <-req.Context().Done():
 		return nil, req.Context().Err()
+	}
+	if s.truncated {
+		return handlerThoughtStream(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3}}}`), nil
 	}
 	if s.status == 200 {
 		return handlerThoughtStream(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"actual answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3}}}`), nil
@@ -44,8 +48,14 @@ func (s *preheaderHandlerUpstream) DoWithTLS(req *http.Request, proxy string, id
 }
 
 func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
-	for _, status := range []int{200, 401, 429} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		truncated bool
+	}{
+		{"success", 200, false}, {"authentication error", 401, false}, {"rate limit", 429, false}, {"partial usage then EOF", 200, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			groupID := int64(9300)
 			group := &service.Group{ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive}
 			account := handlerThoughtAccount()
@@ -53,7 +63,7 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			account.Schedulable = true
 			account.AccountGroups = []service.AccountGroup{{AccountID: account.ID, GroupID: groupID}}
 			cfg := &config.Config{RunMode: config.RunModeSimple, Gateway: config.GatewayConfig{MaxLineSize: 1 << 20, StreamKeepaliveInterval: 1, StreamPreheaderKeepaliveEnabled: true}}
-			upstream := &preheaderHandlerUpstream{status: status}
+			upstream := &preheaderHandlerUpstream{status: tc.status, truncated: tc.truncated}
 			antigravity := service.NewAntigravityGatewayService(nil, nil, nil,
 				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream,
 				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil)
@@ -83,12 +93,18 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			require.EqualValues(t, 1, cache.userReleases.Load())
 			require.EqualValues(t, 1, cache.accountAcquires.Load())
 			require.EqualValues(t, 1, cache.accountReleases.Load())
-			if status == 200 {
+			if tc.status == 200 {
 				require.Len(t, usage.created, 1)
 				require.Equal(t, 8, usage.created[0].InputTokens)
 				require.Equal(t, 3, usage.created[0].OutputTokens)
 				require.Equal(t, account.ID, usage.created[0].AccountID)
-				require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: message_stop"))
+				if tc.truncated {
+					require.True(t, service.StreamPreheaderFinalized(c))
+					require.Equal(t, 1, strings.Count(recorder.Body.String(), "gateway_stream_terminal_error"))
+					require.NotContains(t, recorder.Body.String(), "event: message_stop")
+				} else {
+					require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: message_stop"))
+				}
 			} else {
 				require.Empty(t, usage.created, "a preheader heartbeat is neither model output nor measured usage")
 				require.Equal(t, 1, strings.Count(recorder.Body.String(), "gateway_stream_terminal_error"))

@@ -634,7 +634,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 	requestBodyLen int,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, streamErr error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
@@ -699,6 +699,14 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		return out
 	}
 
+	defer func() {
+		if streamErr != nil && StreamPreheaderConfigured(c) && c.Writer.Written() && !StreamPreheaderFinalized(c) && terminalEventType == "" {
+			streamErr = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
+		}
+		if StreamPreheaderFinalized(c) && !openAIStreamHasObservedUsage(&usage, 0, searchCount) {
+			result = nil
+		}
+	}()
 	processDataLine := func(payload string) bool {
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 		if firstChunk {
@@ -718,6 +726,11 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			)
 			return false
 		}
+		isError := strings.TrimSpace(event.Type) == "response.failed" || strings.TrimSpace(event.Type) == "error" || gjson.Get(payload, "error").Exists()
+		terminateCommitted := isError && StreamPreheaderConfigured(c) && c.Writer.Written()
+		if terminateCommitted {
+			payload = string(s.redactAgentIdentitySensitiveBody(c.Request.Context(), account, []byte(payload)))
+		}
 		observer.ObserveOpenAI([]byte(payload), event.Type)
 		refusalDetector.ObservePayload([]byte(payload))
 		s.parseSSEUsageBytesWithType([]byte(payload), event.Type, &usage)
@@ -732,7 +745,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				usage = copyOpenAIUsageFromResponsesUsage(event.Response.Usage)
 			}
 		}
-		if strings.TrimSpace(event.Type) == "response.failed" || strings.TrimSpace(event.Type) == "error" {
+		if terminateCommitted || strings.TrimSpace(event.Type) == "response.failed" || strings.TrimSpace(event.Type) == "error" {
 			payloadBytes := []byte(payload)
 			message := extractOpenAISSEErrorMessage(payloadBytes)
 			if hit, code, msg := detectOpenAICyberPolicy(payloadBytes); hit {
@@ -747,6 +760,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					UpstreamInTok:  usage.InputTokens,
 					UpstreamOutTok: usage.OutputTokens,
 				})
+				if terminateCommitted {
+					streamNonFailoverErr = finishStreamPreheaderSSEError(c, payloadBytes, resp.Header)
+					return true
+				}
 				if !clientDisconnected {
 					// 被 refusal 检测扣留的 pendingSSE 有意丢弃——cyber 拦截优先于部分内容下发。
 					writeStreamHeaders()
@@ -764,6 +781,11 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					// finalizeStream 的 [DONE] 同样发不出去，统一抑制。
 					clientDisconnected = true
 				}
+				return true
+			}
+			if terminateCommitted {
+				s.handleOpenAIStreamTerminalAccountSideEffects(c, account, payloadBytes, message, resp.Header, upstreamModel)
+				streamNonFailoverErr = finishStreamPreheaderSSEError(c, payloadBytes, resp.Header)
 				return true
 			}
 			shouldFailover := openAIStreamFailedEventShouldFailover(payloadBytes, message)
@@ -1098,14 +1120,15 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if clientDisconnected {
 				continue
 			}
-			if refusalDetector.Enabled() && !clientOutputStarted {
+			if refusalDetector.Enabled() && !clientOutputStarted && !StreamPreheaderConfigured(c) {
 				continue
 			}
 			if time.Since(lastDataAt) < keepaliveInterval {
 				continue
 			}
-			// Send SSE comment as keepalive
+			// This body owner continues the preheader timer's heartbeat policy.
 			writeStreamHeaders()
+			markStreamPreheaderBodyHeartbeat(c)
 			if _, err := fmt.Fprint(c.Writer, ":\n\n"); err != nil {
 				logger.L().Info("openai chat_completions stream: client disconnected during keepalive",
 					zap.String("request_id", requestID),

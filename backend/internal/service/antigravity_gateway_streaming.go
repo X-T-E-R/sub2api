@@ -288,6 +288,10 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	lastDataAt := time.Now()
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity gemini")
+	var terminalGeneration *antigravityThoughtGeneration
+	if StreamPreheaderConfigured(c) {
+		terminalGeneration = newAntigravityThoughtGeneration()
+	}
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱
 	errorEventSent := false
@@ -364,6 +368,11 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				if !sawUpstreamObject && c.Request.Context().Err() != nil {
 					return result(true), nil
 				}
+				if antigravityPreheaderIncomplete(terminalGeneration, cont) && !cw.Disconnected() && c.Writer.Written() {
+					flushHeld(true)
+					sendErrorEvent("Upstream stream ended before a terminal event")
+					return result(false), errStreamPreheaderTerminal
+				}
 				if !sawUpstreamObject && !cw.Disconnected() {
 					if !c.Writer.Written() {
 						return nil, &UpstreamFailoverError{
@@ -379,7 +388,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				// Task24 B：只思考且正常完成时追加一次生成；失败不形成硬错误，终端由 A
 				// 的有效设置决定，第一代 usage 照常入账。
 				if cont != nil && cont.canContinue() && !cw.Disconnected() {
-					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp, c)
 					if continueErr != nil {
 						// 追加生成失败：第一代的成功完成信号一律不发，改为协议错误；已收到
 						// 的内容与累计 usage 照常下发。
@@ -397,6 +406,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner = startScanner(nextResp.Body)
+						if terminalGeneration != nil {
+							terminalGeneration = newAntigravityThoughtGeneration()
+						}
 						continue
 					}
 				}
@@ -430,6 +442,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 					return result(false), ev.err
 				}
 				sendErrorEvent("stream_read_error")
+				if terminalGeneration != nil {
+					return result(false), ev.err
+				}
 				return nil, ev.err
 			}
 
@@ -437,6 +452,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 
 			line := ev.line
 			s.observeAntigravityGeminiSSELine(c, line)
+			if terminalGeneration != nil {
+				terminalGeneration.observeLine(line)
+				if payload, failed := streamPreheaderSSEErrorPayload(line); failed {
+					flushHeld(true)
+					return result(false), finishStreamPreheaderSSEError(c, payload, resp.Header)
+				}
+			}
 			trimmed := strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
@@ -646,7 +668,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 				// 收到的思考/签名）。追加失败不变成硬错误：下游拿到第一代的合法响应，
 				// 终态由 A 的有效设置决定，第一代 usage 照常入账。
 				if cont != nil && cont.canContinue() {
-					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp, c)
 					if continueErr != nil {
 						// 追加生成失败：非流式响应以非成功终态结束（finishReason 被抑制），
 						// 内容与第一代 usage 照常返回，调用方正常计费。
@@ -1142,7 +1164,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				// 加实际收到的思考/签名）。追加失败不再变成硬错误：下游拿到第一代的
 				// 合法响应，终态由 A 的有效设置决定，usage 累计入账。
 				if cont != nil && cont.canContinue() {
-					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					nextResp, _, continueErr := cont.continueOnce(c.Request.Context(), resp, c)
 					if continueErr != nil {
 						cont.recordFailure(c, "claude_collect", continueErr)
 					} else if nextResp != nil {
@@ -1484,6 +1506,10 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	}
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity claude")
+	var terminalGeneration *antigravityThoughtGeneration
+	if StreamPreheaderConfigured(c) {
+		terminalGeneration = newAntigravityThoughtGeneration()
+	}
 	if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
 		cw.onWrite = capture.RecordConvertedWrite
 		cw.onDisconnect = capture.MarkClientDisconnect
@@ -1533,6 +1559,10 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 	// finalize 发送结束事件并返回结果。
 	finalize := func() (*antigravityStreamResult, error) {
+		if antigravityPreheaderIncomplete(terminalGeneration, cont) && !cw.Disconnected() {
+			sendErrorEvent("Upstream stream ended before a terminal event")
+			return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, errStreamPreheaderTerminal
+		}
 		noAnswer := !cw.Disconnected() && cont.completeNoUsableAnswer(c, "claude_stream")
 		if cont != nil {
 			// A 的有效设置（或追加生成失败）决定最终终态：抑制成功终态，但仍下发累计
@@ -1567,7 +1597,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				// 上游信封并接上实际收到的思考/签名；只追加一次，不重入重试循环，也不
 				// 重开调度/粘性身份/并发槽位。
 				if cont != nil && cont.canContinue() && !cw.Disconnected() {
-					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp)
+					nextResp, finishedUsage, continueErr := cont.continueOnce(c.Request.Context(), resp, c)
 					if continueErr != nil {
 						cont.recordFailure(c, "claude_stream", continueErr)
 						return finalizeFailure(continueErr)
@@ -1578,6 +1608,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner = startScanner(nextResp.Body)
+						if terminalGeneration != nil {
+							terminalGeneration = newAntigravityThoughtGeneration()
+						}
 						continue
 					}
 				}
@@ -1601,10 +1634,19 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 					return &antigravityStreamResult{usage: convertUsage(nil), firstTokenMs: firstTokenMs}, ev.err
 				}
 				sendErrorEvent("stream_read_error")
+				if terminalGeneration != nil {
+					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, fmt.Errorf("stream read error: %w", ev.err)
+				}
 				return nil, fmt.Errorf("stream read error: %w", ev.err)
 			}
 
 			s.observeAntigravityGeminiSSELine(c, ev.line)
+			if terminalGeneration != nil {
+				terminalGeneration.observeLine(ev.line)
+				if payload, failed := streamPreheaderSSEErrorPayload(ev.line); failed {
+					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, finishStreamPreheaderSSEError(c, payload, resp.Header)
+				}
+			}
 			if cont != nil {
 				// 观察这一代上游响应，并决定成功终态是否允许发往下游。追加生成之前的
 				// 暂扣不发 usage delta，那条 delta 只在响应真正结束时发出。

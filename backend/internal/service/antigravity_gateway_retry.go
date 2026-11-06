@@ -106,6 +106,9 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 		p.account.IsOveragesEnabled() &&
 		!p.account.isCreditsExhausted() {
 		result := s.attemptCreditsOveragesRetry(p, baseURL, modelName, waitDuration, resp.StatusCode, respBody)
+		if result.err != nil {
+			return &smartRetryResult{action: smartRetryActionBreakWithResp, err: result.err}
+		}
 		if result.handled && result.resp != nil {
 			return &smartRetryResult{
 				action: smartRetryActionBreakWithResp,
@@ -211,15 +214,9 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 				captureRetryAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
 			}
 
-			retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
-			if captureRetryAttempt != nil {
-				if retryResp != nil {
-					retryResp = captureRetryAttempt.AttachResponse(retryResp)
-				} else if retryErr != nil {
-					captureRetryAttempt.MarkRequestError(retryErr)
-				} else {
-					captureRetryAttempt.MarkRequestError(errors.New("upstream returned nil response"))
-				}
+			retryResp, retryErr, terminal := s.doAntigravityInference(p, retryReq, captureRetryAttempt)
+			if terminal {
+				return &smartRetryResult{action: smartRetryActionBreakWithResp, err: retryErr}
 			}
 			if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 				log.Printf("%s status=%d smart_retry_success attempt=%d/%d", p.prefix, retryResp.StatusCode, attempt, maxAttempts)
@@ -399,15 +396,12 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 			captureRetryAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
 		}
 
-		retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
-		if captureRetryAttempt != nil {
-			if retryResp != nil {
-				retryResp = captureRetryAttempt.AttachResponse(retryResp)
-			} else if retryErr != nil {
-				captureRetryAttempt.MarkRequestError(retryErr)
-			} else {
-				captureRetryAttempt.MarkRequestError(errors.New("upstream returned nil response"))
+		retryResp, retryErr, terminal := s.doAntigravityInference(p, retryReq, captureRetryAttempt)
+		if terminal {
+			if lastRetryResp != nil {
+				_ = lastRetryResp.Body.Close()
 			}
+			return &smartRetryResult{action: smartRetryActionBreakWithResp, err: retryErr}
 		}
 		if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d single_account_503_retry_success attempt=%d/%d total_waited=%v",
@@ -551,31 +545,10 @@ urlFallbackLoop:
 				captureAttempt = capture.BeginUpstreamAttempt(p.account.ID, p.groupID, p.body)
 			}
 
-			send := func(req *http.Request) (*http.Response, error) {
-				response, sendErr := p.httpUpstream.Do(req, p.proxyURL, p.account.ID, p.account.Concurrency)
-				if captureAttempt != nil && response != nil {
-					response = captureAttempt.AttachResponse(response)
-				}
-				if captureAttempt != nil && response == nil && sendErr != nil {
-					captureAttempt.MarkRequestError(sendErr)
-				}
-				return response, sendErr
-			}
-			if p.allowPreheader {
-				var terminal bool
-				resp, err, terminal = requestStreamPreheader(p.c, upstreamReq, p.account, send, func(response *http.Response, body []byte) {
-					status := response.StatusCode
-					if handled, _, _ := s.applyErrorPolicy(p, status, response.Header, body); !handled &&
-						!s.handleAntigravityModelRateLimitBeforePolicy(p, status, response.Header, body) {
-						s.handleUpstreamError(p.ctx, p.prefix, p.account, status, response.Header, body,
-							p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
-					}
-				})
-				if terminal {
-					return nil, err
-				}
-			} else {
-				resp, err = send(upstreamReq)
+			var terminal bool
+			resp, err, terminal = s.doAntigravityInference(p, upstreamReq, captureAttempt)
+			if terminal {
+				return nil, err
 			}
 			if err == nil && resp == nil {
 				err = errors.New("upstream returned nil response")

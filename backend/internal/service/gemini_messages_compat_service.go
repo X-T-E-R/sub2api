@@ -2197,14 +2197,11 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 			continue
 		}
 
-		if preheaderConfigured {
-			if upstreamError := gjson.GetBytes(unwrappedBytes, "error"); upstreamError.Exists() {
-				status := int(upstreamError.Get("code").Int())
-				if status < 400 || status > 599 {
-					status = http.StatusBadGateway
-				}
-				return failIncomplete(status, streamPreheaderErrorType(status, unwrappedBytes), sanitizeUpstreamErrorMessage(upstreamError.Get("message").String()))
-			}
+		if u := extractGeminiUsage(unwrappedBytes); u != nil {
+			usage = *u
+		}
+		if preheaderConfigured && gjson.GetBytes(unwrappedBytes, "error").Exists() {
+			return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, finishStreamPreheaderSSEError(c, unwrappedBytes, resp.Header)
 		}
 		if fr := extractGeminiFinishReason(geminiResp); fr != "" {
 			finishReason = fr
@@ -2349,10 +2346,6 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 				}
 				flusher.Flush()
 			}
-		}
-
-		if u := extractGeminiUsage(unwrappedBytes); u != nil {
-			usage = *u
 		}
 
 		// Process the final unterminated line at EOF as well.
@@ -2781,6 +2774,10 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
+			previousEventOpen := eventOpen
+			if preheaderConfigured && strings.TrimSpace(trimmed) == "event: error" {
+				continue // The error payload below owns the entire outgoing event.
+			}
 			eventOpen = trimmed != ""
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
@@ -2807,13 +2804,19 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 						usage = u
 					}
 					if preheaderConfigured {
+						if gjson.GetBytes(rawBytes, "error").Exists() {
+							if previousEventOpen && c.Writer.Written() && c.Request.Context().Err() == nil {
+								_, _ = io.WriteString(c.Writer, "\n")
+							}
+							return &geminiNativeStreamResult{usage: usage, firstTokenMs: firstTokenMs}, finishStreamPreheaderSSEError(c, rawBytes, resp.Header)
+						}
 						gjson.GetBytes(rawBytes, "candidates").ForEach(func(_, candidate gjson.Result) bool {
 							if candidate.Get("finishReason").String() != "" {
 								sawTerminal = true
 							}
 							return true
 						})
-						if gjson.GetBytes(rawBytes, "error").Exists() || gjson.GetBytes(rawBytes, "promptFeedback.blockReason").String() != "" {
+						if gjson.GetBytes(rawBytes, "promptFeedback.blockReason").String() != "" {
 							sawTerminal = true
 						}
 					}

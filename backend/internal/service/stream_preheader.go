@@ -68,11 +68,14 @@ func StreamPreheaderConfigured(c *gin.Context) bool {
 	return enabled
 }
 
-func requestStreamPreheader(c *gin.Context, req *http.Request, account *Account, send preheaderTransport, observe func(*http.Response, []byte)) (*http.Response, error, bool) {
+func requestStreamPreheader(c *gin.Context, req *http.Request, account *Account, send preheaderTransport, prepareError func(*http.Response, []byte) []byte) (*http.Response, error, bool) {
 	if c != nil {
 		if policy, enabled := c.Get(streamPreheaderPolicyKey); enabled {
+			if StreamPreheaderFinalized(c) {
+				return nil, errStreamPreheaderTerminal, true
+			}
 			p := policy.(streamPreheaderPolicy)
-			return roundTripStreamPreheader(c, req, account, p.protocol, p.interval, send, observe)
+			return roundTripStreamPreheader(c, req, account, p.protocol, p.interval, send, prepareError)
 		}
 	}
 	resp, err := send(req)
@@ -92,7 +95,7 @@ func streamPreheaderInterval(cfg *config.Config, stream bool) time.Duration {
 // is linked only until headers, including for transports that detach the body
 // lifetime so it can still collect upstream usage after a downstream disconnect.
 func waitForStreamHeaders(c *gin.Context, req *http.Request, protocol streamPreheaderProtocol, interval time.Duration, send preheaderTransport) (*http.Response, error, bool) {
-	if protocol == streamPreheaderNone || interval <= 0 || c.Writer.Written() {
+	if protocol == streamPreheaderNone || interval <= 0 {
 		resp, err := send(req)
 		return resp, err, false
 	}
@@ -156,11 +159,13 @@ func waitForStreamHeaders(c *gin.Context, req *http.Request, protocol streamPreh
 				cancel()
 				return nil, err, started
 			}
-			if !started {
+			if !c.Writer.Written() {
 				c.Header("Content-Type", "text/event-stream")
 				c.Header("Cache-Control", "no-cache")
 				c.Header("X-Accel-Buffering", "no")
 				c.Status(http.StatusOK)
+			}
+			if !started {
 				started = true
 				c.Set(streamPreheaderCommittedKey, protocol)
 			}
@@ -245,7 +250,7 @@ func FinishStreamPreheaderFailover(c *gin.Context, failure *UpstreamFailoverErro
 	return FinishStreamPreheaderError(c, status, streamPreheaderErrorType(status, failure.ResponseBody), message, failure.ResponseHeaders)
 }
 
-type streamPreheaderResponseMeta struct{ id, model string }
+type streamPreheaderResponseMeta struct{ id, model, retryDelay string }
 
 func configuredStreamFailureFrame(c *gin.Context, status int, errType, message string, response ...streamPreheaderResponseMeta) string {
 	policy, _ := c.Get(streamPreheaderPolicyKey)
@@ -284,9 +289,13 @@ func recordStreamPreheaderFailure(c *gin.Context, protocol streamPreheaderProtoc
 	return buildStreamPreheaderError(protocol, status, errType, message, retryAfter, time.Now(), response...)
 }
 
-func writeStreamPreheaderError(c *gin.Context, status int, errType, message string, headers http.Header) error {
+func writeStreamPreheaderError(c *gin.Context, status int, errType, message string, headers http.Header, body ...[]byte) error {
 	protocol, _ := c.Get(streamPreheaderCommittedKey)
-	return writeStreamPreheaderFailureFrame(c, recordStreamPreheaderFailure(c, protocol.(streamPreheaderProtocol), status, errType, message, headers.Get("Retry-After")))
+	meta := streamPreheaderResponseMeta{}
+	if len(body) > 0 {
+		meta.retryDelay = streamPreheaderBodyRetryDelay(body[0])
+	}
+	return writeStreamPreheaderFailureFrame(c, recordStreamPreheaderFailure(c, protocol.(streamPreheaderProtocol), status, errType, message, headers.Get("Retry-After"), meta))
 }
 
 func writeStreamPreheaderFailureFrame(c *gin.Context, frame string) error {
@@ -304,7 +313,7 @@ func writeStreamPreheaderFailureFrame(c *gin.Context, frame string) error {
 // final: consume the bounded error body, retain account/error observations, and
 // return before a caller's original HTTP-error retry or JSON response branches.
 // A true third result tells the caller to return err immediately.
-func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Account, protocol streamPreheaderProtocol, interval time.Duration, send preheaderTransport, observe func(*http.Response, []byte)) (*http.Response, error, bool) {
+func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Account, protocol streamPreheaderProtocol, interval time.Duration, send preheaderTransport, prepareError func(*http.Response, []byte) []byte) (*http.Response, error, bool) {
 	resp, err, started := waitForStreamHeaders(c, req, protocol, interval, send)
 	if protocol != streamPreheaderNone && interval > 0 && c.Request.Context().Err() != nil {
 		if resp != nil && resp.Body != nil {
@@ -335,8 +344,8 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 			return nil, err, true
 		}
 	}
-	if observe != nil {
-		observe(resp, body)
+	if prepareError != nil {
+		body = prepareError(resp, body)
 	}
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 	setOpsUpstreamError(c, resp.StatusCode, message, "")
@@ -357,7 +366,7 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 	if protocol == streamPreheaderGemini {
 		errType = gjson.GetBytes(body, "error.status").String()
 	}
-	return nil, writeStreamPreheaderError(c, resp.StatusCode, errType, message, resp.Header), true
+	return nil, writeStreamPreheaderError(c, resp.StatusCode, errType, message, resp.Header, body), true
 }
 
 // A late rejection can flush its HTTP headers long before its JSON body. Keep
@@ -415,6 +424,12 @@ func streamPreheaderErrorType(status int, body []byte) string {
 
 func buildStreamPreheaderError(protocol streamPreheaderProtocol, status int, errType, message, retryAfter string, now time.Time, response ...streamPreheaderResponseMeta) string {
 	retryAfter, retryDelay := streamPreheaderRetryAfter(retryAfter, now)
+	// A valid HTTP Retry-After is authoritative; otherwise retain the upstream
+	// Google duration verbatim, including fractional seconds.
+	if retryAfter == "" && len(response) > 0 && response[0].retryDelay != "" {
+		retryDelay = response[0].retryDelay
+		retryAfter = strings.TrimSuffix(retryDelay, "s")
+	}
 	failure := gin.H{"code": streamPreheaderTerminalCode, "type": errType, "message": message, "status": status}
 	if retryAfter != "" {
 		failure["retry_after"] = retryAfter

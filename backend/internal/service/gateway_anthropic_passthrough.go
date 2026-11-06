@@ -406,7 +406,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	sawTerminalEvent := false
 	inPartialEvent := false
 	defer func() {
-		if resultErr == nil || sawTerminalEvent || clientDisconnected || !StreamPreheaderCommitted(c) {
+		if resultErr == nil || sawTerminalEvent || StreamPreheaderFinalized(c) || !StreamPreheaderConfigured(c) || !c.Writer.Written() {
 			return
 		}
 		if inPartialEvent {
@@ -532,8 +532,15 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			line := ev.line
+			if StreamPreheaderConfigured(c) && c.Writer.Written() && strings.TrimSpace(line) == "event: error" {
+				continue
+			}
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
+				if StreamPreheaderConfigured(c) && c.Writer.Written() && gjson.Get(trimmed, "error").Exists() {
+					parseSSEUsagePassthrough(data, usage)
+					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, finishStreamPreheaderSSEError(c, []byte(trimmed), resp.Header)
+				}
 				observer.ObserveAnthropic([]byte(trimmed))
 				if anthropicStreamEventIsTerminal("", trimmed) {
 					sawTerminalEvent = true

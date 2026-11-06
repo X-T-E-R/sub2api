@@ -328,13 +328,14 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	var firstTokenMs *int
 	firstChunk := true
 	clientDisconnected := false
+	sawMessageStop := false
 
-	scanner := bufio.NewScanner(resp.Body)
+	source := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	source.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
@@ -353,11 +354,10 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	}
 
 	// 读间隔上限：上游挂住 SSE（不发数据也不断连）时结束排水。上游 ctx 为
-	// WithoutCancel 且 http.Client 无整体 Timeout，无此界限则客户端断开后
-	// scanner.Scan() 永久阻塞（见 anthropic native pump 文件注释）。
+	// WithoutCancel 且 http.Client 无整体 Timeout，无此界限则 scanner.Scan() 永久阻塞。
 	streamInterval := s.anthropicNativeStreamInterval()
-	pump := newAnthropicNativeLinePump(scanner, streamInterval)
-	defer pump.stop()
+	nextLine, stopReader := newOpenAINativeAnthropicLineReader(c, source, streamInterval)
+	defer stopReader()
 
 	logReadErr := func(err error) {
 		if !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -377,7 +377,12 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 				zap.Duration("interval", streamInterval),
 			)
 		}
-		return resultWithUsage(), fmt.Errorf("stream data interval timeout")
+		idleErr := fmt.Errorf("stream data interval timeout")
+		if StreamPreheaderConfigured(c) {
+			return resultWithUsage(), errors.Join(idleErr, writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				"upstream_error", "Upstream stream data interval timeout", streamPreheaderResponseMeta{model: originalModel}))
+		}
+		return resultWithUsage(), idleErr
 	}
 
 	writeChunk := func(chunk apicompat.ChatCompletionsChunk) bool {
@@ -430,12 +435,14 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		return false
 	}
 
+	var readErr error
 	for {
-		line, rerr := pump.next()
+		line, rerr := nextLine()
 		if rerr != nil {
 			if errors.Is(rerr, errAnthropicNativeStreamIdle) {
 				return onIdle()
 			}
+			readErr = rerr
 			logReadErr(rerr)
 			break
 		}
@@ -443,12 +450,14 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			continue
 		}
 
-		dataLine, rerr := pump.next()
+		dataLine, rerr := nextLine()
 		if rerr != nil {
 			if errors.Is(rerr, errAnthropicNativeStreamIdle) {
 				return onIdle()
 			}
-			// EOF / 读错误：事件行后流终止，进入 finalize。
+			// EOF / 读错误：事件行后流终止； opt-in callers reject it
+			// below instead of synthesizing a successful terminal event.
+			readErr = rerr
 			logReadErr(rerr)
 			break
 		}
@@ -462,9 +471,40 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			continue
 		}
 
+		if event.Type == "error" && StreamPreheaderConfigured(c) && !sawMessageStop {
+			if event.Usage != nil {
+				mergeAnthropicUsage(&usage, *event.Usage)
+			}
+			if event.Message != nil {
+				mergeAnthropicUsage(&usage, event.Message.Usage)
+			}
+			meta := streamPreheaderResponseMeta{model: originalModel}
+			if c.Writer.Written() {
+				return resultWithUsage(), finishStreamPreheaderSSEError(c, []byte(payload), resp.Header, meta)
+			}
+			return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway,
+				streamPreheaderErrorType(http.StatusBadGateway, []byte(payload)), "Upstream stream failed", meta)
+		}
+
 		if processAnthropicEvent(&event) {
 			return resultWithUsage(), nil
 		}
+		if event.Type == "message_stop" {
+			sawMessageStop = true
+			if StreamPreheaderConfigured(c) {
+				return resultWithUsage(), nil
+			}
+		}
+	}
+
+	if StreamPreheaderConfigured(c) && !sawMessageStop && !clientDisconnected &&
+		!errors.Is(readErr, context.Canceled) && !errors.Is(readErr, context.DeadlineExceeded) {
+		failureErr := writeConfiguredStreamFailure(c, http.StatusBadGateway,
+			"upstream_error", "Upstream stream ended before message_stop", streamPreheaderResponseMeta{model: originalModel})
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return resultWithUsage(), errors.Join(readErr, failureErr)
+		}
+		return resultWithUsage(), failureErr
 	}
 
 	// Finalize both state machines（客户端已断开时仍执行，保证 usage 汇总完整）。
