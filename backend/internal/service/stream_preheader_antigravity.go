@@ -3,6 +3,8 @@ package service
 import (
 	"errors"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 // Each existing inference attempt owns its header wait. The helper never wraps
@@ -41,7 +43,7 @@ func (s *AntigravityGatewayService) doAntigravityInference(p antigravityRetryLoo
 }
 
 func antigravityPreheaderIncomplete(g *antigravityThoughtGeneration, cont *antigravityThoughtContinuation) bool {
-	if g == nil || g.hasRefusal || (g.finishReason != "" && g.finishReason != "FINISH_REASON_UNSPECIFIED") {
+	if g == nil || g.hasRefusal || cont.canContinue() || (g.finishReason != "" && g.finishReason != "FINISH_REASON_UNSPECIFIED") {
 		return false
 	}
 	// An empty appended generation retains Task24's original explicit outcome
@@ -51,4 +53,38 @@ func antigravityPreheaderIncomplete(g *antigravityThoughtGeneration, cont *antig
 
 func antigravityPreheaderHasUsage(res *antigravityStreamResult) bool {
 	return res != nil && res.usage != nil && *res.usage != (ClaudeUsage{})
+}
+
+// A legal append keeps its original same-account bookkeeping and budget. Only
+// its already-committed, opt-in client framing changes to retain the real error.
+func finishStreamPreheaderContinuationError(c *gin.Context, writer *antigravityClientWriter, err error, response ...streamPreheaderResponseMeta) bool {
+	if !StreamPreheaderConfigured(c) || !c.Writer.Written() {
+		return false
+	}
+	var upstream *antigravityThoughtContinuationStatusError
+	if !errors.As(err, &upstream) || upstream.StatusCode < 400 || upstream.StatusCode > 599 {
+		return false
+	}
+	if StreamPreheaderFinalized(c) {
+		return true
+	}
+	meta := streamPreheaderResponseMeta{}
+	if len(response) > 0 {
+		meta = response[0]
+	}
+	meta.retryDelay = upstream.RetryDelay
+	value, _ := c.Get(streamPreheaderPolicyKey)
+	protocol := value.(streamPreheaderPolicy).protocol
+	errType := upstream.ErrorType
+	if protocol == streamPreheaderGemini {
+		errType = upstream.Code
+	}
+	message := upstream.Message
+	if message == "" {
+		message = http.StatusText(upstream.StatusCode)
+	}
+	if frame := recordStreamPreheaderFailure(c, protocol, upstream.StatusCode, errType, message, upstream.RetryAfter, meta); frame != "" {
+		writer.Write([]byte(frame))
+	}
+	return true
 }

@@ -379,6 +379,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, bareErrorPayload, failedMessage, resp.Header, mappedModel)
 			bareErrorAccountSideEffectsPending = false
 		}
+		if codexFailureTerminal && sawBareError && !sawResponseFailed && StreamPreheaderConfigured(c) && c.Writer.Written() {
+			flushPending("Client disconnected before the terminal failure frame")
+			return resultWithUsage(), finishStreamPreheaderSSEError(c, bareErrorPayload, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
+		}
 		if codexFailureTerminal && sawBareError && !sawResponseFailed && !clientDisconnected {
 			applyAttemptResponseHeaders()
 			if _, err := writePendingString(buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
@@ -488,6 +492,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if StreamPreheaderConfigured(c) && eventType == "" && gjson.GetBytes(dataBytes, "error").IsObject() {
+				eventType = "error"
+			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
 				// A later successful terminal is authoritative over a pending bare
@@ -555,10 +562,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if terminateCommitted {
+				if terminateCommitted && !(codexFailureTerminal && eventType == "error") {
 					if !cyberHit {
 						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
 					}
+					bareErrorAccountSideEffectsPending = false
 					streamEarlyErr = finishStreamPreheaderSSEError(c, dataBytes, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
 					return
 				}

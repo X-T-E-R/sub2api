@@ -1888,6 +1888,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, bareErrorPayload, failedMessage, resp.Header, mappedModel)
 			bareErrorAccountSideEffectsPending = false
 		}
+		if preheaderConfigured && c.Writer.Written() {
+			writePendingLines()
+			flushPendingOutput()
+			_ = finishStreamPreheaderSSEError(c, bareErrorPayload, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
+			failureDelivered = true
+			return
+		}
 		if clientDisconnected || !writePendingLines() {
 			return
 		}
@@ -1949,7 +1956,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
-			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			suppressCurrentEvent = (preheaderConfigured && c.Writer.Written() && (eventType == "error" || eventType == "response.failed")) ||
+				(codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed")))
 		}
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
@@ -1957,6 +1965,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			dataBytes := []byte(data)
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if preheaderConfigured && rawEventType == "" && gjson.GetBytes(dataBytes, "error").IsObject() {
+				rawEventType = "error"
+			}
 			observer.ObserveOpenAI(dataBytes, rawEventType)
 			if needModelReplace && strings.Contains(data, mappedModel) {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
@@ -1988,6 +1999,16 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			if preheaderConfigured && codexFailureTerminal && sawBareError && !sawResponseFailed &&
+				(eventType == "response.completed" || eventType == "response.done") {
+				sawBareError = false
+				sawFailedEvent = false
+				responseFailedPending = false
+				suppressCurrentEvent = false
+				bareErrorPayload = nil
+				bareErrorAccountSideEffectsPending = false
+				failedMessage = ""
+			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}
@@ -2031,10 +2052,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if terminateCommitted {
+				if terminateCommitted && !(codexFailureTerminal && eventType == "error") {
 					if !cyberHit {
 						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
 					}
+					bareErrorAccountSideEffectsPending = false
 					return resultWithUsage(), finishStreamPreheaderSSEError(c, dataBytes, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)

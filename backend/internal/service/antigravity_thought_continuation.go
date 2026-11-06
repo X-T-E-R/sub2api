@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -52,6 +53,9 @@ type antigravityThoughtContinuationStatusError struct {
 	Message    string
 	Code       string
 	RequestID  string
+	ErrorType  string
+	RetryAfter string
+	RetryDelay string
 }
 
 func (e *antigravityThoughtContinuationStatusError) Error() string {
@@ -89,7 +93,12 @@ func newAntigravityThoughtContinuationStatusError(status int, headers http.Heade
 		code = ""
 	}
 	requestID := truncateString(sanitizeUpstreamErrorMessage(strings.Join(strings.Fields(headers.Get("x-request-id")), " ")), 128)
-	return &antigravityThoughtContinuationStatusError{StatusCode: status, Message: message, Code: code, RequestID: requestID}
+	retryAfter, _ := streamPreheaderRetryAfter(headers.Get("Retry-After"), time.Now())
+	return &antigravityThoughtContinuationStatusError{
+		StatusCode: status, Message: message, Code: code, RequestID: requestID,
+		ErrorType:  truncateString(streamPreheaderErrorType(status, body), 64),
+		RetryAfter: retryAfter, RetryDelay: streamPreheaderBodyRetryDelay(body),
+	}
 }
 
 // AntigravityThoughtContinuationError is the Task24 terminal error of a failed appended

@@ -49,16 +49,23 @@ func (s *preheaderHandlerUpstream) DoWithTLS(req *http.Request, proxy string, id
 
 func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		status    int
-		truncated bool
+		name        string
+		status      int
+		truncated   bool
+		geminiGroup bool
 	}{
-		{"success", 200, false}, {"authentication error", 401, false}, {"rate limit", 429, false}, {"partial usage then EOF", 200, true},
+		{"success", 200, false, false}, {"authentication error", 401, false, false}, {"rate limit", 429, false, false}, {"partial usage then EOF", 200, true, false},
+		{"Gemini Messages partial usage then EOF", 200, true, true},
+		{"Gemini Messages heartbeat only", 429, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			groupID := int64(9300)
 			group := &service.Group{ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive}
 			account := handlerThoughtAccount()
+			if tc.geminiGroup {
+				group.Platform, account.Platform, account.Type = service.PlatformGemini, service.PlatformGemini, service.AccountTypeAPIKey
+				account.Credentials = map[string]any{"api_key": "fixture", "model_mapping": map[string]any{"client-alias": "gemini-2.5-flash"}}
+			}
 			account.Extra = map[string]any{}
 			account.Schedulable = true
 			account.AccountGroups = []service.AccountGroup{{AccountID: account.ID, GroupID: groupID}}
@@ -78,6 +85,9 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 				service.NewDeferredService(nil, nil, 0), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 			h := &GatewayHandler{gatewayService: gateway, antigravityGatewayService: antigravity, billingCacheService: billing,
 				concurrencyHelper: NewConcurrencyHelper(concurrency, SSEPingFormatClaude, 0), maxAccountSwitches: 1, maxAccountSwitchesGemini: 1, cfg: cfg}
+			if tc.geminiGroup {
+				h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, snapshot, nil, nil, upstream, antigravity, cfg)
+			}
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)
 			body := `{"model":"client-alias","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"question"}]}`

@@ -492,7 +492,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 		if event.Type == "message_stop" {
 			sawMessageStop = true
 			if StreamPreheaderConfigured(c) {
-				return resultWithUsage(), nil
+				break
 			}
 		}
 	}

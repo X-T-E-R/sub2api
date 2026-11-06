@@ -478,6 +478,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 						// 追加生成失败：以协议不成功终态 + 错误帧结束，保留内容与累计 usage。
 						// 可计费结果与 Task24 终态错误一起返回，调用方先入账再返回错误。
 						cont.recordFailure(c, "compat_stream", continueErr)
+						if finishStreamPreheaderContinuationError(c, session.writer, continueErr, antigravityCompatFailureMeta(session.adapter)) {
+							return session.collectResult(false), cont.failureError()
+						}
 						finishResult, finishErr := session.finish()
 						writeAntigravityCompatStreamError(c, session.adapter, session.writer, "thought_continuation_error")
 						if finishErr == nil {

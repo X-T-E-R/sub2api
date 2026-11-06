@@ -394,7 +394,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						// 的内容与累计 usage 照常下发。
 						cont.recordFailure(c, "gemini_stream", continueErr)
 						flushHeld(true)
-						if !errors.Is(continueErr, context.Canceled) && !errors.Is(continueErr, context.DeadlineExceeded) {
+						if !errors.Is(continueErr, context.Canceled) && !errors.Is(continueErr, context.DeadlineExceeded) &&
+							!finishStreamPreheaderContinuationError(c, cw, continueErr) {
 							sendErrorEvent("thought_continuation_error")
 						}
 						return result(cw.Disconnected()), cont.failureError()
@@ -1543,7 +1544,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		if len(finalEvents) > 0 {
 			cw.Write(finalEvents)
 		}
-		if !errors.Is(contErr, context.Canceled) && !errors.Is(contErr, context.DeadlineExceeded) {
+		if !errors.Is(contErr, context.Canceled) && !errors.Is(contErr, context.DeadlineExceeded) &&
+			!finishStreamPreheaderContinuationError(c, cw, contErr) {
 			sendErrorEvent("thought_continuation_error")
 		}
 		// 终态错误与第一代的可计费结果一起返回：调用方先入账再返回错误，且不做 failover、
@@ -1631,7 +1633,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity): max_size=%d error=%v", maxLineSize, ev.err)
 					sendErrorEvent("response_too_large")
-					return &antigravityStreamResult{usage: convertUsage(nil), firstTokenMs: firstTokenMs}, ev.err
+					return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, ev.err
 				}
 				sendErrorEvent("stream_read_error")
 				if terminalGeneration != nil {
@@ -1681,7 +1683,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				capture.MarkTimeout()
 			}
 			sendErrorEvent("stream_timeout")
-			return &antigravityStreamResult{usage: convertUsage(nil), firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
+			return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
 
 		case <-keepaliveCh:
 			if cw.Disconnected() {
