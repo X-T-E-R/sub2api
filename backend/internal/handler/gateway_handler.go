@@ -543,7 +543,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					forwardFailedFields = append(forwardFailedFields, zap.Int64p("proxy_id", account.ProxyID))
 				}
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
-				if !service.StreamPreheaderFinalized(c) || result == nil || (result.Usage == (service.ClaudeUsage{}) && result.ImageCount == 0) {
+				terminalReported := service.StreamPreheaderFinalized(c) ||
+					(service.StreamPreheaderConfigured(c) && service.IsAntigravityPartialResponseError(err))
+				if !terminalReported || result == nil || (result.Usage == (service.ClaudeUsage{}) && result.ImageCount == 0) {
 					return
 				}
 				// The terminal error is already sent, but observed usage is still recorded.

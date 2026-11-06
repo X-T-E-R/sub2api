@@ -89,6 +89,22 @@ func (g *antigravityThoughtGeneration) failureCode(policy AntigravityThoughtPoli
 	return "antigravity_empty_response"
 }
 
+// noUsableAnswerCode classifies the failure without committing a terminal. A
+// clean EOF can report a typed missing-terminal failure, but never authorizes success.
+func (c *antigravityThoughtContinuation) noUsableAnswerCode() string {
+	if c == nil || c.continuationFailed {
+		return ""
+	}
+	g := c.effectiveGeneration()
+	code := g.failureCode(c.policy)
+	if code == "" && c.zeroOutputContinuationUsed() && g.noUsableAnswerEligible() && !g.hasContentCarrier {
+		// A second usage-only generation without a candidate is still an explicit
+		// failure, including when legacy A is off; it cannot trigger failover.
+		return "antigravity_missing_terminal"
+	}
+	return code
+}
+
 // Finalize only after draining clean EOF, including trailing usage frames.
 // Explicit provider failures are not gated by A. A still controls empty/normal
 // thinking-only/missing-terminal suppression with its original account override.
@@ -99,14 +115,7 @@ func (c *antigravityThoughtContinuation) completeNoUsableAnswer(ginCtx *gin.Cont
 	if c.noUsableAnswerErr != nil {
 		return true
 	}
-	g := c.effectiveGeneration()
-	code := g.failureCode(c.policy)
-	if code == "" && c.zeroOutputContinuationUsed() && g != nil &&
-		!g.hasContentCarrier && g.noUsableAnswerEligible() {
-		// A second usage-only generation without a candidate is still an explicit
-		// failure, including when legacy A is off; it cannot trigger failover.
-		code = "antigravity_missing_terminal"
-	}
+	code := c.noUsableAnswerCode()
 	if code == "" {
 		return false
 	}

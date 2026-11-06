@@ -42,8 +42,14 @@ func (s *AntigravityGatewayService) doAntigravityInference(p antigravityRetryLoo
 	})
 }
 
-func antigravityPreheaderIncomplete(g *antigravityThoughtGeneration, cont *antigravityThoughtContinuation) bool {
+func antigravityPreheaderIncomplete(c *gin.Context, g *antigravityThoughtGeneration, cont *antigravityThoughtContinuation) bool {
 	if g == nil || g.hasRefusal || cont.canContinue() || (g.finishReason != "" && g.finishReason != "FINISH_REASON_UNSPECIFIED") {
+		return false
+	}
+	// Let the Antigravity finalizer report its existing typed failure after a
+	// clean EOF. Only otherwise-unclassified missing terminals use the generic
+	// gateway error; neither classification allows a synthetic success.
+	if c.Request.Context().Err() == nil && cont.noUsableAnswerCode() != "" {
 		return false
 	}
 	// An empty appended generation retains Task24's original explicit outcome

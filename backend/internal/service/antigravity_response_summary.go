@@ -214,7 +214,7 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 			authority = "read_error"
 		} else if g.finishReason != "" && g.finishReason != "FINISH_REASON_UNSPECIFIED" {
 			authority = "explicit"
-		} else if g.hasVisibleText || g.hasToolCall || g.hasGrounding {
+		} else if !c.delivery.ProtocolError && (g.hasVisibleText || g.hasToolCall || g.hasGrounding) {
 			authority = "clean_eof_compat"
 		}
 	}

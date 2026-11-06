@@ -368,7 +368,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				if !sawUpstreamObject && c.Request.Context().Err() != nil {
 					return result(true), nil
 				}
-				if antigravityPreheaderIncomplete(terminalGeneration, cont) && !cw.Disconnected() && c.Writer.Written() {
+				if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !cw.Disconnected() && c.Writer.Written() {
 					flushHeld(true)
 					sendErrorEvent("Upstream stream ended before a terminal event")
 					return result(false), errStreamPreheaderTerminal
@@ -1561,7 +1561,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 	// finalize 发送结束事件并返回结果。
 	finalize := func() (*antigravityStreamResult, error) {
-		if antigravityPreheaderIncomplete(terminalGeneration, cont) && !cw.Disconnected() {
+		if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !cw.Disconnected() {
 			sendErrorEvent("Upstream stream ended before a terminal event")
 			return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, errStreamPreheaderTerminal
 		}

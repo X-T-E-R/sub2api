@@ -25,6 +25,7 @@ import (
 type preheaderHandlerUpstream struct {
 	status    int
 	truncated bool
+	empty     bool
 	calls     atomic.Int32
 }
 
@@ -34,6 +35,9 @@ func (s *preheaderHandlerUpstream) Do(req *http.Request, _ string, _ int64, _ in
 	case <-time.After(1100 * time.Millisecond):
 	case <-req.Context().Done():
 		return nil, req.Context().Err()
+	}
+	if s.empty {
+		return handlerThoughtStream(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":0}}}`), nil
 	}
 	if s.truncated {
 		return handlerThoughtStream(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3}}}`), nil
@@ -48,29 +52,46 @@ func (s *preheaderHandlerUpstream) DoWithTLS(req *http.Request, proxy string, id
 }
 
 func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
+	settings := service.NewSettingService(handlerThoughtSettingRepo{}, nil)
+	previous := service.ResolveAntigravityThoughtPolicy(context.Background(), nil)
+	t.Cleanup(func() {
+		require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings(previous)))
+	})
+	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{}))
 	for _, tc := range []struct {
 		name        string
 		status      int
 		truncated   bool
 		geminiGroup bool
+		empty       bool
 	}{
-		{"success", 200, false, false}, {"authentication error", 401, false, false}, {"rate limit", 429, false, false}, {"partial usage then EOF", 200, true, false},
-		{"Gemini Messages partial usage then EOF", 200, true, true},
-		{"Gemini Messages heartbeat only", 429, false, true},
+		{name: "success", status: 200}, {name: "authentication error", status: 401}, {name: "rate limit", status: 429}, {name: "partial usage then EOF", status: 200, truncated: true},
+		{name: "Gemini Messages partial usage then EOF", status: 200, truncated: true, geminiGroup: true},
+		{name: "Gemini Messages heartbeat only", status: 429, geminiGroup: true},
+		{name: "AG clean empty missing terminal", status: 200, empty: true},
+		{name: "Gemini group AG clean empty missing terminal", status: 200, geminiGroup: true, empty: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			groupID := int64(9300)
 			group := &service.Group{ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive}
 			account := handlerThoughtAccount()
-			if tc.geminiGroup {
-				group.Platform, account.Platform, account.Type = service.PlatformGemini, service.PlatformGemini, service.AccountTypeAPIKey
-				account.Credentials = map[string]any{"api_key": "fixture", "model_mapping": map[string]any{"client-alias": "gemini-2.5-flash"}}
-			}
 			account.Extra = map[string]any{}
+			if tc.empty {
+				account.Extra[service.AntigravitySuppressThoughtOnlyStopExtraKey] = true
+			}
+			if tc.geminiGroup {
+				group.Platform = service.PlatformGemini
+				if tc.empty {
+					account.Extra["mixed_scheduling"] = true
+				} else {
+					account.Platform, account.Type = service.PlatformGemini, service.AccountTypeAPIKey
+					account.Credentials = map[string]any{"api_key": "fixture", "model_mapping": map[string]any{"client-alias": "gemini-2.5-flash"}}
+				}
+			}
 			account.Schedulable = true
 			account.AccountGroups = []service.AccountGroup{{AccountID: account.ID, GroupID: groupID}}
 			cfg := &config.Config{RunMode: config.RunModeSimple, Gateway: config.GatewayConfig{MaxLineSize: 1 << 20, StreamKeepaliveInterval: 1, StreamPreheaderKeepaliveEnabled: true}}
-			upstream := &preheaderHandlerUpstream{status: tc.status, truncated: tc.truncated}
+			upstream := &preheaderHandlerUpstream{status: tc.status, truncated: tc.truncated, empty: tc.empty}
 			antigravity := service.NewAntigravityGatewayService(nil, nil, nil,
 				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream,
 				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil)
@@ -106,8 +127,16 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			if tc.status == 200 {
 				require.Len(t, usage.created, 1)
 				require.Equal(t, 8, usage.created[0].InputTokens)
-				require.Equal(t, 3, usage.created[0].OutputTokens)
 				require.Equal(t, account.ID, usage.created[0].AccountID)
+				if tc.empty {
+					require.Zero(t, usage.created[0].OutputTokens)
+					require.Equal(t, 1, strings.Count(recorder.Body.String(), "event: error\n"))
+					require.Equal(t, 1, strings.Count(recorder.Body.String(), "antigravity_missing_terminal"))
+					require.NotContains(t, recorder.Body.String(), "gateway_stream_terminal_error")
+					require.NotContains(t, recorder.Body.String(), "event: message_stop")
+					return
+				}
+				require.Equal(t, 3, usage.created[0].OutputTokens)
 				if tc.truncated {
 					require.True(t, service.StreamPreheaderFinalized(c))
 					require.Equal(t, 1, strings.Count(recorder.Body.String(), "gateway_stream_terminal_error"))

@@ -462,7 +462,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			if !open {
 				cont := session.continuation
-				if antigravityPreheaderIncomplete(terminalGeneration, cont) && !writer.Disconnected() {
+				if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !writer.Disconnected() {
 					writeAntigravityCompatStreamError(c, adapter, writer, "Upstream stream ended before a terminal event")
 					return session.collectResult(false), errStreamPreheaderTerminal
 				}
