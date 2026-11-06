@@ -357,7 +357,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 		telemetryAttempt := beginCodexHTTPAttempt(c, account)
 		upstreamStart := time.Now()
-		resp, err, terminal := s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
+		var terminal bool
+		resp, err, terminal = s.doOpenAIStreamUpstream(c, upstreamReq, proxyURL, account)
 		if resp != nil {
 			telemetryAttempt.headers(resp.Header, codextelemetry.HTTPHeaders, resp.StatusCode)
 		}
