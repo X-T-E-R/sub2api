@@ -1,0 +1,69 @@
+{
+  "state": "carrier_prepared_image_blocked_local_docker_engine",
+  "release": {
+    "name": "sub2-argon502-20261107",
+    "root": "/opt/sub2api-argon502-20261107",
+    "unit_prefix": "sub2-argon502-",
+    "candidate_run_label": "sub2.argon502.run",
+    "shared_single_active_lock": "/run/lock/sub2-gcp-app-switch.lock",
+    "old_recovery_root_preserved": "/opt/sub2api-stream-preheader-20261106",
+    "base_revision": "f18388a440ddce04c5da0d0917ba2e4db04a5b0e",
+    "old_image_runtime_id": "sha256:06ee81a40b6a67759d9d286a302b1ac25adf236f8bcbe623b2e33d34c20384f4",
+    "old_container_id": "b7df1c4ed5b02e8b6a8d3f1999d7d2eb368f76b3bb965f14aa6eb89d8d2de7f7",
+    "old_started_at": "2026-11-06T17:43:56.662935341Z",
+    "old_runtime_fresh_recheck": "parent_before_prepare"
+  },
+  "candidate": {
+    "source_revision": "7c12de7380be0142e18bcdc6397b6537f2af9968",
+    "parent_revision": "b0e0fb9e671c0180d8e39c9ac5dffebdbc943bd9",
+    "build_context": "git archive 7c12de7380be0142e18bcdc6397b6537f2af9968",
+    "tag": "sub2api-argon502:7c12de738",
+    "platform": "linux/amd64",
+    "image_runtime_id": null,
+    "archive": null,
+    "bytes": null,
+    "transfer_sha256": null,
+    "build_save_load_create": "not_run_engine_preflight_timed_out",
+    "continuation": "local build_candidate.py then inspect candidate.json and bind release.py IMAGE plus this receipt"
+  },
+  "candidate_env": {
+    "operation": "preserve_original_env_exactly_in_order",
+    "required_existing_entry": "GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED=true",
+    "required_count": 1,
+    "append": false,
+    "rollback": "restore_original_old_snapshot_env_exactly"
+  },
+  "runtime_policy": {
+    "expected": {"A": true, "B": false, "C": false},
+    "readback": "parent_original_admin_api_and_runtime_snapshot_before_and_after_switch",
+    "carrier_mutates_policy_or_accounts": false,
+    "account73_current_schedulable": true
+  },
+  "activation": {
+    "kiki_wire_and_managed_plugin_candidate": "e19fd64e9",
+    "kiki_evidence": "parent accepted: original1 + continuation1, step_retry0, repeated_failure_stops_at2, tool_once",
+    "kiki_formal_build": "b3",
+    "real_client_switch": "parent_before_carrier_consumption",
+    "backup_admission_owner": "parent_and_244",
+    "backup_admission_identity": {"source_revision": "7c12de7380be0142e18bcdc6397b6537f2af9968", "image_runtime_id": null},
+    "backup_app_binding": ["id", "name", "started_at"],
+    "remote_stage_prepare_launch": "not_run_parent_owns_formal_release"
+  },
+  "checks": {
+    "docker_context": "desktop-linux",
+    "engine_preflight_task": "bash-jymxmgt7",
+    "engine_preflight": "docker --context desktop-linux info --format {{json .}} timed out after 15 seconds; exit2; no build/save/load/create invoked",
+    "engine_restart": "not_attempted",
+    "carrier_difference_command": "python -B -m unittest -v test_release",
+    "carrier_difference_result": "passed: 11 tests, 0.024s, exit0; local Windows Python; no Linux lifecycle rerun",
+    "lifecycle_evidence_reuse": ".agent/release/stream-preheader-20261106/receipt.json: Linux unit suite 16 passed, Docker lifecycle fixture 3 cases / 9 TCP samples passed; native bridge fixture passed; original carrier unchanged",
+    "lifecycle_reuse_check": "current unchanged lifecycle/recovery functions AST equal; ingress_gate.py byte-identical",
+    "product_frozen_source_evidence": ".agent/summary/argon-502-20261107/REPORT.md and evidence.json",
+    "remote_or_provider_execution": "not_run"
+  },
+  "remaining_dependency": {
+    "object": "local desktop-linux Linux engine API readiness",
+    "owner": "local Docker engine owner",
+    "next_action": "restore engine response without this carrier restarting it; Sub2 owner runs one frozen build, save/load/create probe, binds actual image pair and hands archive/bytes/transfer SHA-256 to parent and244"
+  }
+}
