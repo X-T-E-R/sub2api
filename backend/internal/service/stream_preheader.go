@@ -337,7 +337,7 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 	}
 	var body []byte
 	if resp.Body != nil {
-		body, err = readStreamPreheaderErrorBody(c, resp.Body, protocol, interval)
+		body, err = readStreamPreheaderErrorBody(c, resp.Body, protocol, interval, gatewayUpstreamErrorBodyReadLimit)
 		_ = resp.Body.Close()
 		if err != nil {
 			c.Set(streamPreheaderFinalizedKey, true)
@@ -372,10 +372,11 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 // A late rejection can flush its HTTP headers long before its JSON body. Keep
 // the same downstream writer alive while collecting the bounded error detail;
 // unlike a successful stream, cancellation must also stop this error-body read.
-func readStreamPreheaderErrorBody(c *gin.Context, body io.Reader, protocol streamPreheaderProtocol, interval time.Duration) ([]byte, error) {
+// The caller closes the body when this returns, including on cancellation.
+func readStreamPreheaderErrorBody(c *gin.Context, body io.Reader, protocol streamPreheaderProtocol, interval time.Duration, limit int64) ([]byte, error) {
 	results := make(chan []byte, 1)
 	go func() {
-		data, _ := io.ReadAll(io.LimitReader(body, gatewayUpstreamErrorBodyReadLimit))
+		data, _ := io.ReadAll(io.LimitReader(body, limit))
 		results <- data
 	}()
 	timer := time.NewTimer(interval)

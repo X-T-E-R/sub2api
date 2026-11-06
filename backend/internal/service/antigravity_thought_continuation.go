@@ -670,9 +670,11 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 		return c.service.httpUpstream.Do(request, c.proxyURL, c.account.ID, c.account.Concurrency)
 	}
 	var resp *http.Response
-	if stream != nil && StreamPreheaderConfigured(stream) {
+	var policy streamPreheaderPolicy
+	preheader := stream != nil && StreamPreheaderConfigured(stream)
+	if preheader {
 		value, _ := stream.Get(streamPreheaderPolicyKey)
-		policy := value.(streamPreheaderPolicy)
+		policy = value.(streamPreheaderPolicy)
 		// The legal append owns a fresh head wait, but its original failure and
 		// usage handling stay here, rather than entering the normal retry path.
 		resp, err, _ = waitForStreamHeaders(stream, req, policy.protocol, policy.interval, send)
@@ -690,11 +692,20 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 		// gateway's normal same-account error bookkeeping (rate limit / account error
 		// policy) without re-entering the retry loop, the scheduler, sticky identity or an
 		// account switch; the failure surfaces as a protocol error, never as success.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, c.service.upstreamErrorBodyReadLimit()))
+		limit := c.service.upstreamErrorBodyReadLimit()
+		var errorBody []byte
+		if preheader && stream.Writer.Written() {
+			errorBody, err = readStreamPreheaderErrorBody(stream, resp.Body, policy.protocol, policy.interval, limit)
+		} else {
+			errorBody, _ = io.ReadAll(io.LimitReader(resp.Body, limit))
+		}
 		_ = resp.Body.Close()
-		c.service.handleUpstreamError(ctx, c.prefix, c.account, resp.StatusCode, resp.Header, body,
+		if err != nil {
+			return nil, finished, err
+		}
+		c.service.handleUpstreamError(ctx, c.prefix, c.account, resp.StatusCode, resp.Header, errorBody,
 			c.requestedModel, 0, "", false)
-		return nil, finished, newAntigravityThoughtContinuationStatusError(resp.StatusCode, resp.Header, body)
+		return nil, finished, newAntigravityThoughtContinuationStatusError(resp.StatusCode, resp.Header, errorBody)
 	}
 	c.extraObserved = true
 	return resp, finished, nil

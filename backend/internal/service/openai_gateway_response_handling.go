@@ -252,7 +252,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	capacityFailoverSuppressedLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
-	codexFailureTerminal := account != nil && account.IsOpenAIOAuthLike()
+	legacyCodexErrorDrain := account != nil && account.IsOpenAIOAuthLike()
+	// Native OpenAI API keys can also send a bare error followed by the billed
+	// response.failed. Adopt the paired-event drain only after opt-in commitment.
+	preheaderAPIKeyErrorDrain := account != nil && account.Platform == PlatformOpenAI &&
+		account.Type == AccountTypeAPIKey && StreamPreheaderConfigured(c)
+	drainErrorTerminal := func() bool {
+		return legacyCodexErrorDrain || (preheaderAPIKeyErrorDrain && c.Writer.Written())
+	}
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamEarlyErr error
 	terminalFailurePending := false
@@ -375,15 +382,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// EOF dispatches the final SSE event even without a trailing blank line.
 			completeGuardedEvent(true)
 		}
-		if codexFailureTerminal && sawBareError && !sawResponseFailed && bareErrorAccountSideEffectsPending {
+		if drainErrorTerminal() && sawBareError && !sawResponseFailed && bareErrorAccountSideEffectsPending {
 			s.handleOpenAIStreamTerminalAccountSideEffects(c, account, bareErrorPayload, failedMessage, resp.Header, mappedModel)
 			bareErrorAccountSideEffectsPending = false
 		}
-		if codexFailureTerminal && sawBareError && !sawResponseFailed && StreamPreheaderConfigured(c) && c.Writer.Written() {
+		if drainErrorTerminal() && sawBareError && !sawResponseFailed && StreamPreheaderConfigured(c) && c.Writer.Written() {
 			flushPending("Client disconnected before the terminal failure frame")
 			return resultWithUsage(), finishStreamPreheaderSSEError(c, bareErrorPayload, resp.Header, streamPreheaderResponseMeta{id: responseID, model: originalModel})
 		}
-		if codexFailureTerminal && sawBareError && !sawResponseFailed && !clientDisconnected {
+		if drainErrorTerminal() && sawBareError && !sawResponseFailed && !clientDisconnected {
 			applyAttemptResponseHeaders()
 			if _, err := writePendingString(buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
 				handlePendingWriteError(err)
@@ -486,7 +493,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
 			suppressCurrentEvent = (StreamPreheaderConfigured(c) && c.Writer.Written() && (eventType == "error" || eventType == "response.failed")) ||
-				(codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed")))
+				(drainErrorTerminal() && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed")))
 		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
@@ -495,7 +502,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if StreamPreheaderConfigured(c) && eventType == "" && gjson.GetBytes(dataBytes, "error").IsObject() {
 				eventType = "error"
 			}
-			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
+			if drainErrorTerminal() && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
 				// A later successful terminal is authoritative over a pending bare
 				// error. Keep its usage and terminal visible to the client.
@@ -507,7 +514,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				bareErrorAccountSideEffectsPending = false
 				failedMessage = ""
 			}
-			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
+			if drainErrorTerminal() && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
@@ -536,11 +543,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				if terminateCommitted {
 					dataBytes = s.redactAgentIdentitySensitiveBody(ctx, account, dataBytes)
 				}
-				if codexFailureTerminal && eventType == "error" {
+				if drainErrorTerminal() && eventType == "error" {
 					sawBareError = true
 					bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)
 					suppressCurrentEvent = true
-				} else if codexFailureTerminal && eventType == "response.failed" {
+				} else if drainErrorTerminal() && eventType == "response.failed" {
 					sawResponseFailed = true
 				}
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
@@ -562,7 +569,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						UpstreamOutTok: usage.OutputTokens,
 					})
 				}
-				if terminateCommitted && !(codexFailureTerminal && eventType == "error") {
+				if terminateCommitted && !(drainErrorTerminal() && eventType == "error") {
 					if !cyberHit {
 						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
 					}
@@ -579,7 +586,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 				}
 				if outputStarted && !cyberHit {
-					if codexFailureTerminal && eventType == "error" {
+					if drainErrorTerminal() && eventType == "error" {
 						// OpenAI commonly follows a bare error with response.failed.
 						// Defer account health updates so the pair is applied once.
 						bareErrorAccountSideEffectsPending = true
@@ -624,7 +631,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				}
 				forceFlushFailedEvent = true
 				sawFailedEvent = true
-				terminalFailurePending = !codexFailureTerminal || eventType == "response.failed"
+				terminalFailurePending = !drainErrorTerminal() || eventType == "response.failed"
 			}
 			if normalizedData, normalized := normalizeCompletedImageGenerationStatus(dataBytes); normalized {
 				dataBytes = normalizedData
@@ -912,7 +919,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
-			if codexFailureTerminal && sawBareError && !sawResponseFailed {
+			if drainErrorTerminal() && sawBareError && !sawResponseFailed {
 				_ = resp.Body.Close()
 				return finalizeStream()
 			}
@@ -942,7 +949,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				stopFirstOutputTimer()
 				continue
 			}
-			if codexFailureTerminal && sawBareError && !sawResponseFailed && len(events) == 0 {
+			if drainErrorTerminal() && sawBareError && !sawResponseFailed && len(events) == 0 {
 				_ = resp.Body.Close()
 				return finalizeStream()
 			}
