@@ -22,7 +22,7 @@ BASE = 'f18388a440ddce04c5da0d0917ba2e4db04a5b0e'
 OLD_IMAGE = 'sha256:06ee81a40b6a67759d9d286a302b1ac25adf236f8bcbe623b2e33d34c20384f4'
 OLD_CONTAINER = 'b7df1c4ed5b02e8b6a8d3f1999d7d2eb368f76b3bb965f14aa6eb89d8d2de7f7'
 OLD_STARTED_AT = '2026-11-06T17:43:56.662935341Z'
-IMAGE = '<UNBOUND_IMAGE_RUNTIME_ID>'
+IMAGE = 'sha256:a09c7ecad5c7c722dddd3c925c0f8510a2cbafe57666f2a1f9875c2b47439f58'
 PREHEADER_ENV = 'GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED=true'
 RUN_LABEL = 'sub2.argon502.run'
 APP = 'sub2api-gcp'
@@ -350,6 +350,9 @@ def payload(old, image, image_config, run):
     if result['Hostname'] == old['Id'][:12]:
         result['Hostname'] = ''
     labels = result.setdefault('Labels', {})
+    # Keep older recovery selectors on their retained containers only.
+    for previous_run_label in ('sub2.stream_preheader.run', 'argon.keepalive.run'):
+        labels.pop(previous_run_label, None)
     labels.update({key: value for key, value in image_config.get('Labels', {}).items() if key.startswith('org.opencontainers.image.')})
     labels.update({'org.opencontainers.image.revision': SOURCE, RUN_LABEL: run})
     if 'com.docker.compose.image' in labels:

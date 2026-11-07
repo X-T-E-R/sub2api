@@ -2,22 +2,14 @@
 
 本目录提供独立发布载体。产品源码固定为 `7c12de7380be0142e18bcdc6397b6537f2af9968`，直接父提交为 `b0e0fb9e671c0180d8e39c9ac5dffebdbc943bd9`，包含原两项窄修；不从带 Task88 五路径的 `78acffc48` 构建。
 
-当前本机 `desktop-linux` 的 `docker info` 超时，尚未构建镜像。`release.py:IMAGE` 保持未绑定；此时 `prepare` 会拒绝。唯一构建依赖是本机 Docker Linux engine 恢复响应，由其 owner 处理，不自动重启。客户端原 wire＋托管插件联测已接受 `e19fd64e9`，正式 Kiki build／实际切换由 b3 和父持有。
+## 归档与备份准入
 
-## 本地完成候选
+使用 [receipt.json](receipt.json) 绑定的本地 `linux/amd64` 归档 `sub2api-argon502-7c12de738-linux-amd64.tar.gz`，**44,404,242 bytes**。`build_candidate.py` 以精确 Git archive 和四个固定 base images 构建，已在本机实际完成 `save → gzip → load`，由从未启动的容器核对以下 pair：
 
-在本机 engine 恢复后，由 Sub2 候选 owner 执行一次：
+- OCI revision：`7c12de7380be0142e18bcdc6397b6537f2af9968`
+- `.Image`：`sha256:a09c7ecad5c7c722dddd3c925c0f8510a2cbafe57666f2a1f9875c2b47439f58`
 
-```sh
-python -B .agent/release/argon502-20261107/build_candidate.py
-```
-
-该命令以 `git archive 7c12de7380be0142e18bcdc6397b6537f2af9968` 为完整构建上下文，沿 f183 相同四个已固定 base image，单平台 `linux/amd64`、关闭 provenance/SBOM。成功后实际执行 `docker save → gzip → docker load`，创建但不启动临时容器，核对 `.Image`、OCI revision 和 created 状态后移除该容器。产物在 `.tmp/argon502-release-20261107/`：
-
-- `sub2api-argon502-7c12de738-linux-amd64.tar.gz`：供父传输。
-- `candidate.json`：实际 runtime image ID、源码、平台、字节数、传输 SHA-256 和 save/load/create 回执。
-
-候选 owner 读回结果，将实际 `.Image` 绑定到本目录 `release.py:IMAGE` 及 `receipt.json` 后提交，交父和 244。244 只为这一组 **实际 runtime image ID＋完整 source revision** 增加备份准入；压缩包 SHA-256 只用于传输，不能代替运行身份。新容器 ID 和 StartedAt 在切换后产生，由载体按实际 `source.app.{id,name,started_at}` 三字段提交并 source-check。未得到本地 pair 前，不进行备份准入或远端 stage。
+244 只为这一组 **实际 runtime image ID＋完整 source revision** 增加备份准入。压缩包 SHA-256 `4b77e74788365e615df32676a62b4260007056e3a70044b74358027bcac0c3ea` 用于传输。父在目标机一次 load 后，以未启动容器复核同一 pair；若不一致，停止 prepare，先统一载体与双端备份准入。实际 app ID 和 StartedAt 在切换后产生，由载体按 `source.app.{id,name,started_at}` 三字段提交并 source-check。
 
 ## 父切换前核对
 
@@ -32,7 +24,7 @@ python -B .agent/release/argon502-20261107/build_candidate.py
 
 候选 `Env` 与旧 app 的原始 `Env` **逐项同序相等**，不追加、不重排。旧环境必须已有且仅有一次 `GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED=true`；缺失、false 或重复时拒绝，不帮现场改配置。回退仍使用保存的原 `Env`。现库 A=true/B=false/C=false，由父切前及切后经原管理 API 和运行快照读回；载体不写这些设置。账号 73 当前可调度，载体不改账号调度、OAuth、Key、路由或任何数据。
 
-原目录 `/opt/sub2api-stream-preheader-20261106`、已完成旧 run 及其恢复入口保留。新目录固定 `/opt/sub2api-argon502-20261107`，新 unit 前缀 `sub2-argon502-`，新 candidate label 为 `sub2.argon502.run`；仍共用原单活锁，不能并行切换。
+原目录 `/opt/sub2api-stream-preheader-20261106`、已完成旧 run 及其恢复入口保留。新目录固定 `/opt/sub2api-argon502-20261107`，新 unit 前缀 `sub2-argon502-`，新 candidate label 为 `sub2.argon502.run`。旧发布的 `sub2.stream_preheader.run`、`argon.keepalive.run` 不复制到新容器；旧容器原标签及新容器的 `task46.run` 和其它运行标签保持，避免旧恢复查询匹配新容器。两代共用原单活锁，不能并行切换。
 
 ## 获准后的 prepare 与 launch
 

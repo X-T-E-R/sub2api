@@ -1,16 +1,31 @@
 {
-  "state": "carrier_prepared_image_blocked_local_docker_engine",
+  "state": "carrier_bound_local_archive_verified",
   "release": {
     "name": "sub2-argon502-20261107",
     "root": "/opt/sub2api-argon502-20261107",
     "unit_prefix": "sub2-argon502-",
     "candidate_run_label": "sub2.argon502.run",
+    "retained_only_run_labels": ["sub2.stream_preheader.run", "argon.keepalive.run"],
     "shared_single_active_lock": "/run/lock/sub2-gcp-app-switch.lock",
     "old_recovery_root_preserved": "/opt/sub2api-stream-preheader-20261106",
     "base_revision": "f18388a440ddce04c5da0d0917ba2e4db04a5b0e",
     "old_image_runtime_id": "sha256:06ee81a40b6a67759d9d286a302b1ac25adf236f8bcbe623b2e33d34c20384f4",
     "old_container_id": "b7df1c4ed5b02e8b6a8d3f1999d7d2eb368f76b3bb965f14aa6eb89d8d2de7f7",
     "old_started_at": "2026-11-06T17:43:56.662935341Z",
+    "old_runtime_observation": {
+      "observed_at": "2026-11-07T00:15:23Z",
+      "owner": "parent_read_only",
+      "binding_matches": true,
+      "healthy": true,
+      "backup_timer_waiting_for": "18:30Z",
+      "backup_service": "inactive",
+      "free_bytes": 13554655232,
+      "retained_release_labels": {
+        "argon.keepalive.run": "run-20261105T211000Z",
+        "sub2.stream_preheader.run": "run-20261106T174243Z"
+      },
+      "migration_label": "task46.run=final-20261105-window1"
+    },
     "old_runtime_fresh_recheck": "parent_before_prepare"
   },
   "candidate": {
@@ -19,12 +34,23 @@
     "build_context": "git archive 7c12de7380be0142e18bcdc6397b6537f2af9968",
     "tag": "sub2api-argon502:7c12de738",
     "platform": "linux/amd64",
-    "image_runtime_id": null,
-    "archive": null,
-    "bytes": null,
-    "transfer_sha256": null,
-    "build_save_load_create": "not_run_engine_preflight_timed_out",
-    "continuation": "local build_candidate.py then inspect candidate.json and bind release.py IMAGE plus this receipt"
+    "image_runtime_id": "sha256:a09c7ecad5c7c722dddd3c925c0f8510a2cbafe57666f2a1f9875c2b47439f58",
+    "archive": "E:/kiki-wt/sub2-stream-preheader-20261106/.tmp/argon502-release-20261107/sub2api-argon502-7c12de738-linux-amd64.tar.gz",
+    "bytes": 44404242,
+    "transfer_sha256": "4b77e74788365e615df32676a62b4260007056e3a70044b74358027bcac0c3ea",
+    "version": "0.1.183",
+    "built_at": "2026-11-07T00:11:16Z",
+    "build_task": "bash-26maixkb",
+    "build_save_load_create": {
+      "result": "passed",
+      "container_id": "815fea588bb3df0e3ebe6be57b0b3a923a0078823c11481ac17c658f22a61cde",
+      "status": "created",
+      "running": false,
+      "image_runtime_id": "sha256:a09c7ecad5c7c722dddd3c925c0f8510a2cbafe57666f2a1f9875c2b47439f58",
+      "oci_revision": "7c12de7380be0142e18bcdc6397b6537f2af9968",
+      "probe_removed": true
+    },
+    "engine": {"context": "desktop-linux", "version": "29.8.1", "os": "linux", "architecture": "x86_64"}
   },
   "candidate_env": {
     "operation": "preserve_original_env_exactly_in_order",
@@ -45,25 +71,22 @@
     "kiki_formal_build": "b3",
     "real_client_switch": "parent_before_carrier_consumption",
     "backup_admission_owner": "parent_and_244",
-    "backup_admission_identity": {"source_revision": "7c12de7380be0142e18bcdc6397b6537f2af9968", "image_runtime_id": null},
+    "backup_admission_identity": {
+      "source_revision": "7c12de7380be0142e18bcdc6397b6537f2af9968",
+      "image_runtime_id": "sha256:a09c7ecad5c7c722dddd3c925c0f8510a2cbafe57666f2a1f9875c2b47439f58"
+    },
     "backup_app_binding": ["id", "name", "started_at"],
-    "remote_stage_prepare_launch": "not_run_parent_owns_formal_release"
+    "remote_stage_prepare_launch": "not_run_parent_owns_formal_release",
+    "target_load_probe": "parent must match archive transfer hash and actual never-started container image/revision before prepare"
   },
   "checks": {
-    "docker_context": "desktop-linux",
-    "engine_preflight_task": "bash-jymxmgt7",
-    "engine_preflight": "docker --context desktop-linux info --format {{json .}} timed out after 15 seconds; exit2; no build/save/load/create invoked",
-    "engine_restart": "not_attempted",
+    "engine_previous_blocker": "bash-jymxmgt7 engine preflight timeout; parent restored desktop-linux, verified bash-06qqc3vh",
     "carrier_difference_command": "python -B -m unittest -v test_release",
-    "carrier_difference_result": "passed: 11 tests, 0.024s, exit0; local Windows Python; no Linux lifecycle rerun",
+    "carrier_difference_result": "passed: 11 tests, 0.047s, exit0; cached python:3.11-slim-trixie Linux container, network none, read-only sources",
+    "old_release_label_regression": "reproduced before fix: new clone inherited previous release ownership labels; focused Linux test re-passed with exact observed old values and complete new labels, preserved Env, runtime and old container",
     "lifecycle_evidence_reuse": ".agent/release/stream-preheader-20261106/receipt.json: Linux unit suite 16 passed, Docker lifecycle fixture 3 cases / 9 TCP samples passed; native bridge fixture passed; original carrier unchanged",
     "lifecycle_reuse_check": "current unchanged lifecycle/recovery functions AST equal; ingress_gate.py byte-identical",
     "product_frozen_source_evidence": ".agent/summary/argon-502-20261107/REPORT.md and evidence.json",
     "remote_or_provider_execution": "not_run"
-  },
-  "remaining_dependency": {
-    "object": "local desktop-linux Linux engine API readiness",
-    "owner": "local Docker engine owner",
-    "next_action": "restore engine response without this carrier restarting it; Sub2 owner runs one frozen build, save/load/create probe, binds actual image pair and hands archive/bytes/transfer SHA-256 to parent and244"
   }
 }

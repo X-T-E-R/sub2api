@@ -60,17 +60,22 @@ class ReleaseDifference(unittest.TestCase):
                 r.candidate_env({'Env': env})
         self.assertEqual(host.apps[OLD]['Config'], original)
 
-    def test_payload_preserves_env_runtime_and_only_updates_image_labels(self):
+    def test_payload_preserves_env_runtime_without_claiming_previous_runs(self):
         host = Fake()
         old = host.inspect(OLD)
+        previous_runs = {'sub2.stream_preheader.run': 'run-20261106T174243Z',
+                         'argon.keepalive.run': 'run-20261105T211000Z'}
+        old['Config']['Labels'].update(previous_runs | {'fixture.unrelated': 'preserved'})
         before = copy.deepcopy(old)
         spec = r.payload(old, NEW, {'Labels': {'org.opencontainers.image.revision': r.SOURCE}}, 'run-20261107T010203Z')
         self.assertEqual(spec['Env'], before['Config']['Env'])
         self.assertEqual(spec['Env'].count(r.PREHEADER_ENV), 1)
         self.assertEqual(spec['HostConfig'], before['HostConfig'])
-        self.assertEqual(spec['Labels']['org.opencontainers.image.revision'], r.SOURCE)
-        self.assertEqual(spec['Labels'][r.RUN_LABEL], 'run-20261107T010203Z')
-        self.assertEqual(spec['Labels']['task46.run'], 'final-20261105-window1')
+        self.assertEqual(spec['Labels'], {
+            'task46.run': 'final-20261105-window1', 'fixture.unrelated': 'preserved',
+            'com.docker.compose.image': NEW, 'org.opencontainers.image.revision': r.SOURCE,
+            r.RUN_LABEL: 'run-20261107T010203Z',
+        })
         self.assertEqual(spec['Image'], NEW)
         self.assertEqual(old, before)
 
@@ -162,7 +167,7 @@ class ReleaseDifference(unittest.TestCase):
         previous = functions(PRIOR / 'release.py')
         current = functions(Path(r.__file__))
         self.assertEqual(set(previous), set(current))
-        for name in previous.keys() - {'original_env', 'candidate_env', 'prepare', 'service_command'}:
+        for name in previous.keys() - {'original_env', 'candidate_env', 'prepare', 'service_command', 'payload'}:
             with self.subTest(function=name):
                 self.assertEqual(current[name], previous[name])
 
