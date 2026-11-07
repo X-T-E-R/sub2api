@@ -12,19 +12,44 @@ import (
 
 // CleanJSONSchema 清理 JSON Schema，移除 Antigravity/Gemini 不支持的字段。
 // 参考 Antigravity-Manager/src-tauri/src/proxy/common/json_schema.rs
-// 并吸收 Magpie (github.com/yetone/magpie, MIT License) internal/gateway/codeassist.go
+// 并吸收 Magpie (github.com/yetone/magpie) internal/gateway/codeassist.go
 // plainSchema / foldUnion 实现：
-//   - 支持 JSON Pointer $ref（#/properties/...、~0/~1）与按完整路径段的自引用环收敛
+//   - 支持 JSON Pointer $ref（#/properties/...、#/$defs/Foo/properties/x、~0/~1）与按完整路径段的自引用环收敛
 //   - 支持 boolean schema（true -> {}，false -> 过滤属性/空数组）
+//   - 支持嵌套 allOf、allOf 内 $ref 分支及 required-only 分支，同时保持 required 顺序稳定
 //   - 节点自身具形状（ownShape）时折叠 anyOf/oneOf 属性与公共 required，保留根/节点形态
 //   - 任意深度 type=="array" 缺失 items 时补齐（含 prefixItems 同构提取），清理非对应类型的越界属性
 //   - 过滤空白 enum 值并将非空 string const 转为 enum
+//
+// Magpie Attribution & License:
+//
+//	MIT License
+//	Copyright (c) 2026 yetone
+//	Permission is hereby granted, free of charge, to any person obtaining a copy
+//	of this software and associated documentation files (the "Software"), to deal
+//	in the Software without restriction, including without limitation the rights
+//	to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//	copies of the Software, and to permit persons to whom the Software is
+//	furnished to do so, subject to the following conditions:
+//	The above copyright notice and this permission notice shall be included in all
+//	copies or substantial portions of the Software.
+//	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//	SOFTWARE.
 func CleanJSONSchema(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
+	// Keep an intact read-only copy of root (including $defs and definitions)
+	// until recursive expansion finishes, so JSON Pointers into definitions
+	// such as "#/$defs/Foo/properties/x" or "#/definitions/a~1b/properties/c~0d"
+	// resolve their full path instead of falling back to the last segment name.
 	root := deepCopy(schema).(map[string]any)
-	defs := extractDefs(root)
+	defs := collectDefs(root)
 
 	// localRef 解析 root 内的本地 $ref：支持 JSON Pointer ("#", "#/properties/...")
 	// 以及 $defs / definitions 名称回退。
@@ -268,20 +293,16 @@ func requiredStringNames(v any) []string {
 	}
 }
 
-// extractDefs 提取并移除定义的 helper
-func extractDefs(schema map[string]any) map[string]any {
+// collectDefs 仅收集 root 中的 $defs 与 definitions 供末段名回退使用，
+// 不修改 root，确保指向 #/$defs/... 或 #/definitions/... 内部的 JSON Pointer 可完整寻址。
+func collectDefs(root map[string]any) map[string]any {
 	defs := make(map[string]any)
-	if d, ok := schema["$defs"].(map[string]any); ok {
-		for k, v := range d {
-			defs[k] = v
+	for _, k := range []string{"$defs", "definitions"} {
+		if d, ok := root[k].(map[string]any); ok {
+			for n, v := range d {
+				defs[n] = v
+			}
 		}
-		delete(schema, "$defs")
-	}
-	if d, ok := schema["definitions"].(map[string]any); ok {
-		for k, v := range d {
-			defs[k] = v
-		}
-		delete(schema, "definitions")
 	}
 	return defs
 }
@@ -370,8 +391,11 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 		}
 	}
 
-	// 1. 合并 allOf（在 walk 子节点前读取分支 required，兼容仅含 required 的子项）
-	mergeAllOfWithResolve(schemaMap, c.resolve)
+	// 1. 合并 allOf（逐分支递归展开并保留 required-only 子项与稳定 required 顺序）
+	if _, hasAllOf := schemaMap["allOf"].([]any); hasAllOf {
+		c.mergeAllOf(schemaMap, depth, path)
+		return c.cleanMap(schemaMap, depth+1, path)
+	}
 
 	// 2. 处理 anyOf / oneOf
 	if (schemaMap["anyOf"] != nil || schemaMap["oneOf"] != nil) && ownShape(schemaMap) {
@@ -741,8 +765,54 @@ func migrateConstraints(m map[string]any) {
 	}
 }
 
-// mergeAllOfWithResolve 合并 allOf（支持本地 $ref 子分支）
-func mergeAllOfWithResolve(m map[string]any, resolve func(any) map[string]any) {
+// collectAllOfRequired 递归收集 allOf 分支（含 $ref 与嵌套 allOf）声明的 required 字段，
+// 确保仅含 required 而无 properties 的分支在独立 walk 过滤前不会丢失 required 声明。
+func (c *schemaCleanContext) collectAllOfRequired(node any, depth int, seen map[string]bool) {
+	if depth > 32 {
+		return
+	}
+	m := c.resolve(node)
+	if m == nil {
+		return
+	}
+	for _, r := range requiredStringNames(m["required"]) {
+		seen[r] = true
+	}
+	if nested, ok := m["allOf"].([]any); ok {
+		for _, sub := range nested {
+			c.collectAllOfRequired(sub, depth+1, seen)
+		}
+	}
+}
+
+// branchHasDeclaredProperties 判断 allOf 分支（含 $ref 与嵌套 allOf/anyOf/oneOf）是否真正声明过 properties，
+// 避免仅含 required 或 not 的空分支在独立 walk 时因空对象兜底生成的合成 "reason" 属性污染外层对象。
+func (c *schemaCleanContext) branchHasDeclaredProperties(node any, depth int) bool {
+	if depth > 32 {
+		return false
+	}
+	m := c.resolve(node)
+	if m == nil {
+		return false
+	}
+	if props, ok := m["properties"].(map[string]any); ok && len(props) > 0 {
+		return true
+	}
+	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
+		if list, ok := m[key].([]any); ok {
+			for _, sub := range list {
+				if c.branchHasDeclaredProperties(sub, depth+1) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// mergeAllOf 逐分支 walk 并合并 allOf（支持嵌套 allOf、本地 $ref 子分支与 required-only 分支，
+// 同时按字典序稳定追加新增 required 以保证缓存前缀确定性）。
+func (c *schemaCleanContext) mergeAllOf(m map[string]any, depth int, path string) {
 	allOf, ok := m["allOf"].([]any)
 	if !ok {
 		return
@@ -754,28 +824,27 @@ func mergeAllOfWithResolve(m map[string]any, resolve func(any) map[string]any) {
 	otherFields := make(map[string]any)
 
 	for _, sub := range allOf {
-		subMap := resolve(sub)
-		if subMap != nil {
-			// Props
-			if props, ok := subMap["properties"].(map[string]any); ok {
+		c.collectAllOfRequired(sub, depth+1, mergedReq)
+		subMap, ok := sub.(map[string]any)
+		if !ok {
+			continue
+		}
+		hasRealProps := c.branchHasDeclaredProperties(sub, depth+1)
+		walked := c.cleanMap(deepCopy(subMap).(map[string]any), depth+1, path+"/allOf")
+		if hasRealProps {
+			for _, r := range requiredStringNames(walked["required"]) {
+				mergedReq[r] = true
+			}
+			if props, ok := walked["properties"].(map[string]any); ok {
 				for k, v := range props {
 					mergedProps[k] = v
 				}
 			}
-			// Required
-			if reqs, ok := subMap["required"].([]any); ok {
-				for _, r := range reqs {
-					if s, ok := r.(string); ok {
-						mergedReq[s] = true
-					}
-				}
-			}
-			// Others
-			for k, v := range subMap {
-				if k != "properties" && k != "required" && k != "allOf" {
-					if _, exists := otherFields[k]; !exists {
-						otherFields[k] = v
-					}
+		}
+		for k, v := range walked {
+			if k != "properties" && k != "required" && k != "allOf" {
+				if _, exists := otherFields[k]; !exists {
+					otherFields[k] = v
 				}
 			}
 		}

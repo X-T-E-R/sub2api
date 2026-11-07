@@ -212,3 +212,101 @@ func TestCollectAndStreamStripDefaultAPIToolNamespace(t *testing.T) {
 	require.Equal(t, "edit", blocks[1]["name"])
 	require.True(t, strings.HasPrefix(blocks[1]["id"].(string), "edit-"))
 }
+
+func TestCleanJSONSchema_ResolvesPointerIntoDefsAndEscapedDefinitions(t *testing.T) {
+	cleaned := cleanRawJSONSchema(t, `{
+		"type": "object",
+		"$defs": {
+			"Foo": {
+				"type": "object",
+				"properties": {
+					"x": {"type": "string", "enum": ["alpha", "beta"]}
+				}
+			}
+		},
+		"definitions": {
+			"ns/item~1": {
+				"type": "object",
+				"properties": {
+					"a/b~c": {"type": "integer", "minimum": 5}
+				}
+			}
+		},
+		"properties": {
+			"direct_x": {"$ref": "#/$defs/Foo/properties/x"},
+			"escaped_prop": {"$ref": "#/definitions/ns~1item~01/properties/a~1b~0c"}
+		},
+		"required": ["direct_x", "escaped_prop"]
+	}`)
+
+	require.NotContains(t, cleaned, "$defs")
+	require.NotContains(t, cleaned, "definitions")
+	props := cleaned["properties"].(map[string]any)
+
+	directX := props["direct_x"].(map[string]any)
+	require.Equal(t, "string", directX["type"])
+	require.Equal(t, []any{"alpha", "beta"}, directX["enum"])
+
+	escapedProp := props["escaped_prop"].(map[string]any)
+	require.Equal(t, "integer", escapedProp["type"])
+	require.Contains(t, escapedProp["description"], "min: 5")
+	require.Equal(t, []any{"direct_x", "escaped_prop"}, cleaned["required"])
+}
+
+func TestCleanJSONSchema_NestedAllOfWithRefAndRequiredOnlyBranches(t *testing.T) {
+	// Counterexample 1: exact nested allOf shape reported in review.
+	nested := cleanRawJSONSchema(t, `{
+		"type": "object",
+		"allOf": [
+			{
+				"allOf": [
+					{
+						"type": "object",
+						"properties": {"x": {"type": "string"}},
+						"required": ["x"]
+					}
+				]
+			}
+		]
+	}`)
+	require.Equal(t, "object", nested["type"])
+	nestedProps := nested["properties"].(map[string]any)
+	require.Equal(t, "string", nestedProps["x"].(map[string]any)["type"])
+	require.NotContains(t, nestedProps, "reason")
+	require.Equal(t, []any{"x"}, nested["required"])
+
+	// Counterexample 2: nested allOf combining $ref branches, required-only branches, and constraint-only branches.
+	complexAllOf := cleanRawJSONSchema(t, `{
+		"type": "object",
+		"$defs": {
+			"Shared": {
+				"allOf": [
+					{"type": "object", "properties": {"y": {"type": "integer"}, "z": {"type": "boolean"}}},
+					{"required": ["y"]}
+				]
+			},
+			"ReqZ": {
+				"required": ["z", "missing"]
+			}
+		},
+		"properties": {
+			"kept": {"type": "string"}
+		},
+		"required": ["kept"],
+		"allOf": [
+			{"allOf": [{"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}]},
+			{"$ref": "#/$defs/Shared"},
+			{"$ref": "#/$defs/ReqZ"},
+			{"not": {"required": ["ignored"]}}
+		]
+	}`)
+	require.Equal(t, "object", complexAllOf["type"])
+	cProps := complexAllOf["properties"].(map[string]any)
+	require.Len(t, cProps, 4)
+	require.Equal(t, "string", cProps["kept"].(map[string]any)["type"])
+	require.Equal(t, "string", cProps["x"].(map[string]any)["type"])
+	require.Equal(t, "integer", cProps["y"].(map[string]any)["type"])
+	require.Equal(t, "boolean", cProps["z"].(map[string]any)["type"])
+	require.NotContains(t, cProps, "reason")
+	require.Equal(t, []any{"kept", "x", "y", "z"}, complexAllOf["required"])
+}
