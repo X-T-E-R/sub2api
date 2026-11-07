@@ -1063,7 +1063,13 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 	}
 
 	models := make([]string, 0, len(modelsResp.Models))
-	for modelID := range modelsResp.Models {
+	for modelID, info := range modelsResp.Models {
+		if info.Disabled {
+			// Antigravity marks a model it won't serve the account disabled:
+			// asking for it returns HTTP 404 "Requested entity was not found"
+			// (e.g. gemini-4-argon-disabled). Adopted from Magpie (MIT).
+			continue
+		}
 		models = append(models, strings.TrimSpace(modelID))
 	}
 	body, err := json.Marshal(raw)

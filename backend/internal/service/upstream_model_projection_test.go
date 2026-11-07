@@ -354,3 +354,62 @@ func TestCatalogHubProfileProjectsObservedArgon(t *testing.T) {
 	require.Equal(t, []string{"high", "low", "medium"}, catalog.Metadata["gemini-4-argon"].SupportedReasoningLevels)
 	require.Equal(t, "medium", catalog.Metadata["gemini-4-argon"].DefaultReasoningLevel)
 }
+
+func TestCatalogSyncSkipsDisabledModelsAndDisambiguatesBorrowedDisplayNames(t *testing.T) {
+	effortTestSettings(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1internal:fetchAvailableModels", r.URL.Path)
+		_, _ = io.WriteString(w, `{
+			"models": {
+				"gemini-4-argon-disabled": {
+					"displayName": "Gemini 4 Argon",
+					"disabled": true,
+					"supportsThinking": true
+				},
+				"gemini-3.5-flash-lite": {
+					"displayName": "Gemini 3.5 Flash Lite",
+					"model": "MODEL_PLACEHOLDER_M198",
+					"supportsThinking": true
+				},
+				"gemini-2.5-flash": {
+					"displayName": "Gemini 3.5 Flash Lite",
+					"model": "MODEL_GOOGLE_GEMINI_2_5_FLASH",
+					"supportsThinking": true
+				},
+				"gemini-2.5-flash-lite": {
+					"displayName": "Gemini 3.5 Flash Lite",
+					"model": "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE",
+					"supportsThinking": false
+				},
+				"gemini-3-flash-agent": {
+					"displayName": "Gemini 3.5 Flash (High)",
+					"model": "MODEL_PLACEHOLDER_M99",
+					"supportsThinking": true
+				}
+			}
+		}`)
+	}))
+	defer server.Close()
+	oldURL, oldURLs := antigravity.BaseURL, antigravity.BaseURLs
+	antigravity.BaseURL, antigravity.BaseURLs = server.URL, []string{server.URL}
+	t.Cleanup(func() { antigravity.BaseURL, antigravity.BaseURLs = oldURL, oldURLs })
+
+	account := newAntigravityCompatAccount(AccountTypeOAuth)
+	repo := &upstreamModelMetadataRepoStub{}
+	svc := &AccountTestService{
+		cfg:                       upstreamModelSyncTestConfig(),
+		accountRepo:               repo,
+		antigravityGatewayService: newAntigravityCompatService(config.GatewayConfig{}, nil),
+	}
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.NotContains(t, catalog.Models, "gemini-4-argon-disabled")
+	require.NotContains(t, catalog.ModelMapping, "gemini-4-argon-disabled")
+	require.NotContains(t, catalog.Metadata, "gemini-4-argon-disabled")
+
+	require.Equal(t, "Gemini 3.5 Flash Lite", catalog.Metadata["gemini-3.5-flash-lite"].DisplayName)
+	require.Equal(t, "gemini-2.5-flash", catalog.Metadata["gemini-2.5-flash"].DisplayName)
+	require.Equal(t, "gemini-2.5-flash-lite", catalog.Metadata["gemini-2.5-flash-lite"].DisplayName)
+	// A distinct model whose displayName is not claimed by another family in the list and has a placeholder enum keeps its name.
+	require.Equal(t, "Gemini 3.5 Flash (High)", catalog.Metadata["gemini-3-flash-agent"].DisplayName)
+}

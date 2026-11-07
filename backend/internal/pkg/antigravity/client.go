@@ -692,6 +692,8 @@ type ModelQuotaInfo struct {
 type ModelInfo struct {
 	QuotaInfo          *ModelQuotaInfo `json:"quotaInfo,omitempty"`
 	DisplayName        string          `json:"displayName,omitempty"`
+	Model              string          `json:"model,omitempty"`
+	Disabled           bool            `json:"disabled,omitempty"`
 	SupportsImages     *bool           `json:"supportsImages,omitempty"`
 	SupportsThinking   *bool           `json:"supportsThinking,omitempty"`
 	ThinkingBudget     *int            `json:"thinkingBudget,omitempty"`

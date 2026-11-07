@@ -128,16 +128,18 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 
 		p.hasToolCall = true
 
+		callName := stripDefaultAPINamespace(part.FunctionCall.Name)
+
 		// 生成 tool_use id
 		toolID := part.FunctionCall.ID
 		if toolID == "" {
-			toolID = fmt.Sprintf("%s-%s", part.FunctionCall.Name, generateRandomID())
+			toolID = fmt.Sprintf("%s-%s", callName, generateRandomID())
 		}
 
 		item := ClaudeContentItem{
 			Type:  "tool_use",
 			ID:    toolID,
-			Name:  part.FunctionCall.Name,
+			Name:  callName,
 			Input: part.FunctionCall.Args,
 		}
 
@@ -404,4 +406,16 @@ func generateAnthropicMsgID() string {
 		b[i] = charset[int(randomBytes[i])%len(charset)]
 	}
 	return "msg_01" + string(b)
+}
+
+// stripDefaultAPINamespace 剥离 Gemini 偶发附带在客户端工具名上的内置命名空间前缀
+// （如 default_api:bash 或 default_api.bash）。
+// 吸收自 Magpie (github.com/yetone/magpie, MIT License) internal/gateway/codeassist.go toolOfCall (#636)。
+func stripDefaultAPINamespace(name string) string {
+	for _, sep := range []string{":", "."} {
+		if t, ok := strings.CutPrefix(name, "default_api"+sep); ok && t != "" {
+			return t
+		}
+	}
+	return name
 }

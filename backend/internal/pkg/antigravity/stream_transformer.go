@@ -467,15 +467,16 @@ func (p *StreamingProcessor) processFunctionCall(fc *GeminiFunctionCall, signatu
 	// A named part starts a new call (even when the name repeats). Subsequent
 	// parts may omit the name and only supply args for the currently open call.
 	if p.blockType != BlockTypeFunction || fc.Name != "" {
+		callName := stripDefaultAPINamespace(fc.Name)
 		toolID := fc.ID
 		if toolID == "" {
-			toolID = fmt.Sprintf("%s-%s", fc.Name, generateRandomID())
+			toolID = fmt.Sprintf("%s-%s", callName, generateRandomID())
 		}
 
 		toolUse := map[string]any{
 			"type":  "tool_use",
 			"id":    toolID,
-			"name":  fc.Name,
+			"name":  callName,
 			"input": map[string]any{},
 		}
 
