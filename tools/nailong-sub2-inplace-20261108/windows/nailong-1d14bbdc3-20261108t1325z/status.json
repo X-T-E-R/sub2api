@@ -1,0 +1,55 @@
+{
+  "stage": "forward_terminal",
+  "at": "2026-11-08T13:23:18Z",
+  "window": "nailong-1d14bbdc3-20261108t1325z",
+  "app": {
+    "id": "db2d6f1f2243946206d1f8c7f94e517936f2c2da5a197840b394c5cab88ac090",
+    "name": "sub2api-gcp",
+    "image": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+    "revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
+    "started_at": "2026-11-08T13:22:45.095412936Z",
+    "health": "healthy",
+    "loopback_http": 200
+  },
+  "retained_previous_container": {
+    "id": "ca2f68cfa270b4a2fe3f95a5fe054b7f477d4f652082b14109f1b72987e7c72b",
+    "name": "sub2api-gcp-before-nailong-1d14bbdc3-20261108t1325z-ca2f68cfa270"
+  },
+  "pg_preserved": "92f7fb8073471bb57bec8544e40cb2bba7b827a6b1e168a4c95dd7611bb59953",
+  "redis_preserved": "540b7e4bf78391c976b63833a6aeaea7c6a0e2195e299015a895883be28f6522",
+  "axon_preserved": "1e559e5ae23e9937974a9a2eba45042a0e7e4300b21880077cdc5055d8f7fcb3",
+  "appdata_preserved": "/opt/sub2api-nailong/runs/nailong-fc899-20261108t0659z/appdata",
+  "thought_policy": {
+    "suppress_thought_only_stop": true,
+    "continue_thought_only": false,
+    "continue_zero_output": false
+  },
+  "backup": {
+    "stage": "core_backup_source_bound",
+    "timer": "active",
+    "image": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+    "revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
+    "source": {
+      "app": {
+        "id": "db2d6f1f2243946206d1f8c7f94e517936f2c2da5a197840b394c5cab88ac090",
+        "name": "sub2api-gcp",
+        "started_at": "2026-11-08T13:22:45.095412936Z"
+      },
+      "appdata": "/opt/sub2api-nailong/runs/nailong-fc899-20261108t0659z/appdata",
+      "dependency_network": "sub2api-nailong",
+      "pg": {
+        "id": "92f7fb8073471bb57bec8544e40cb2bba7b827a6b1e168a4c95dd7611bb59953",
+        "name": "sub2api-nailong-postgres",
+        "started_at": "2026-11-07T15:46:02.058810734Z"
+      },
+      "redis": {
+        "id": "540b7e4bf78391c976b63833a6aeaea7c6a0e2195e299015a895883be28f6522",
+        "name": "sub2api-nailong-redis",
+        "started_at": "2026-11-07T15:27:13.0195041Z"
+      }
+    }
+  },
+  "old_gcp_touched": false,
+  "dns_applied_by_runner": false,
+  "worker_applied_by_runner": false
+}
