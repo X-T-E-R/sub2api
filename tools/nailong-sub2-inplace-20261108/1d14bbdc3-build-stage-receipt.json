@@ -1,0 +1,64 @@
+{
+  "schema": "sub2-nailong-1d14bbdc3-build-stage-receipt-1",
+  "go": false,
+  "production_started": false,
+  "uploaded": true,
+  "loaded_on_nailong": true,
+  "worktree_commit": "83eb86050854f75df12c7821da12e1ae30b44065",
+  "main_commit": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
+  "git_tree_sha": "3275543d000466bc317b79d1230b240f31b4a97d",
+  "local_docker": {
+    "server": "29.8.1",
+    "platform": "linux/amd64",
+    "tag": "sub2api:1d14bbdc3",
+    "revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
+    "local_image_id": "sha256:8bb74c0c174d92bfc805b3c60cc3ea084a6d76090caa544574ee4e945132d516",
+    "local_image_id_kind": "manifest_list",
+    "config": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+    "config_kind": "oci_config_in_docker_save_and_nailong_docker_20_id",
+    "created": "2026-11-08T12:37:18.271132082Z",
+    "image_size": 185059126,
+    "tar": "C:/Users/xxoy1/AppData/Local/Temp/sub2-1d14bbdc3.tar",
+    "tar_bytes": 45218304,
+    "tar_sha256": "61d0cabc85ccc69ac7785b9006b2540fba0687cca571406247679aedebc8a319",
+    "version_output": "Sub2API 0.1.183 (commit: 1d14bbdc38c25e4279f6948c7128c4a43e6ef985, built: 2026-11-08T12:37:00Z)"
+  },
+  "nailong_stage": {
+    "host": "136.66.61.218",
+    "private_ip": "10.77.48.3",
+    "loaded_image_id": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+    "loaded_repo_tags": [
+      "sub2api:1d14bbdc3"
+    ],
+    "loaded_revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
+    "loaded_created": "2026-11-08T12:37:18.271132082Z",
+    "loaded_size": 136913846,
+    "rootfs_layers_match_local": true,
+    "rootfs_layers": [
+      "sha256:42cc7504d9d5f918d6ca52d96706e7b602c8ffca5b80b1cad44e004e1c69fb70",
+      "sha256:79d861fa609f6e8f1d02d1bd42b60bccc280313288b36bda66cc2fcd4ccf9ee7",
+      "sha256:b9f5a24f4756a176d4557ea8e2d140436cc9b4b038530d0f852540f9f301b7c0",
+      "sha256:cb28de31c7a08ea2cc7fa9322a09d2128fe277901dcb3699635c5fe4412e804f",
+      "sha256:feec848344ee0b741d6c1715bf272165c6f575ce05951250e488a53646bbc475",
+      "sha256:cfa5b2d0615d43a7c39a128e6578da6fcb164be5fe45ab6927ed015129329daa",
+      "sha256:02a10b051b0c7d16082c5bf80f3caa3c5ebd46cdbcc773f81a2f7d8628030e96",
+      "sha256:f8ac13a84cbc23ee0b2d222c8ac348e4ba73b9b5217f6949537ed8dc82f63b8e",
+      "sha256:e392949e9c798fd616ef7832916fe1c7c96fea65df98300893b778ee8bc714ad",
+      "sha256:a0bde293c818f598a4cff5d73fe18e5b8bf7c63e876da39b284f8c64842041f0",
+      "sha256:a5b35ab6a729f0e95afd6fb6cd4b9a2037f575fbd02940ef129709766e7eb369",
+      "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+    ]
+  },
+  "live_occupant_untouched": {
+    "container_name": "sub2api-gcp",
+    "container_id": "ca2f68cfa270b4a2fe3f95a5fe054b7f477d4f652082b14109f1b72987e7c72b",
+    "image": "sha256:8a087d23f70de512fcb9b064b9b088fa453650dbf2e8d4b05929f9130c0937a7",
+    "revision": "fc899738487a38a7d40664fdf92bc90375fbaf7b",
+    "started_at": "2026-11-08T07:10:04.155139036Z",
+    "running": true,
+    "health": "healthy",
+    "appdata": "/opt/sub2api-nailong/runs/nailong-fc899-20261108t0659z/appdata",
+    "daily_backup_source_check": "core_backup_source_bound",
+    "daily_backup_timer": "active"
+  }
+}
