@@ -532,6 +532,14 @@ const baseSettingsResponse = {
   rewrite_message_cache_control: false,
   enable_client_dateline_normalization: true,
   antigravity_user_agent_version: "",
+  antigravity_system_instruction_rewrite_enabled: false,
+  antigravity_system_instruction_rewrite_phrases: [
+    "x-anthropic-billing-header:",
+    "built on anthropic's claude agent sdk",
+    "you are codex, an agent based on gpt-5",
+    "you are codex, a coding agent based on gpt-5",
+    "hermes agent, an intelligent ai assistant created by nous research",
+  ],
   openai_codex_user_agent: "",
   payment_enabled: true,
   payment_min_amount: 1,
@@ -1751,6 +1759,98 @@ describe("admin SettingsView payment visible method controls", () => {
     await flushPromises();
     expect(updateSettings).toHaveBeenCalledTimes(2);
     expect(showSuccess).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("loads, edits, deduplicates, clears, and restores default Antigravity systemInstruction rewrite phrases", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_system_instruction_rewrite_enabled: false,
+      antigravity_system_instruction_rewrite_phrases: [
+        "x-anthropic-billing-header:",
+        "built on anthropic's claude agent sdk",
+        "you are codex, an agent based on gpt-5",
+        "you are codex, a coding agent based on gpt-5",
+        "hermes agent, an intelligent ai assistant created by nous research",
+      ],
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    const toggle = wrapper.get<HTMLInputElement>(
+      "#antigravity-system-instruction-rewrite-enabled",
+    );
+    const textarea = wrapper.get<HTMLTextAreaElement>(
+      "#antigravity-system-instruction-rewrite-phrases",
+    );
+    expect(toggle.element.checked).toBe(false);
+    expect(textarea.element.value.split("\n")).toHaveLength(5);
+
+    // Enable toggle and set custom phrases with duplicates, blank lines, and Unicode
+    await toggle.setValue(true);
+    await textarea.setValue(
+      "  x-anthropic-billing-header:  \n\nX-ANTHROPIC-BILLING-HEADER:\nİstanbul ✓ custom phrase\n",
+    );
+
+    updateSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_system_instruction_rewrite_enabled: true,
+      antigravity_system_instruction_rewrite_phrases: [
+        "x-anthropic-billing-header:",
+        "İstanbul ✓ custom phrase",
+      ],
+    });
+
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        antigravity_system_instruction_rewrite_enabled: true,
+        antigravity_system_instruction_rewrite_phrases: [
+          "x-anthropic-billing-header:",
+          "İstanbul ✓ custom phrase",
+        ],
+      }),
+    );
+    expect(textarea.element.value).toBe(
+      "x-anthropic-billing-header:\nİstanbul ✓ custom phrase",
+    );
+
+    // Clear list via button and verify empty status + empty array submission
+    await wrapper.get("#antigravity-system-instruction-rewrite-clear").trigger("click");
+    expect(textarea.element.value).toBe("");
+    expect(
+      wrapper.find("#antigravity-system-instruction-rewrite-empty-status").exists(),
+    ).toBe(true);
+
+    updateSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      antigravity_system_instruction_rewrite_enabled: true,
+      antigravity_system_instruction_rewrite_phrases: [],
+    });
+
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        antigravity_system_instruction_rewrite_enabled: true,
+        antigravity_system_instruction_rewrite_phrases: [],
+      }),
+    );
+
+    // Restore default 5 phrases via button
+    await wrapper.get("#antigravity-system-instruction-rewrite-reset").trigger("click");
+    expect(textarea.element.value.split("\n")).toEqual([
+      "x-anthropic-billing-header:",
+      "built on anthropic's claude agent sdk",
+      "you are codex, an agent based on gpt-5",
+      "you are codex, a coding agent based on gpt-5",
+      "hermes agent, an intelligent ai assistant created by nous research",
+    ]);
     wrapper.unmount();
   });
 

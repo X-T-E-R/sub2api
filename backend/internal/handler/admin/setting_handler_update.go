@@ -253,8 +253,10 @@ type UpdateSettingsRequest struct {
 	EnableAnthropicCacheTTL1hInjection     *bool   `json:"enable_anthropic_cache_ttl_1h_injection"`
 	RewriteMessageCacheControl             *bool   `json:"rewrite_message_cache_control"`
 	EnableClientDatelineNormalization      *bool   `json:"enable_client_dateline_normalization"`
-	AntigravityUserAgent                   string  `json:"antigravity_user_agent"`
-	AntigravityUserAgentVersion            *string `json:"antigravity_user_agent_version"`
+	AntigravityUserAgent                       string   `json:"antigravity_user_agent"`
+	AntigravityUserAgentVersion                *string  `json:"antigravity_user_agent_version"`
+	AntigravitySystemInstructionRewriteEnabled bool     `json:"antigravity_system_instruction_rewrite_enabled"`
+	AntigravitySystemInstructionRewritePhrases []string `json:"antigravity_system_instruction_rewrite_phrases"`
 	OpenAICodexUserAgent                   *string `json:"openai_codex_user_agent"`
 	OpenAICodexClientVersion               *string `json:"openai_codex_client_version"`
 	OpenAICodexVersionAutoSyncEnabled      *bool   `json:"openai_codex_version_auto_sync_enabled"`
@@ -1746,6 +1748,19 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.AntigravityUserAgentVersion
 		}(),
+		AntigravitySystemInstructionRewriteEnabled: func() bool {
+			if _, skipped := omitted[service.SettingKeyAntigravitySystemInstructionRewriteEnabled]; skipped {
+				return previousSettings.AntigravitySystemInstructionRewriteEnabled
+			}
+			return req.AntigravitySystemInstructionRewriteEnabled
+		}(),
+		AntigravitySystemInstructionRewritePhrases: func() []string {
+			if _, skipped := omitted[service.SettingKeyAntigravitySystemInstructionRewritePhrases]; skipped {
+				return append([]string(nil), previousSettings.AntigravitySystemInstructionRewritePhrases...)
+			}
+			return antigravity.NormalizeSystemInstructionRewritePhrases(req.AntigravitySystemInstructionRewritePhrases)
+		}(),
+		AntigravitySystemInstructionRewritePhrasesSet: true,
 		OpenAICodexUserAgent: func() string {
 			if req.OpenAICodexUserAgent != nil {
 				return *req.OpenAICodexUserAgent
@@ -2293,6 +2308,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		EnableClientDatelineNormalization:                      updatedSettings.EnableClientDatelineNormalization,
 		AntigravityUserAgent:                                   updatedSettings.AntigravityUserAgent,
 		AntigravityUserAgentVersion:                            updatedSettings.AntigravityUserAgentVersion,
+		AntigravitySystemInstructionRewriteEnabled:             updatedSettings.AntigravitySystemInstructionRewriteEnabled,
+		AntigravitySystemInstructionRewritePhrases:             updatedSettings.AntigravitySystemInstructionRewritePhrases,
 		OpenAICodexUserAgent:                                   updatedSettings.OpenAICodexUserAgent,
 		OpenAICodexClientVersion:                               updatedSettings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         updatedSettings.OpenAICodexClientVersionSynced,

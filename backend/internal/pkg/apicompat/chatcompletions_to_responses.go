@@ -117,6 +117,8 @@ func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "system":
 		return chatSystemToResponses(m)
+	case "developer":
+		return chatDeveloperToResponses(m)
 	case "user":
 		return chatUserToResponses(m)
 	case "assistant":
@@ -141,6 +143,19 @@ func chatSystemToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 		return nil, err
 	}
 	return []ResponsesInputItem{{Role: "system", Content: content}}, nil
+}
+
+// chatDeveloperToResponses converts an OpenAI Chat Completions developer message.
+func chatDeveloperToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+	parsed, err := parseChatMessageContent(m.Content)
+	if err != nil {
+		return nil, err
+	}
+	content, err := marshalChatInputContent(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return []ResponsesInputItem{{Role: "developer", Content: content}}, nil
 }
 
 // chatUserToResponses converts a user message, handling both plain strings and

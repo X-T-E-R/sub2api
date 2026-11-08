@@ -238,6 +238,8 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyEnableClientDatelineNormalization:                  "true",
 		SettingKeyAntigravityUserAgent:                               "",
 		SettingKeyAntigravityUserAgentVersion:                        "",
+		SettingKeyAntigravitySystemInstructionRewriteEnabled:         "false",
+		SettingKeyAntigravitySystemInstructionRewritePhrases:         "",
 		SettingKeyOpenAICodexUserAgent:                               "",
 		SettingKeyOpenAICodexClientVersion:                           "",
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
@@ -874,6 +876,9 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.AntigravityUserAgent, _ = antigravity.NormalizeUserAgentOverride(settings[SettingKeyAntigravityUserAgent])
 	result.AntigravityUserAgentVersion = antigravity.NormalizeUserAgentVersion(settings[SettingKeyAntigravityUserAgentVersion])
+	result.AntigravitySystemInstructionRewriteEnabled = strings.TrimSpace(settings[SettingKeyAntigravitySystemInstructionRewriteEnabled]) == "true"
+	result.AntigravitySystemInstructionRewritePhrases = antigravity.ParseStoredSystemInstructionRewritePhrases(settings[SettingKeyAntigravitySystemInstructionRewritePhrases])
+	result.AntigravitySystemInstructionRewritePhrasesSet = true
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAICodexClientVersion = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersion])
 	result.OpenAICodexClientVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersionSynced])

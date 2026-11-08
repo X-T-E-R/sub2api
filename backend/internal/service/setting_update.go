@@ -101,6 +101,7 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 	if _, skipped := omitted[SettingKeyAntigravityUserAgent]; !skipped && settings != nil {
 		s.publishAntigravityUserAgent(settings.AntigravityUserAgent)
 	}
+	s.refreshAntigravitySystemInstructionRewriteAfterWrite(ctx, settings, omitted)
 	if len(omitted) == 0 {
 		s.refreshCachedSettings(settings)
 		return
@@ -111,6 +112,41 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 		return
 	}
 	s.refreshCachedSettings(stored)
+}
+
+func (s *SettingService) refreshAntigravitySystemInstructionRewriteAfterWrite(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) {
+	if settings == nil {
+		return
+	}
+	_, enabledOmitted := omitted[SettingKeyAntigravitySystemInstructionRewriteEnabled]
+	_, phrasesOmitted := omitted[SettingKeyAntigravitySystemInstructionRewritePhrases]
+	if len(omitted) > 0 && enabledOmitted && phrasesOmitted {
+		return
+	}
+	enabled := settings.AntigravitySystemInstructionRewriteEnabled
+	var phrases []string
+	if settings.AntigravitySystemInstructionRewritePhrasesSet || settings.AntigravitySystemInstructionRewritePhrases != nil {
+		phrases = antigravity.NormalizeSystemInstructionRewritePhrases(settings.AntigravitySystemInstructionRewritePhrases)
+	} else {
+		phrases = antigravity.DefaultSystemInstructionRewritePhrases()
+	}
+	if len(omitted) > 0 && (enabledOmitted || phrasesOmitted) {
+		if enabledOmitted {
+			if raw, err := s.settingRepo.GetValue(ctx, SettingKeyAntigravitySystemInstructionRewriteEnabled); err == nil || errors.Is(err, ErrSettingNotFound) {
+				enabled = strings.TrimSpace(raw) == "true"
+			} else if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
+				enabled = cached.enabled
+			}
+		}
+		if phrasesOmitted {
+			if raw, err := s.settingRepo.GetValue(ctx, SettingKeyAntigravitySystemInstructionRewritePhrases); err == nil || errors.Is(err, ErrSettingNotFound) {
+				phrases = antigravity.ParseStoredSystemInstructionRewritePhrases(raw)
+			} else if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
+				phrases = append([]string(nil), cached.phrases...)
+			}
+		}
+	}
+	s.publishAntigravitySystemInstructionRewrite(enabled, phrases)
 }
 
 // refreshCyberSessionBlockRuntimeAfterWrite commits the authoritative cyber
@@ -541,6 +577,17 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
 	updates[SettingKeyAntigravityUserAgent] = settings.AntigravityUserAgent
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
+	updates[SettingKeyAntigravitySystemInstructionRewriteEnabled] = strconv.FormatBool(settings.AntigravitySystemInstructionRewriteEnabled)
+	if settings.AntigravitySystemInstructionRewritePhrasesSet || settings.AntigravitySystemInstructionRewritePhrases != nil {
+		normalizedPhrases := antigravity.NormalizeSystemInstructionRewritePhrases(settings.AntigravitySystemInstructionRewritePhrases)
+		settings.AntigravitySystemInstructionRewritePhrases = normalizedPhrases
+		settings.AntigravitySystemInstructionRewritePhrasesSet = true
+		updates[SettingKeyAntigravitySystemInstructionRewritePhrases] = antigravity.FormatStoredSystemInstructionRewritePhrases(normalizedPhrases)
+	} else {
+		defaultPhrases := antigravity.DefaultSystemInstructionRewritePhrases()
+		settings.AntigravitySystemInstructionRewritePhrases = defaultPhrases
+		updates[SettingKeyAntigravitySystemInstructionRewritePhrases] = antigravity.FormatStoredSystemInstructionRewritePhrases(defaultPhrases)
+	}
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)
 	updates[SettingKeyOpenAICodexVersionAutoSyncEnabled] = strconv.FormatBool(settings.OpenAICodexVersionAutoSyncEnabled)
@@ -794,6 +841,13 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		version:   antigravityUserAgentVersion,
 		expiresAt: time.Now().Add(antigravityUserAgentVersionCacheTTL).UnixNano(),
 	})
+	var rewritePhrases []string
+	if settings.AntigravitySystemInstructionRewritePhrasesSet || settings.AntigravitySystemInstructionRewritePhrases != nil {
+		rewritePhrases = antigravity.NormalizeSystemInstructionRewritePhrases(settings.AntigravitySystemInstructionRewritePhrases)
+	} else {
+		rewritePhrases = antigravity.DefaultSystemInstructionRewritePhrases()
+	}
+	s.publishAntigravitySystemInstructionRewrite(settings.AntigravitySystemInstructionRewriteEnabled, rewritePhrases)
 	s.openAICodexUASF.Forget("openai_codex_user_agent")
 	codexUA := strings.TrimSpace(settings.OpenAICodexUserAgent)
 	if codexUA == "" {

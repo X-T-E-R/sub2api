@@ -794,6 +794,7 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	}
 	antigravity.SetUserAgentVersionResolver(svc.GetAntigravityUserAgentVersion)
 	antigravity.SetUserAgentResolver(svc.GetAntigravityUserAgentOverride)
+	antigravity.SetSystemInstructionRewriteResolver(svc.GetAntigravitySystemInstructionRewriteConfig)
 	// enforceCodexIdentityHeaders 是所有 Codex 出站路径共用的纯函数收口点，拿不到 ctx，
 	// 故注入无参解析器；解析器内部自带 60s TTL 缓存，热路径不触库。
 	SetCodexCanonicalUserAgentResolver(func() string {

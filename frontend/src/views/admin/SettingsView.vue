@@ -5884,6 +5884,127 @@
                 </p>
               </div>
 
+              <!-- Antigravity 系统指令短句改写 -->
+              <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-700">
+                <div class="flex items-start justify-between gap-4">
+                  <div>
+                    <label
+                      for="antigravity-system-instruction-rewrite-enabled"
+                      class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+                    >
+                      {{
+                        t(
+                          "admin.settings.gatewayForwarding.antigravitySystemInstructionRewrite",
+                        )
+                      }}
+                    </label>
+                    <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{
+                        t(
+                          "admin.settings.gatewayForwarding.antigravitySystemInstructionRewriteHint",
+                        )
+                      }}
+                    </p>
+                  </div>
+                  <Toggle
+                    id="antigravity-system-instruction-rewrite-enabled"
+                    v-model="form.antigravity_system_instruction_rewrite_enabled"
+                  />
+                </div>
+
+                <div class="mt-4">
+                  <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <label
+                      for="antigravity-system-instruction-rewrite-phrases"
+                      class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                    >
+                      {{
+                        t(
+                          "admin.settings.gatewayForwarding.antigravitySystemInstructionRewritePhrases",
+                        )
+                      }}
+                    </label>
+                    <div class="flex items-center gap-2">
+                      <span
+                        id="antigravity-system-instruction-rewrite-count"
+                        class="text-xs text-gray-500 dark:text-gray-400"
+                      >
+                        {{
+                          t(
+                            "admin.settings.gatewayForwarding.antigravitySystemInstructionRewriteCount",
+                            {
+                              count:
+                                normalizedAntigravitySystemInstructionRewritePhrases
+                                  .length,
+                            },
+                          )
+                        }}
+                      </span>
+                      <button
+                        id="antigravity-system-instruction-rewrite-clear"
+                        type="button"
+                        class="btn btn-secondary btn-sm"
+                        :disabled="
+                          saving ||
+                          normalizedAntigravitySystemInstructionRewritePhrases
+                            .length === 0
+                        "
+                        @click="clearAntigravitySystemInstructionRewritePhrases"
+                      >
+                        {{
+                          t(
+                            "admin.settings.gatewayForwarding.antigravitySystemInstructionRewriteClearList",
+                          )
+                        }}
+                      </button>
+                      <button
+                        id="antigravity-system-instruction-rewrite-reset"
+                        type="button"
+                        class="btn btn-secondary btn-sm"
+                        :disabled="saving"
+                        @click="resetAntigravitySystemInstructionRewritePhrases"
+                      >
+                        {{
+                          t(
+                            "admin.settings.gatewayForwarding.antigravitySystemInstructionRewriteResetDefaults",
+                          )
+                        }}
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    id="antigravity-system-instruction-rewrite-phrases"
+                    v-model="antigravitySystemInstructionRewritePhrasesInput"
+                    rows="5"
+                    class="input w-full font-mono text-sm"
+                    :disabled="saving"
+                    :spellcheck="false"
+                    @input="syncAntigravitySystemInstructionRewritePhrasesFromInput"
+                  ></textarea>
+                  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{
+                      t(
+                        "admin.settings.gatewayForwarding.antigravitySystemInstructionRewritePhrasesHint",
+                      )
+                    }}
+                  </p>
+                  <p
+                    v-if="
+                      normalizedAntigravitySystemInstructionRewritePhrases
+                        .length === 0
+                    "
+                    id="antigravity-system-instruction-rewrite-empty-status"
+                    class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+                  >
+                    {{
+                      t(
+                        "admin.settings.gatewayForwarding.antigravitySystemInstructionRewriteEmptyStatus",
+                      )
+                    }}
+                  </p>
+                </div>
+              </div>
+
               <!-- OpenAI Codex UA -->
               <div>
                 <label
@@ -9746,6 +9867,8 @@ type SettingsForm = Omit<
   openai_advanced_scheduler_weight_upstream_cost: string;
   openai_advanced_scheduler_weight_previous_response: string;
   openai_advanced_scheduler_weight_session_sticky: string;
+  antigravity_system_instruction_rewrite_enabled: boolean;
+  antigravity_system_instruction_rewrite_phrases: string[];
   // 系统全局平台限额 map；form 内始终归一化为全 4 平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
@@ -10000,6 +10123,14 @@ const form = reactive<SettingsForm>({
   enable_client_dateline_normalization: true,
   antigravity_user_agent: "",
   antigravity_user_agent_version: "",
+  antigravity_system_instruction_rewrite_enabled: false,
+  antigravity_system_instruction_rewrite_phrases: [
+    "x-anthropic-billing-header:",
+    "built on anthropic's claude agent sdk",
+    "you are codex, an agent based on gpt-5",
+    "you are codex, a coding agent based on gpt-5",
+    "hermes agent, an intelligent ai assistant created by nous research",
+  ],
   openai_codex_user_agent: "",
   openai_codex_client_version: "",
   // 只读展示：自动同步任务写入的官方最新稳定版，不参与提交（提交载荷按字段显式构造）
@@ -11003,6 +11134,14 @@ async function loadSettings() {
       }
     }
     syncCaptchaProviderSelection();
+    form.antigravity_system_instruction_rewrite_enabled = Boolean(
+      settings.antigravity_system_instruction_rewrite_enabled,
+    );
+    applyAntigravitySystemInstructionRewritePhrases(
+      Array.isArray(settings.antigravity_system_instruction_rewrite_phrases)
+        ? settings.antigravity_system_instruction_rewrite_phrases
+        : [...DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES],
+    );
     if (!form.claude_oauth_system_prompt_blocks?.trim()) {
       form.claude_oauth_system_prompt_blocks =
         defaultClaudeOAuthSystemPromptBlocks;
@@ -11229,6 +11368,81 @@ function findDuplicateDefaultSubscription(
     seenGroupIDs.add(item.group_id);
     return false;
   });
+}
+
+const DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES: readonly string[] = [
+  "x-anthropic-billing-header:",
+  "built on anthropic's claude agent sdk",
+  "you are codex, an agent based on gpt-5",
+  "you are codex, a coding agent based on gpt-5",
+  "hermes agent, an intelligent ai assistant created by nous research",
+];
+
+function asciiLowerForPhraseDedup(value: string): string {
+  return value.replace(/[A-Z]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) + 32),
+  );
+}
+
+function normalizeAntigravitySystemInstructionRewritePhrases(
+  input: unknown,
+): string[] {
+  const lines: string[] = [];
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (typeof item === "string") {
+        lines.push(...item.split(/\r?\n/));
+      }
+    }
+  } else if (typeof input === "string") {
+    lines.push(...input.split(/\r?\n/));
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of lines) {
+    const cleaned = raw.replace(/\u200b/g, "").trim();
+    if (!cleaned) continue;
+    const key = asciiLowerForPhraseDedup(cleaned);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+const antigravitySystemInstructionRewritePhrasesInput = ref(
+  DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES.join("\n"),
+);
+
+const normalizedAntigravitySystemInstructionRewritePhrases = computed(() =>
+  normalizeAntigravitySystemInstructionRewritePhrases(
+    antigravitySystemInstructionRewritePhrasesInput.value,
+  ),
+);
+
+function syncAntigravitySystemInstructionRewritePhrasesFromInput(): void {
+  form.antigravity_system_instruction_rewrite_phrases = [
+    ...normalizedAntigravitySystemInstructionRewritePhrases.value,
+  ];
+}
+
+function applyAntigravitySystemInstructionRewritePhrases(
+  phrases: string[],
+): void {
+  const normalized =
+    normalizeAntigravitySystemInstructionRewritePhrases(phrases);
+  form.antigravity_system_instruction_rewrite_phrases = normalized;
+  antigravitySystemInstructionRewritePhrasesInput.value = normalized.join("\n");
+}
+
+function clearAntigravitySystemInstructionRewritePhrases(): void {
+  applyAntigravitySystemInstructionRewritePhrases([]);
+}
+
+function resetAntigravitySystemInstructionRewritePhrases(): void {
+  applyAntigravitySystemInstructionRewritePhrases([
+    ...DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES,
+  ]);
 }
 
 const antigravityUserAgentError = computed(() => {
@@ -11604,6 +11818,12 @@ async function saveSettings() {
       antigravity_user_agent: form.antigravity_user_agent.trim(),
       antigravity_user_agent_version:
         form.antigravity_user_agent_version?.trim() || "",
+      antigravity_system_instruction_rewrite_enabled: Boolean(
+        form.antigravity_system_instruction_rewrite_enabled,
+      ),
+      antigravity_system_instruction_rewrite_phrases: [
+        ...normalizedAntigravitySystemInstructionRewritePhrases.value,
+      ],
       openai_codex_user_agent:
         form.openai_codex_user_agent?.trim() || "",
       openai_codex_client_version:
@@ -11767,6 +11987,14 @@ async function saveSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    form.antigravity_system_instruction_rewrite_enabled = Boolean(
+      updated.antigravity_system_instruction_rewrite_enabled,
+    );
+    applyAntigravitySystemInstructionRewritePhrases(
+      Array.isArray(updated.antigravity_system_instruction_rewrite_phrases)
+        ? updated.antigravity_system_instruction_rewrite_phrases
+        : [...normalizedAntigravitySystemInstructionRewritePhrases.value],
+    );
     Object.assign(authSourceDefaults, buildAuthSourceDefaultsState(updated));
     form.default_platform_quotas = normalizePlatformQuotasMap(updated.default_platform_quotas);
     form.account_scheduling_thresholds = normalizeAccountSchedulingThresholdsMap(

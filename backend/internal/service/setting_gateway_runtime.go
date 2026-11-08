@@ -104,6 +104,16 @@ const antigravityUserAgentVersionCacheTTL = 60 * time.Second
 const antigravityUserAgentVersionErrorTTL = 5 * time.Second
 const antigravityUserAgentVersionDBTimeout = 5 * time.Second
 
+type cachedAntigravitySystemInstructionRewrite struct {
+	enabled   bool
+	phrases   []string
+	expiresAt int64
+}
+
+const antigravitySystemInstructionRewriteCacheTTL = 60 * time.Second
+const antigravitySystemInstructionRewriteErrorTTL = 5 * time.Second
+const antigravitySystemInstructionRewriteDBTimeout = 5 * time.Second
+
 // DefaultOpenAICodexUserAgent 是 OpenAI Codex 默认 User-Agent，用于规避浏览器 UA 的质询。
 // 默认采用 codex-tui 身份，版本段随 codexCLIVersion 一起更新。
 const DefaultOpenAICodexUserAgent = codexCLIUserAgent
@@ -299,6 +309,77 @@ func (s *SettingService) GetAntigravityUserAgentVersion(ctx context.Context) str
 		return version
 	}
 	return fallback
+}
+
+// GetAntigravitySystemInstructionRewriteConfig returns the runtime (enabled,
+// phrases) configuration for Antigravity outbound systemInstruction rewriting.
+// Defaults to (false, DefaultSystemInstructionRewritePhrases()) when
+// unconfigured.
+func (s *SettingService) GetAntigravitySystemInstructionRewriteConfig(ctx context.Context) (bool, []string) {
+	if s == nil || s.settingRepo == nil {
+		return false, antigravity.DefaultSystemInstructionRewritePhrases()
+	}
+	if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.enabled, append([]string(nil), cached.phrases...)
+		}
+	}
+	s.antigravitySystemRewriteMu.Lock()
+	defer s.antigravitySystemRewriteMu.Unlock()
+	if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.enabled, append([]string(nil), cached.phrases...)
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravitySystemInstructionRewriteDBTimeout)
+	defer cancel()
+	enabledRaw, enabledErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravitySystemInstructionRewriteEnabled)
+	if enabledErr != nil && !errors.Is(enabledErr, ErrSettingNotFound) {
+		slog.Warn("failed to get antigravity system instruction rewrite enabled setting", "error", enabledErr)
+		fallbackPhrases := antigravity.DefaultSystemInstructionRewritePhrases()
+		entry := &cachedAntigravitySystemInstructionRewrite{
+			enabled:   false,
+			phrases:   fallbackPhrases,
+			expiresAt: time.Now().Add(antigravitySystemInstructionRewriteErrorTTL).UnixNano(),
+		}
+		s.antigravitySystemRewriteCache.Store(entry)
+		return false, append([]string(nil), fallbackPhrases...)
+	}
+	phrasesRaw, phrasesErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravitySystemInstructionRewritePhrases)
+	if phrasesErr != nil && !errors.Is(phrasesErr, ErrSettingNotFound) {
+		slog.Warn("failed to get antigravity system instruction rewrite phrases setting", "error", phrasesErr)
+		fallbackPhrases := antigravity.DefaultSystemInstructionRewritePhrases()
+		entry := &cachedAntigravitySystemInstructionRewrite{
+			enabled:   false,
+			phrases:   fallbackPhrases,
+			expiresAt: time.Now().Add(antigravitySystemInstructionRewriteErrorTTL).UnixNano(),
+		}
+		s.antigravitySystemRewriteCache.Store(entry)
+		return false, append([]string(nil), fallbackPhrases...)
+	}
+	enabled := strings.TrimSpace(enabledRaw) == "true"
+	phrases := antigravity.ParseStoredSystemInstructionRewritePhrases(phrasesRaw)
+	entry := &cachedAntigravitySystemInstructionRewrite{
+		enabled:   enabled,
+		phrases:   append([]string(nil), phrases...),
+		expiresAt: time.Now().Add(antigravitySystemInstructionRewriteCacheTTL).UnixNano(),
+	}
+	s.antigravitySystemRewriteCache.Store(entry)
+	return entry.enabled, append([]string(nil), entry.phrases...)
+}
+
+func (s *SettingService) publishAntigravitySystemInstructionRewrite(enabled bool, phrases []string) {
+	normalized := antigravity.NormalizeSystemInstructionRewritePhrases(phrases)
+	s.antigravitySystemRewriteMu.Lock()
+	defer s.antigravitySystemRewriteMu.Unlock()
+	s.antigravitySystemRewriteCache.Store(&cachedAntigravitySystemInstructionRewrite{
+		enabled:   enabled,
+		phrases:   append([]string(nil), normalized...),
+		expiresAt: time.Now().Add(antigravitySystemInstructionRewriteCacheTTL).UnixNano(),
+	})
 }
 
 // GetOpenAICodexUserAgent 返回 OpenAI Codex 上游请求使用的 User-Agent。

@@ -127,8 +127,10 @@ type SettingService struct {
 	antigravityUACache          atomic.Value // *cachedAntigravityUserAgent
 	antigravityUASF             singleflight.Group
 	antigravityUAMu             sync.RWMutex // prevent an in-flight DB read from overwriting a successful save
-	antigravityUAVersionCache   atomic.Value // *cachedAntigravityUserAgentVersion
-	antigravityUAVersionSF      singleflight.Group
+	antigravityUAVersionCache             atomic.Value // *cachedAntigravityUserAgentVersion
+	antigravityUAVersionSF                singleflight.Group
+	antigravitySystemRewriteCache         atomic.Value // *cachedAntigravitySystemInstructionRewrite
+	antigravitySystemRewriteMu            sync.Mutex
 	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
 	openAICodexUASF             singleflight.Group
 	openAICodexVersionCache     atomic.Value // *cachedOpenAICodexClientVersion

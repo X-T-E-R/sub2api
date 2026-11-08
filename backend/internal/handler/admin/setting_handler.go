@@ -299,6 +299,8 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		EnableClientDatelineNormalization:                      settings.EnableClientDatelineNormalization,
 		AntigravityUserAgent:                                   settings.AntigravityUserAgent,
 		AntigravityUserAgentVersion:                            settings.AntigravityUserAgentVersion,
+		AntigravitySystemInstructionRewriteEnabled:             settings.AntigravitySystemInstructionRewriteEnabled,
+		AntigravitySystemInstructionRewritePhrases:             settings.AntigravitySystemInstructionRewritePhrases,
 		OpenAICodexUserAgent:                                   settings.OpenAICodexUserAgent,
 		OpenAICodexClientVersion:                               settings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         settings.OpenAICodexClientVersionSynced,
