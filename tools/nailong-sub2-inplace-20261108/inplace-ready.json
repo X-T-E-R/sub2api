@@ -12,10 +12,17 @@
     ]
   },
   "core_identity_status": {
-    "nailong_sha256": "7b7449ea4309216cde4a72432fb867073989635cfea207e8d7ab517e0800991d",
-    "lag_sha256": "7b7449ea4309216cde4a72432fb867073989635cfea207e8d7ab517e0800991d",
+    "nailong_sha256": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
+    "lag_sha256": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
     "candidate_sha256": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
-    "target_pair_already_admitted": false
+    "target_pair_already_admitted": true
+  },
+  "host_carrier_status": {
+    "staged_on_nailong": true,
+    "root": "/opt/sub2api-nailong/inplace",
+    "systemd_unit": "sub2-nailong-inplace@.service",
+    "runner_sha256": "e69398990a130acd3a7fb4a2aa6132d6d9b4a00bcbbf52879fa0d67cd2272503",
+    "unit_present": true
   },
   "live": {
     "app": {
@@ -99,7 +106,11 @@
       },
       "stage": "core_backup_source_bound"
     },
-    "nailong_identity_sha": "7b7449ea4309216cde4a72432fb867073989635cfea207e8d7ab517e0800991d",
-    "lag_identity_sha": "7b7449ea4309216cde4a72432fb867073989635cfea207e8d7ab517e0800991d"
+    "nailong_identity_sha": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
+    "host_carrier": {
+      "runner_sha256": "e69398990a130acd3a7fb4a2aa6132d6d9b4a00bcbbf52879fa0d67cd2272503",
+      "unit_present": true
+    },
+    "lag_identity_sha": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3"
   }
 }

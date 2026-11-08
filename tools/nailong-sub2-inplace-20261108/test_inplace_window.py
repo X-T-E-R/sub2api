@@ -68,9 +68,12 @@ class FakeNailongOps:
             'appdata': go['appdata'],
         }
         self.timer_state = 'active'
+        self.fail_on_stop_ack = False
         self.fail_on_create = False
+        self.fail_new_container_stop_timeout = False
         self.fail_on_source_check = False
         self.fail_on_recover_source_check = False
+        self.original_start_calls = 0
         self.admitted_pairs = {
             (go['current_image'], go['current_revision']),
             (go['target_image'], go['target_revision']),
@@ -95,8 +98,8 @@ class FakeNailongOps:
                 'revision': self.active_sub2['revision'] if self.active_sub2 else None,
                 'source': json.loads(json.dumps(self.source_binding)),
             },
-            'nailong_identity_sha': iw.CURRENT_CORE_IDENTITY_SHA,
-            'lag_identity_sha': iw.CURRENT_CORE_IDENTITY_SHA,
+            'nailong_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
+            'lag_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
         }
 
     def admit_core_identity_pair(self, candidate_bytes, target_image, target_revision):
@@ -117,17 +120,20 @@ class FakeNailongOps:
         stopped = dict(self.active_sub2, name=retained_name, running=False)
         self.retained = stopped
         self.active_sub2 = None
+        if self.fail_on_stop_ack:
+            raise iw.InplaceError('ssh_connection_reset_after_remote_stop')
         return {'id': expected_id, 'retained_name': retained_name, 'exit_code': 0}
 
     def create_and_start_target(self, window, target_image, target_revision, env_list, appdata):
         if self.fail_on_create:
-            # Simulate a failed target container that was created under `sub2api-gcp` but exited unhealthy.
+            # Simulate a failed target container that was created under `sub2api-gcp`
+            still_running = bool(self.fail_new_container_stop_timeout)
             self.active_sub2 = {
                 'id': self.new_id,
                 'name': 'sub2api-gcp',
                 'image': target_image,
                 'revision': target_revision,
-                'running': False,
+                'running': still_running,
                 'health': 'unhealthy',
                 'started_at': self.new_started_at,
                 'restart_count': 1,
@@ -159,10 +165,19 @@ class FakeNailongOps:
 
     def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
         assert self.active_sub2 and self.active_sub2['id'] == new_container_id
+        if self.fail_new_container_stop_timeout:
+            # Simulate 120s stop timeout where the new container refuses to exit and remains Running
+            raise iw.InplaceError('new_container_stop_timeout_still_running')
         self.active_sub2 = None
-        return {'stopped_id': new_container_id, 'archived_as': failed_archive_name}
+        return {
+            'stopped_id': new_container_id,
+            'running': False,
+            'exit_code': 0,
+            'archived_as': failed_archive_name,
+        }
 
     def restore_and_start_original_container(self, original_id, retained_name):
+        self.original_start_calls += 1
         assert self.retained and self.retained['id'] == original_id
         self.active_sub2 = {
             'id': original_id,
@@ -253,7 +268,6 @@ class InplaceWindowTests(unittest.TestCase):
             self.assertEqual(result['app']['id'], ops.new_id)
             self.assertEqual(result['app']['image'], go['target_image'])
             self.assertEqual(result['app']['revision'], go['target_revision'])
-            # Daily backup source.json must be rebound to the new container ID and StartedAt (not stale ca2f68cf!)
             self.assertEqual(ops.source_binding['app']['id'], ops.new_id)
             self.assertEqual(ops.source_binding['app']['started_at'], ops.new_started_at)
             self.assertEqual(result['backup']['source']['app']['id'], ops.new_id)
@@ -262,6 +276,47 @@ class InplaceWindowTests(unittest.TestCase):
             self.assertEqual(result['redis_preserved'], go['redis']['id'])
             self.assertEqual(result['appdata_preserved'], go['appdata'])
             self.assertFalse(result['old_gcp_touched'])
+
+    def test_failure_fixture_lost_ack_on_stop_current_still_converges_via_recover(self):
+        """Revision (1): stop_and_rename_current succeeds remotely but loses ACK before current-stopped.json is written."""
+        go = make_valid_go()
+        ops = FakeNailongOps(go)
+        ops.fail_on_stop_ack = True
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaisesRegex(iw.InplaceError, 'ssh_connection_reset_after_remote_stop'):
+                iw.forward(go, ops, directory=tmp_path)
+
+            # Even though stop_and_rename_current raised before returning, stop-intent.json + live observation
+            # reconciled current-stopped.json and ran recover() to restore the original container and rebind source.json!
+            self.assertTrue((tmp_path / 'stop-intent.json').is_file())
+            self.assertTrue((tmp_path / 'stop-observed-after-error.json').is_file())
+            self.assertTrue((tmp_path / 'current-stopped.json').is_file())
+            self.assertTrue((tmp_path / 'recover-terminal.json').is_file())
+            self.assertIsNotNone(ops.active_sub2)
+            self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
+            self.assertTrue(ops.active_sub2['running'])
+            self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
+            self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
+
+    def test_failure_fixture_new_container_stop_timeout_refuses_dual_active_start_of_old(self):
+        """Revision (2): If the new container is still Running after stop timeout, never rename it or start the old container."""
+        go = make_valid_go()
+        ops = FakeNailongOps(go)
+        ops.fail_on_create = True
+        ops.fail_new_container_stop_timeout = True
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaisesRegex(iw.InplaceError, 'new_container_still_running_or_stop_unknown'):
+                iw.forward(go, ops, directory=tmp_path)
+
+            # Old container must NOT be started while the new container is still running (prevents dual-active).
+            self.assertEqual(ops.original_start_calls, 0)
+            self.assertFalse((tmp_path / 'recover-terminal.json').exists())
+            status = json.loads((tmp_path / 'status.json').read_text(encoding='utf8'))
+            self.assertEqual(status['stage'], 'recovery_requires_operator')
+            self.assertEqual(status['reason'], 'new_container_still_running_or_stop_unknown')
+            self.assertFalse(status['original_started'])
 
     def test_failure_fixture_target_start_failure_auto_recovers_original_container_and_rebinds_new_started_at(self):
         go = make_valid_go()
@@ -272,13 +327,10 @@ class InplaceWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(iw.InplaceError, 'target_exited_or_restarted'):
                 iw.forward(go, ops, directory=tmp_path)
 
-            # Verify automatic same-host recovery restored the original container on the same PG/Redis/appdata
             self.assertIsNotNone(ops.active_sub2)
             self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
             self.assertEqual(ops.active_sub2['image'], go['current_image'])
             self.assertTrue(ops.active_sub2['running'])
-            # Crucial: restarting the original container changes its Docker StartedAt;
-            # source.json must be rebound to recovered_started_at so daily backup does not fail!
             self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
             self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
             self.assertNotEqual(ops.source_binding['app']['started_at'], go['current_started_at'])
@@ -294,8 +346,6 @@ class InplaceWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(iw.InplaceError, 'source_app_identity_or_health_changed'):
                 iw.forward(go, ops, directory=tmp_path)
 
-            # Because daily backup source-check failed on the new container (e.g. if core_identity pair was not admitted),
-            # forward() automatically recovers back to the previous container and rebinds source.json to it.
             self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
             self.assertEqual(ops.active_sub2['image'], go['current_image'])
             self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
@@ -311,6 +361,7 @@ class InplaceWindowTests(unittest.TestCase):
             tmp_path = Path(tmp)
             with self.assertRaisesRegex(iw.InplaceError, 'thought_policy_drifted'):
                 iw.forward(go, ops, directory=tmp_path)
+            self.assertFalse((tmp_path / 'stop-intent.json').exists())
             self.assertFalse((tmp_path / 'current-stopped.json').exists())
             self.assertTrue(ops.active_sub2['running'])
             self.assertEqual(ops.active_sub2['id'], go['current_container_id'])

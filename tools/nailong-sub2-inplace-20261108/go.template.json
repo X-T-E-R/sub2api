@@ -43,5 +43,5 @@
   "dns_apply": false,
   "worker_apply": false,
   "rebind_daily_backup": true,
-  "admit_core_identity_pair": false
+  "admit_core_identity_pair": true
 }
