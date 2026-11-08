@@ -158,3 +158,116 @@ func TestAPIKeyService_TouchLastUsed_ConcurrentFirstTouchDeduplicated(t *testing
 	defer repo.mu.Unlock()
 	require.Equal(t, 1, repo.calls, "并发首次 touch 只应写库一次")
 }
+
+func TestAPIKeyService_TouchLastUsedAsync_NonBlockingAndBounded(t *testing.T) {
+	blockCh := make(chan struct{})
+	startedCh := make(chan struct{}, 2)
+	var calls int
+	var mu sync.Mutex
+
+	repo := &apiKeyRepoStub{
+		updateLastUsed: func(ctx context.Context, id int64, usedAt time.Time) error {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+			<-blockCh
+			return nil
+		},
+	}
+	svc := &APIKeyService{
+		apiKeyRepo:         repo,
+		lastUsedTouchSlots: make(chan struct{}, 1),
+	}
+
+	// 第一次异步 touch 占用唯一槽位并阻塞在慢 DB 上，但调用本身立即返回。
+	doneCh := make(chan struct{})
+	go func() {
+		svc.TouchLastUsedAsync(101)
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("TouchLastUsedAsync should not block caller")
+	}
+
+	select {
+	case <-startedCh:
+	case <-time.After(time.Second):
+		t.Fatal("expected background touch to start")
+	}
+
+	// 槽位已满时，另一个 Key 的异步 touch 应立即丢弃返回，不阻塞也不排队堆积。
+	svc.TouchLastUsedAsync(202)
+
+	close(blockCh)
+	require.Eventually(t, func() bool {
+		return len(svc.lastUsedTouchSlots) == 0
+	}, time.Second, 5*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, calls, "slot-full touch should be dropped without blocking")
+}
+
+func TestAPIKeyService_TouchLastUsedAsync_SameKeyDoesNotExhaustSlotsOrBlockOtherKeys(t *testing.T) {
+	blockCh := make(chan struct{})
+	startedIDs := make(chan int64, 4)
+
+	repo := &apiKeyRepoStub{
+		updateLastUsed: func(ctx context.Context, id int64, usedAt time.Time) error {
+			startedIDs <- id
+			<-blockCh
+			return nil
+		},
+	}
+	svc := &APIKeyService{
+		apiKeyRepo:         repo,
+		lastUsedTouchSlots: make(chan struct{}, 2),
+	}
+
+	// 同一 Key 在首次写库尚未完成前连续触发多次，只应占用 1 个并发槽位。
+	for i := 0; i < 10; i++ {
+		svc.TouchLastUsedAsync(101)
+	}
+	require.Eventually(t, func() bool {
+		return len(svc.lastUsedTouchSlots) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	// 另一个 Key 仍可正常获得剩余的第 2 个槽位，不会被同一 Key 的重复触发挤占。
+	svc.TouchLastUsedAsync(202)
+	require.Eventually(t, func() bool {
+		return len(startedIDs) == 2
+	}, time.Second, 5*time.Millisecond)
+
+	close(blockCh)
+	require.Eventually(t, func() bool {
+		return len(svc.lastUsedTouchSlots) == 0
+	}, time.Second, 5*time.Millisecond)
+	require.Len(t, repo.touchedIDs, 2)
+}
+
+func TestAPIKeyService_TouchLastUsedAsync_StructLiteralInitializesBoundedSlots(t *testing.T) {
+	blockCh := make(chan struct{})
+	defer close(blockCh)
+
+	repo := &apiKeyRepoStub{
+		updateLastUsed: func(ctx context.Context, id int64, usedAt time.Time) error {
+			<-blockCh
+			return nil
+		},
+	}
+	svc := &APIKeyService{apiKeyRepo: repo}
+
+	for i := 1; i <= defaultLastUsedTouchConcurrency+8; i++ {
+		svc.TouchLastUsedAsync(int64(i))
+	}
+
+	require.NotNil(t, svc.lastUsedTouchSlots)
+	require.Equal(t, defaultLastUsedTouchConcurrency, cap(svc.lastUsedTouchSlots))
+	require.Equal(t, defaultLastUsedTouchConcurrency, len(svc.lastUsedTouchSlots))
+}

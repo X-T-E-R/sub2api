@@ -52,6 +52,9 @@ const (
 	apiKeySortCurrentConcurrency = "current_concurrency"
 	// DB 写失败后的短退避，避免请求路径持续同步重试造成写风暴与高延迟。
 	apiKeyLastUsedFailBackoff = 5 * time.Second
+	// 异步刷新 last_used_at 的有界并发与超时上限。
+	defaultLastUsedTouchConcurrency = 16
+	apiKeyLastUsedTouchTimeout      = 2 * time.Second
 )
 
 // APIKeyUpdateFields 声明 APIKeyRepository.Update 允许写回的列。
@@ -308,7 +311,10 @@ type APIKeyService struct {
 	authInvalidationConnected atomic.Bool
 	authInvalidationFailures  atomic.Uint64
 	lastUsedTouchL1           sync.Map // keyID -> nextAllowedAt(time.Time)
+	lastUsedTouchInFlight     sync.Map // keyID -> struct{}
 	lastUsedTouchSF           singleflight.Group
+	lastUsedTouchSlots        chan struct{}
+	lastUsedTouchSlotsOnce    sync.Once
 }
 
 type APIKeyAuthLookupMetrics struct {
@@ -355,6 +361,7 @@ func NewAPIKeyService(
 		lookupConcurrency = cfg.APIKeyAuth.LookupConcurrency
 	}
 	svc.authLookupSlots = make(chan struct{}, lookupConcurrency)
+	svc.lastUsedTouchSlots = make(chan struct{}, defaultLastUsedTouchConcurrency)
 	svc.invalidAuthAbuse = newInvalidAuthAbuseLimiter(cfg)
 	return svc
 }
@@ -970,7 +977,7 @@ func (s *APIKeyService) ValidateKey(ctx context.Context, key string) (*APIKey, *
 // TouchLastUsed 通过防抖更新 api_keys.last_used_at，减少高频写放大。
 // 该操作为尽力而为，不应阻塞主请求链路。
 func (s *APIKeyService) TouchLastUsed(ctx context.Context, keyID int64) error {
-	if keyID <= 0 {
+	if s == nil || keyID <= 0 || s.apiKeyRepo == nil {
 		return nil
 	}
 
@@ -997,6 +1004,52 @@ func (s *APIKeyService) TouchLastUsed(ctx context.Context, keyID int64) error {
 		return nil, nil
 	})
 	return err
+}
+
+// TouchLastUsedAsync 在请求主链路之外异步更新 api_keys.last_used_at。
+// 采用防抖预检、单 Key 在途去重与有界并发槽位，槽位占满时直接丢弃，绝不阻塞模型请求。
+func (s *APIKeyService) TouchLastUsedAsync(keyID int64) {
+	if s == nil || keyID <= 0 || s.apiKeyRepo == nil {
+		return
+	}
+
+	now := time.Now()
+	if v, ok := s.lastUsedTouchL1.Load(keyID); ok {
+		if nextAllowedAt, ok := v.(time.Time); ok && now.Before(nextAllowedAt) {
+			return
+		}
+	}
+
+	if _, loaded := s.lastUsedTouchInFlight.LoadOrStore(keyID, struct{}{}); loaded {
+		return
+	}
+
+	slots := s.ensureLastUsedTouchSlots()
+	select {
+	case slots <- struct{}{}:
+	default:
+		s.lastUsedTouchInFlight.Delete(keyID)
+		return
+	}
+
+	go func() {
+		defer func() {
+			<-slots
+			s.lastUsedTouchInFlight.Delete(keyID)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), apiKeyLastUsedTouchTimeout)
+		defer cancel()
+		_ = s.TouchLastUsed(ctx, keyID)
+	}()
+}
+
+func (s *APIKeyService) ensureLastUsedTouchSlots() chan struct{} {
+	s.lastUsedTouchSlotsOnce.Do(func() {
+		if s.lastUsedTouchSlots == nil {
+			s.lastUsedTouchSlots = make(chan struct{}, defaultLastUsedTouchConcurrency)
+		}
+	})
+	return s.lastUsedTouchSlots
 }
 
 // IncrementUsage 增加API Key使用次数（可选：用于统计）
