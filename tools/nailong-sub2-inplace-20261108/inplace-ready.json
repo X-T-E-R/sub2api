@@ -4,6 +4,7 @@
   "app_restarted": false,
   "dependencies_and_current_app_match": true,
   "current_backup_bound_and_active": true,
+  "docker_api141_verified": true,
   "target_image_staged_on_nailong": {
     "id": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
     "revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985",
@@ -21,7 +22,7 @@
     "staged_on_nailong": true,
     "root": "/opt/sub2api-nailong/inplace",
     "systemd_unit": "sub2-nailong-inplace@.service",
-    "runner_sha256": "e69398990a130acd3a7fb4a2aa6132d6d9b4a00bcbbf52879fa0d67cd2272503",
+    "runner_sha256": "8a131b0afbe4e78070c6998a3db360a7eee6ebf9d6baa1f932de60c5c443f1f5",
     "unit_present": true
   },
   "live": {
@@ -31,6 +32,7 @@
       "image": "sha256:8a087d23f70de512fcb9b064b9b088fa453650dbf2e8d4b05929f9130c0937a7",
       "revision": "fc899738487a38a7d40664fdf92bc90375fbaf7b",
       "running": true,
+      "status": "running",
       "health": "healthy",
       "started_at": "2026-11-08T07:10:04.155139036Z",
       "restart_count": 0,
@@ -42,6 +44,7 @@
       "image": "sha256:3f4989ad6f4a9d8859fdea63e719881fc9fbda8c3ec94afb6d34d470b751ae80",
       "revision": "",
       "running": true,
+      "status": "running",
       "health": "healthy",
       "started_at": "2026-11-07T15:46:02.058810734Z",
       "restart_count": 0,
@@ -53,6 +56,7 @@
       "image": "sha256:7673a976238bb420ad39d3db81bfd7aeccf053641ae93537e818594af4580298",
       "revision": "",
       "running": true,
+      "status": "running",
       "health": "healthy",
       "started_at": "2026-11-07T15:27:13.0195041Z",
       "restart_count": 0,
@@ -64,6 +68,7 @@
       "image": "sha256:ffc97005f5ff4d27b94b896c2540e5931c38e81c96dbf5bdc22a0dae5a2930a0",
       "revision": "1628d628632c0023a65697d71ca0097d00a9ed79",
       "running": true,
+      "status": "running",
       "health": null,
       "started_at": "2026-11-07T15:15:47.669240095Z",
       "restart_count": 0,
@@ -107,10 +112,18 @@
       "stage": "core_backup_source_bound"
     },
     "nailong_identity_sha": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
-    "host_carrier": {
-      "runner_sha256": "e69398990a130acd3a7fb4a2aa6132d6d9b4a00bcbbf52879fa0d67cd2272503",
-      "unit_present": true
+    "lag_identity_sha": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3",
+    "docker_api141_probe": {
+      "ok": true,
+      "api_version": "1.41",
+      "app_id": "ca2f68cfa270b4a2fe3f95a5fe054b7f477d4f652082b14109f1b72987e7c72b",
+      "app_restart_policy": "unless-stopped",
+      "target_image_id": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+      "target_image_revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985"
     },
-    "lag_identity_sha": "4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3"
+    "host_carrier": {
+      "runner_sha256": "8a131b0afbe4e78070c6998a3db360a7eee6ebf9d6baa1f932de60c5c443f1f5",
+      "unit_present": true
+    }
   }
 }

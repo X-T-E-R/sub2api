@@ -62,6 +62,7 @@ TERMINAL_STAGES = {'forward_terminal', 'recovered_to_previous_image'}
 WINDOW_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{5,63}$')
 HEX64_RE = re.compile(r'^[0-9a-f]{64}$')
 HEX40_RE = re.compile(r'^[0-9a-f]{40}$')
+SAFE_LABEL_RE = re.compile(r'^(?:[A-Za-z_][A-Za-z0-9_]{0,80}|docker_api_\d{3}(?::[A-Za-z0-9_./: -]{1,200})?)$')
 
 SYSTEMD_UNIT_CONTENT = """[Unit]
 Description=Sub2API Nailong Same-Host In-Place Release/Recover (%i)
@@ -82,6 +83,29 @@ StandardError=journal
 
 class InplaceError(Exception):
     pass
+
+
+def error_label(exc):
+    """Preserve specific sanitized error codes from InplaceError, migration.Failure, and contract.ContractError.
+
+    Never collapses a bounded label into generic `'Failure'` or leaks raw credentials/SQL/env text.
+    """
+    if isinstance(exc, InplaceError):
+        text = ' '.join(str(exc).split())
+        if text and len(text) <= 220 and not any(tok in text for tok in ('PASSWORD', 'SECRET', 'TOKEN', 'Bearer', 'BEGIN ')):
+            return text
+        return 'inplace_error'
+    cls_name = type(exc).__name__
+    text = ' '.join(str(exc).split())
+    if text.startswith('inplace_failed='):
+        text = text.split('inplace_failed=', 1)[1].strip()
+    elif text.startswith('migration_failed='):
+        text = text.split('migration_failed=', 1)[1].strip()
+    if cls_name in ('Failure', 'ContractError') and SAFE_LABEL_RE.fullmatch(text):
+        return text
+    if SAFE_LABEL_RE.fullmatch(text):
+        return text
+    return cls_name
 
 
 def claim(directory, name, payload):
@@ -279,7 +303,7 @@ def recover(go, ops, directory=None):
     try:
         state = ops.observe_containers(go['current_container_id'], retained_name)
     except Exception as obs_err:
-        label = str(obs_err) if isinstance(obs_err, InplaceError) else type(obs_err).__name__
+        label = error_label(obs_err)
         record_event(directory, 'recovery_requires_operator', {
             'reason': 'container_state_unknown',
             'error': label,
@@ -311,7 +335,7 @@ def recover(go, ops, directory=None):
         try:
             stopped_new = ops.stop_and_remove_new_container(active['id'], failed_archive)
         except Exception as stop_err:
-            label = str(stop_err) if isinstance(stop_err, InplaceError) else type(stop_err).__name__
+            label = error_label(stop_err)
             record_event(directory, 'recovery_requires_operator', {
                 'reason': 'new_container_still_running_or_stop_unknown',
                 'new_container_id': active['id'],
@@ -467,7 +491,7 @@ def forward(go, ops, template_name=None, directory=None):
         claim(directory, 'forward-terminal.json', body)
         return body
     except Exception as error:
-        label = str(error) if isinstance(error, InplaceError) else type(error).__name__
+        label = error_label(error)
         write_atomic(directory, 'forward-error.json', {'error': label})
         record_event(directory, 'forward_error_triggering_recover', {'error': label})
         # Key fix (1): If stop-intent.json was written, never skip recover merely because
@@ -503,16 +527,23 @@ def ready(ops, template):
         host_carrier.get('runner_sha256') == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         and host_carrier.get('unit_present') is True
     )
+    docker_api141 = live.get('docker_api141_probe') or {}
+    api141_ok = (
+        docker_api141.get('ok') is True
+        and docker_api141.get('app_id') == template['current_container_id']
+        and docker_api141.get('target_image_id') == template['target_image']
+    )
     return {
         'stage': (
             'inplace_stage_verified_awaiting_parent_go'
-            if (deps_ok and backup_ok and identity_admitted_for_target and carrier_staged)
+            if (deps_ok and backup_ok and identity_admitted_for_target and carrier_staged and api141_ok)
             else 'inplace_not_ready'
         ),
         'go_executed': False,
         'app_restarted': False,
         'dependencies_and_current_app_match': deps_ok,
         'current_backup_bound_and_active': backup_ok,
+        'docker_api141_verified': api141_ok,
         'target_image_staged_on_nailong': live.get('loaded_target'),
         'core_identity_status': {
             'nailong_sha256': live.get('nailong_identity_sha'),
@@ -530,18 +561,70 @@ def ready(ops, template):
     }
 
 
+def bind_nailong_docker_api141(migration_mod, contract_mod):
+    """Bind `migration.api` to Docker Engine API `/v1.41` (matching `remote_entry.py`).
+
+    Nailong's `tools/migration.py` defaults to `/v1.45`, which Nailong's Docker 20.10.24
+    daemon rejects with HTTP 400 (`Maximum supported API version is 1.41`).
+    Importing `migration` without binding `/v1.41` caused `migration.inspect` to fail
+    with `Failure('docker_api_failed')`.
+    """
+    def _docker_api(method, path, body=None):
+        conn = migration_mod.DockerConnection()
+        try:
+            payload = json.dumps(body).encode('utf8') if body is not None else None
+            conn.request(method, '/v1.41' + path, payload, {'Content-Type': 'application/json'})
+            res = conn.getresponse()
+            raw = res.read()
+            if res.status not in (200, 201, 204):
+                raise InplaceError(contract_mod.docker_failure_label(res.status, raw))
+            return raw
+        finally:
+            conn.close()
+
+    migration_mod.api = _docker_api
+    return _docker_api
+
+
 class LocalNailongOps:
     """Runs directly on Nailong (inside `sub2-nailong-inplace@<window>.service`) with zero SSH dependencies."""
 
-    def __init__(self):
-        if '/opt/sub2api-nailong/tools' not in sys.path:
-            sys.path.insert(0, '/opt/sub2api-nailong/tools')
+    def __init__(self, tools_dir='/opt/sub2api-nailong/tools'):
+        if tools_dir and tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import contract
+        import migration
+        self._contract = contract
+        self._migration = migration
+        bind_nailong_docker_api141(self._migration, self._contract)
+
+    def api141(self, method, path, body=None):
+        return self._migration.api(method, path, body)
+
+    def inspect_via_api141(self, ref):
+        return json.loads(self.api141('GET', '/containers/' + ref + '/json'))
+
+    def probe_docker_api141(self, expected_app_id, expected_target_image):
+        """Read-only probe of `/v1.41/containers/.../json` and `/v1.41/images/.../json`."""
+        app = self.inspect_via_api141(APP_NAME)
+        img = json.loads(self.api141('GET', '/images/' + expected_target_image + '/json'))
+        rev = ((img.get('Config') or {}).get('Labels') or {}).get('org.opencontainers.image.revision')
+        return {
+            'ok': app.get('Id') == expected_app_id and img.get('Id') == expected_target_image,
+            'api_version': '1.41',
+            'app_id': app.get('Id'),
+            'app_restart_policy': ((app.get('HostConfig') or {}).get('RestartPolicy') or {}).get('Name'),
+            'target_image_id': img.get('Id'),
+            'target_image_revision': rev,
+        }
 
     def _inspect_container(self, ref):
-        proc = subprocess.run(['docker', 'inspect', ref], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        if proc.returncode != 0:
-            return None
-        d = json.loads(proc.stdout)[0]
+        try:
+            d = self.inspect_via_api141(ref)
+        except InplaceError as exc:
+            if str(exc).startswith('docker_api_404'):
+                return None
+            raise
         mounts = [m['Source'] for m in (d.get('Mounts') or []) if m.get('Destination') == '/app/data']
         return {
             'id': d['Id'],
@@ -564,10 +647,10 @@ class LocalNailongOps:
             if img_id in seen:
                 continue
             seen.add(img_id)
-            p = subprocess.run(['docker', 'image', 'inspect', img_id], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            if p.returncode != 0:
+            try:
+                info = json.loads(self.api141('GET', '/images/' + img_id + '/json'))
+            except InplaceError:
                 continue
-            info = json.loads(p.stdout)[0]
             rev = ((info['Config'].get('Labels') or {}).get('org.opencontainers.image.revision') or '')
             if rev == target_revision:
                 loaded = {'id': info['Id'], 'revision': rev, 'repo_tags': info.get('RepoTags') or []}
@@ -591,8 +674,16 @@ class LocalNailongOps:
         runner_path = Path(NAILONG_INPLACE_ROOT) / 'inplace_window.py'
         unit_path = Path(NAILONG_SYSTEMD_UNIT_PATH)
 
+        app_info = self._inspect_container(APP_NAME)
+        api141_probe = None
+        if app_info and loaded:
+            try:
+                api141_probe = self.probe_docker_api141(app_info['id'], loaded['id'])
+            except Exception as exc:
+                api141_probe = {'ok': False, 'error': error_label(exc)}
+
         return {
-            'app': self._inspect_container(APP_NAME),
+            'app': app_info,
             'pg': self._inspect_container(PG_NAME),
             'redis': self._inspect_container(REDIS_NAME),
             'axon_nailong': self._inspect_container(AXON_NAME),
@@ -602,6 +693,7 @@ class LocalNailongOps:
             'source_check': sc_out,
             'nailong_identity_sha': id_sha,
             'lag_identity_sha': id_sha,
+            'docker_api141_probe': api141_probe,
             'host_carrier': {
                 'runner_sha256': hashlib.sha256(runner_path.read_bytes()).hexdigest() if runner_path.is_file() else None,
                 'unit_present': unit_path.is_file(),
@@ -618,7 +710,7 @@ class LocalNailongOps:
         return {'nailong_sha256': sha, 'pair': [target_image, target_revision]}
 
     def capture_current_container_spec(self, expected_id, expected_appdata):
-        d = json.loads(subprocess.check_output(['docker', 'inspect', APP_NAME], text=True))[0]
+        d = self.inspect_via_api141(APP_NAME)
         if d['Id'] != expected_id:
             raise InplaceError('current_container_id_mismatch')
         mounts = [m['Source'] for m in (d.get('Mounts') or []) if m.get('Destination') == '/app/data']
@@ -631,31 +723,29 @@ class LocalNailongOps:
         return {'id': d['Id'], 'env': env, 'appdata': mounts[0]}
 
     def stop_and_rename_current(self, expected_id, retained_name):
-        import migration
-        app = migration.inspect(APP_NAME)
+        app = self.inspect_via_api141(APP_NAME)
         if app['Id'] != expected_id:
             raise InplaceError('stop_identity_mismatch')
-        migration.api('POST', '/containers/' + app['Id'] + '/update', {'RestartPolicy': {'Name': 'no'}})
+        self.api141('POST', '/containers/' + app['Id'] + '/update', {'RestartPolicy': {'Name': 'no'}})
         if app['State']['Running']:
-            migration.api('POST', '/containers/' + app['Id'] + '/kill?signal=SIGTERM')
+            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGTERM')
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            cur = migration.inspect(app['Id'])
+            cur = self.inspect_via_api141(app['Id'])
             if not cur['State']['Running']:
-                migration.api('POST', '/containers/' + app['Id'] + '/rename?name=' + retained_name)
+                self.api141('POST', '/containers/' + app['Id'] + '/rename?name=' + retained_name)
                 return {'id': app['Id'], 'retained_name': retained_name, 'exit_code': cur['State']['ExitCode']}
             time.sleep(2)
         raise InplaceError('graceful_stop_timeout')
 
     def create_and_start_target(self, window, target_image, target_revision, env_list, appdata):
-        import contract, migration
-        img_info = json.loads(migration.api('GET', '/images/' + target_image + '/json'))
+        img_info = json.loads(self.api141('GET', '/images/' + target_image + '/json'))
         rev = ((img_info.get('Config') or {}).get('Labels') or {}).get('org.opencontainers.image.revision')
         if img_info.get('Id') != target_image or rev != target_revision:
             raise InplaceError('target_image_verify_failed')
 
         mount = appdata + ':/app/data:rw'
-        body = contract.api141_create_body(
+        body = self._contract.api141_create_body(
             target_image,
             env_list,
             {'task53.inplace_window': window},
@@ -663,17 +753,17 @@ class LocalNailongOps:
             APP_NETWORK,
             'unless-stopped',
         )
-        created = json.loads(migration.api('POST', '/containers/create?name=' + APP_NAME, body))
+        created = json.loads(self.api141('POST', '/containers/create?name=' + APP_NAME, body))
         cid = created['Id']
-        migration.api('POST', '/networks/' + DEPENDENCY_NETWORK + '/connect', {
+        self.api141('POST', '/networks/' + DEPENDENCY_NETWORK + '/connect', {
             'Container': cid,
             'EndpointConfig': {'Aliases': [ALIAS]},
         })
-        migration.api('POST', '/containers/' + cid + '/start')
+        self.api141('POST', '/containers/' + cid + '/start')
 
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            cur = migration.inspect(cid)
+            cur = self.inspect_via_api141(cid)
             if not cur['State']['Running'] or cur.get('RestartCount', 0) > 0:
                 raise InplaceError('target_exited_or_restarted')
             if (cur['State'].get('Health') or {}).get('Status') == 'healthy':
@@ -702,23 +792,21 @@ class LocalNailongOps:
         }
 
     def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
-        import migration
-        cur = migration.inspect(new_container_id)
-        migration.api('POST', '/containers/' + new_container_id + '/update', {'RestartPolicy': {'Name': 'no'}})
+        cur = self.inspect_via_api141(new_container_id)
+        self.api141('POST', '/containers/' + new_container_id + '/update', {'RestartPolicy': {'Name': 'no'}})
         if cur['State']['Running']:
-            migration.api('POST', '/containers/' + new_container_id + '/kill?signal=SIGTERM')
+            self.api141('POST', '/containers/' + new_container_id + '/kill?signal=SIGTERM')
         deadline = time.monotonic() + 120
         info = cur
         while time.monotonic() < deadline:
-            info = migration.inspect(new_container_id)
+            info = self.inspect_via_api141(new_container_id)
             if not info['State']['Running']:
                 break
             time.sleep(2)
-        # Key fix (2): Strictly verify the new container has exited before renaming/allowing old container start.
         if info['State']['Running']:
             raise InplaceError('new_container_stop_timeout_still_running')
         if info['Name'].lstrip('/') == APP_NAME:
-            migration.api('POST', '/containers/' + new_container_id + '/rename?name=' + failed_archive_name)
+            self.api141('POST', '/containers/' + new_container_id + '/rename?name=' + failed_archive_name)
         return {
             'stopped_id': new_container_id,
             'running': False,
@@ -727,20 +815,19 @@ class LocalNailongOps:
         }
 
     def restore_and_start_original_container(self, original_id, retained_name):
-        import migration
         active = self._inspect_container(APP_NAME)
         if active is not None and active['id'] != original_id:
             raise InplaceError('active_sub2_occupied_by_other_container')
-        info = migration.inspect(original_id)
+        info = self.inspect_via_api141(original_id)
         if info['Name'].lstrip('/') != APP_NAME:
-            migration.api('POST', '/containers/' + original_id + '/rename?name=' + APP_NAME)
-        migration.api('POST', '/containers/' + original_id + '/update', {'RestartPolicy': {'Name': 'unless-stopped'}})
+            self.api141('POST', '/containers/' + original_id + '/rename?name=' + APP_NAME)
+        self.api141('POST', '/containers/' + original_id + '/update', {'RestartPolicy': {'Name': 'unless-stopped'}})
         if not info['State']['Running']:
-            migration.api('POST', '/containers/' + original_id + '/start')
+            self.api141('POST', '/containers/' + original_id + '/start')
 
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            cur = migration.inspect(original_id)
+            cur = self.inspect_via_api141(original_id)
             if not cur['State']['Running']:
                 raise InplaceError('original_container_not_running')
             if (cur['State'].get('Health') or {}).get('Status') == 'healthy':
@@ -824,73 +911,11 @@ class RemoteNailongOps:
 
     def observe_live(self, target_revision):
         script = r'''
-import hashlib, json, subprocess
-from pathlib import Path
-
-def inspect(name):
-    p = subprocess.run(["docker", "inspect", name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    if p.returncode != 0:
-        return None
-    d = json.loads(p.stdout)[0]
-    mounts = [m["Source"] for m in (d.get("Mounts") or []) if m.get("Destination") == "/app/data"]
-    return {
-        "id": d["Id"],
-        "name": d["Name"].lstrip("/"),
-        "image": d["Image"],
-        "revision": ((d["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") or ""),
-        "running": bool(d["State"].get("Running")),
-        "health": (d["State"].get("Health") or {}).get("Status"),
-        "started_at": d["State"].get("StartedAt"),
-        "restart_count": d.get("RestartCount", 0),
-        "appdata": mounts[0] if len(mounts) == 1 else None,
-    }
-
-want_rev = %r
-ids = subprocess.check_output(["docker", "image", "ls", "-q", "--no-trunc"], text=True).split()
-loaded = None
-seen = set()
-for img_id in ids:
-    if img_id in seen:
-        continue
-    seen.add(img_id)
-    p = subprocess.run(["docker", "image", "inspect", img_id], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    if p.returncode != 0:
-        continue
-    info = json.loads(p.stdout)[0]
-    rev = ((info["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") or "")
-    if rev == want_rev:
-        loaded = {"id": info["Id"], "revision": rev, "repo_tags": info.get("RepoTags") or []}
-        break
-
-sql = "SELECT value FROM settings WHERE key = 'antigravity_thought_policy';"
-p_sql = subprocess.run(["docker", "exec", "-i", "sub2api-nailong-postgres", "psql", "-X", "-qAt", "-U", "sub2api", "-d", "sub2api"],
-                       input=sql.encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-thought_policy = json.loads(p_sql.stdout.decode().strip()) if p_sql.returncode == 0 and p_sql.stdout.strip() else None
-
-timer = subprocess.run(["systemctl", "is-active", "sub2-core-backup.timer"], stdout=subprocess.PIPE, text=True).stdout.strip()
-sc = subprocess.run(["python3", "-B", "/opt/sub2-core-backup/core-backup/core_backup.py", "source-check", "--binding", "/etc/sub2-core-backup/source.json"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-sc_out = json.loads(sc.stdout) if sc.returncode == 0 and sc.stdout.strip() else {"error": sc.stderr.strip()}
-id_path = Path("/opt/sub2-core-backup/core-backup/core_identity.py")
-id_sha = hashlib.sha256(id_path.read_bytes()).hexdigest() if id_path.is_file() else None
-runner_path = Path("/opt/sub2api-nailong/inplace/inplace_window.py")
-unit_path = Path("/etc/systemd/system/sub2-nailong-inplace@.service")
-
-print(json.dumps({
-    "app": inspect("sub2api-gcp"),
-    "pg": inspect("sub2api-nailong-postgres"),
-    "redis": inspect("sub2api-nailong-redis"),
-    "axon_nailong": inspect("task51-gcp-nailong-usw1"),
-    "loaded_target": loaded,
-    "thought_policy": thought_policy,
-    "backup_timer": timer,
-    "source_check": sc_out,
-    "nailong_identity_sha": id_sha,
-    "host_carrier": {
-        "runner_sha256": hashlib.sha256(runner_path.read_bytes()).hexdigest() if runner_path.is_file() else None,
-        "unit_present": unit_path.is_file(),
-    },
-}))
+import json, sys
+sys.path.insert(0, "/opt/sub2api-nailong/inplace")
+import inplace_window as iw
+ops = iw.LocalNailongOps()
+print(json.dumps(ops.observe_live(%r)))
 ''' % (target_revision,)
         data = self._json_py(self.TARGET_SSH, script, timeout=60)
         lag_sha_script = (
@@ -948,10 +973,6 @@ print(json.dumps({"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}))
 
     def stage_host_carrier(self, template):
         """Pre-stage the host-resident runner, systemd unit, and dual-end core_identity admission without touching live Sub2."""
-        live_before = self.observe_live(template['target_revision'])
-        verify_dependencies_and_policy(live_before, template)
-        verify_live_current_app(live_before, template)
-
         candidate_bytes = CANDIDATE_CORE_IDENTITY.read_bytes()
         admit_res = self.admit_core_identity_pair(candidate_bytes, template['target_image'], template['target_revision'])
 
@@ -1008,17 +1029,20 @@ print(json.dumps({
         )
         staged_info = self._json_py(self.TARGET_SSH, install_script, timeout=60)
 
-        # Verify live Sub2 container and daily backup source-check are completely untouched after staging.
+        # Verify live Sub2 container, daily backup source-check, and LocalNailongOps /v1.41 API probe are healthy.
         live_after = self.observe_live(template['target_revision'])
         verify_dependencies_and_policy(live_after, template)
         verify_live_current_app(live_after, template)
         if (live_after.get('source_check') or {}).get('stage') != 'core_backup_source_bound':
             raise InplaceError('source_check_broken_after_stage')
+        if (live_after.get('docker_api141_probe') or {}).get('ok') is not True:
+            raise InplaceError('docker_api141_probe_failed')
 
         return {
             'stage': 'host_carrier_and_identity_staged_without_restart',
             'admitted_identity': admit_res,
             'host_carrier': staged_info,
+            'docker_api141_probe': live_after['docker_api141_probe'],
             'live_app_unchanged': live_after['app'],
             'backup_timer': live_after['backup_timer'],
             'source_check': live_after['source_check'],
@@ -1124,6 +1148,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        label = str(exc) if isinstance(exc, InplaceError) else type(exc).__name__
-        print('inplace_failed=' + label, file=sys.stderr)
+        print('inplace_failed=' + error_label(exc), file=sys.stderr)
         raise SystemExit(1) from None

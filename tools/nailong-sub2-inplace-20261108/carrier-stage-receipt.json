@@ -9,8 +9,16 @@
     ]
   },
   "host_carrier": {
-    "runner_sha256": "e69398990a130acd3a7fb4a2aa6132d6d9b4a00bcbbf52879fa0d67cd2272503",
+    "runner_sha256": "8a131b0afbe4e78070c6998a3db360a7eee6ebf9d6baa1f932de60c5c443f1f5",
     "unit_present": true
+  },
+  "docker_api141_probe": {
+    "ok": true,
+    "api_version": "1.41",
+    "app_id": "ca2f68cfa270b4a2fe3f95a5fe054b7f477d4f652082b14109f1b72987e7c72b",
+    "app_restart_policy": "unless-stopped",
+    "target_image_id": "sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61",
+    "target_image_revision": "1d14bbdc38c25e4279f6948c7128c4a43e6ef985"
   },
   "live_app_unchanged": {
     "id": "ca2f68cfa270b4a2fe3f95a5fe054b7f477d4f652082b14109f1b72987e7c72b",
@@ -18,6 +26,7 @@
     "image": "sha256:8a087d23f70de512fcb9b064b9b088fa453650dbf2e8d4b05929f9130c0937a7",
     "revision": "fc899738487a38a7d40664fdf92bc90375fbaf7b",
     "running": true,
+    "status": "running",
     "health": "healthy",
     "started_at": "2026-11-08T07:10:04.155139036Z",
     "restart_count": 0,

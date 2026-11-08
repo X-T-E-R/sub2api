@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Unit & failure-fixture tests for Nailong same-host in-place Sub2 release & recovery carrier."""
+import io
 import json
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 import inplace_window as iw
 
@@ -100,6 +104,12 @@ class FakeNailongOps:
             },
             'nailong_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
             'lag_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
+            'docker_api141_probe': {
+                'ok': True,
+                'api_version': '1.41',
+                'app_id': self.current_id,
+                'target_image_id': self.go['target_image'],
+            },
         }
 
     def admit_core_identity_pair(self, candidate_bytes, target_image, target_revision):
@@ -126,7 +136,6 @@ class FakeNailongOps:
 
     def create_and_start_target(self, window, target_image, target_revision, env_list, appdata):
         if self.fail_on_create:
-            # Simulate a failed target container that was created under `sub2api-gcp`
             still_running = bool(self.fail_new_container_stop_timeout)
             self.active_sub2 = {
                 'id': self.new_id,
@@ -166,7 +175,6 @@ class FakeNailongOps:
     def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
         assert self.active_sub2 and self.active_sub2['id'] == new_container_id
         if self.fail_new_container_stop_timeout:
-            # Simulate 120s stop timeout where the new container refuses to exit and remains Running
             raise iw.InplaceError('new_container_stop_timeout_still_running')
         self.active_sub2 = None
         return {
@@ -231,6 +239,134 @@ class FakeNailongOps:
         return self.timer_state
 
 
+class FakeDocker20Daemon:
+    """Simulates Nailong's Docker 20.10.24 Unix socket daemon: rejects `/v1.45` with HTTP 400 and serves `/v1.41`."""
+
+    def __init__(self, go):
+        self.go = go
+        self.requests = []
+        self.containers = {
+            go['current_container_id']: {
+                'Id': go['current_container_id'],
+                'Name': '/sub2api-gcp',
+                'Image': go['current_image'],
+                'Config': {
+                    'Labels': {'org.opencontainers.image.revision': go['current_revision']},
+                    'Env': ['JWT_SECRET=s1', 'TOTP_ENCRYPTION_KEY=t1'],
+                },
+                'State': {
+                    'Running': True,
+                    'Status': 'running',
+                    'ExitCode': 0,
+                    'StartedAt': go['current_started_at'],
+                    'Health': {'Status': 'healthy'},
+                },
+                'RestartCount': 0,
+                'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped'}},
+                'Mounts': [{'Destination': '/app/data', 'Source': go['appdata']}],
+            },
+        }
+        self.images = {
+            go['target_image']: {
+                'Id': go['target_image'],
+                'RepoTags': ['sub2api:1d14bbdc3'],
+                'Config': {'Labels': {'org.opencontainers.image.revision': go['target_revision']}},
+            },
+        }
+        self.new_id = 'ab' * 32
+
+    def resolve_container(self, ref):
+        if ref in self.containers:
+            return self.containers[ref]
+        for c in self.containers.values():
+            if c['Name'].lstrip('/') == ref:
+                return c
+        return None
+
+    def handle(self, method, path, payload):
+        self.requests.append((method, path, payload))
+        if not path.startswith('/v1.41/'):
+            version = path.split('/', 2)[1] if path.startswith('/v') else 'unknown'
+            msg = f'client version {version.lstrip("v")} is too new. Maximum supported API version is 1.41'
+            return 400, json.dumps({'message': msg}).encode('utf8')
+
+        sub = path[len('/v1.41'):]
+        if method == 'GET' and sub.startswith('/containers/') and sub.endswith('/json'):
+            ref = sub[len('/containers/'):-len('/json')]
+            c = self.resolve_container(ref)
+            if not c:
+                return 404, json.dumps({'message': f'No such container: {ref}'}).encode('utf8')
+            return 200, json.dumps(c).encode('utf8')
+
+        if method == 'GET' and sub.startswith('/images/') and sub.endswith('/json'):
+            ref = sub[len('/images/'):-len('/json')]
+            img = self.images.get(ref)
+            if not img:
+                return 404, json.dumps({'message': f'No such image: {ref}'}).encode('utf8')
+            return 200, json.dumps(img).encode('utf8')
+
+        if method == 'POST' and sub.startswith('/containers/') and sub.endswith('/update'):
+            ref = sub[len('/containers/'):-len('/update')]
+            c = self.resolve_container(ref)
+            body = json.loads(payload.decode('utf8'))
+            c['HostConfig']['RestartPolicy'] = body['RestartPolicy']
+            return 200, b'{"Warnings":null}'
+
+        if method == 'POST' and sub.startswith('/containers/') and '/kill?' in sub:
+            ref = sub[len('/containers/'):sub.index('/kill?')]
+            c = self.resolve_container(ref)
+            c['State']['Running'] = False
+            c['State']['Status'] = 'exited'
+            c['State']['ExitCode'] = 0
+            return 204, b''
+
+        if method == 'POST' and sub.startswith('/containers/') and '/rename?name=' in sub:
+            ref, new_name = sub[len('/containers/'):].split('/rename?name=', 1)
+            c = self.resolve_container(ref)
+            c['Name'] = '/' + new_name
+            return 204, b''
+
+        if method == 'POST' and sub == '/containers/create?name=sub2api-gcp':
+            body = json.loads(payload.decode('utf8'))
+            # Docker 20 API 1.41 rejects >1 EndpointsConfig entry at create time
+            if len(body.get('NetworkingConfig', {}).get('EndpointsConfig', {})) != 1:
+                return 400, json.dumps({'message': 'Container cannot be connected to network endpoints'}).encode('utf8')
+            self.containers[self.new_id] = {
+                'Id': self.new_id,
+                'Name': '/sub2api-gcp',
+                'Image': body['Image'],
+                'Config': {
+                    'Labels': {'org.opencontainers.image.revision': self.go['target_revision']},
+                    'Env': body.get('Env', []),
+                },
+                'State': {
+                    'Running': False,
+                    'Status': 'created',
+                    'ExitCode': 0,
+                    'StartedAt': '2026-11-08T13:20:00.000000000Z',
+                    'Health': {'Status': 'healthy'},
+                },
+                'RestartCount': 0,
+                'HostConfig': body['HostConfig'],
+                'Mounts': [{'Destination': '/app/data', 'Source': self.go['appdata']}],
+            }
+            return 201, json.dumps({'Id': self.new_id, 'Warnings': []}).encode('utf8')
+
+        if method == 'POST' and sub == '/networks/sub2api-nailong/connect':
+            return 200, b''
+
+        if method == 'POST' and sub.startswith('/containers/') and sub.endswith('/start'):
+            ref = sub[len('/containers/'):-len('/start')]
+            c = self.resolve_container(ref)
+            c['State']['Running'] = True
+            c['State']['Status'] = 'running'
+            if c['Id'] == self.go['current_container_id']:
+                c['State']['StartedAt'] = '2026-11-08T13:21:00.000000000Z'
+            return 204, b''
+
+        return 500, json.dumps({'message': f'Unhandled {method} {path}'}).encode('utf8')
+
+
 class InplaceWindowTests(unittest.TestCase):
     def test_validate_go_refuses_template_and_scope_violations(self):
         go = make_valid_go()
@@ -259,6 +395,111 @@ class InplaceWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(iw.InplaceError, 'protected_unit_stop_forbidden'):
                 iw.assert_stoppable(protected)
 
+    def test_error_label_preserves_specific_sanitized_codes_and_never_generic_failure(self):
+        class Failure(Exception):
+            pass
+
+        class ContractError(Exception):
+            pass
+
+        self.assertEqual(iw.error_label(Failure('docker_api_failed')), 'docker_api_failed')
+        self.assertEqual(
+            iw.error_label(Failure('docker_api_400:client version 1.45 is too new. Maximum supported API version is 1.41')),
+            'docker_api_400:client version 1.45 is too new. Maximum supported API version is 1.41',
+        )
+        self.assertEqual(iw.error_label(ContractError('create_seam_mismatch')), 'create_seam_mismatch')
+        self.assertEqual(iw.error_label(iw.InplaceError('target_exited_or_restarted')), 'target_exited_or_restarted')
+        # Secret-bearing text must never be echoed
+        self.assertEqual(iw.error_label(iw.InplaceError('REDIS_PASSWORD=secret_leaked')), 'inplace_error')
+
+    def test_real_local_nailong_ops_binds_api141_and_executes_stop_create_and_recover(self):
+        """Exercises the real LocalNailongOps methods against a simulated Docker 20.10.24 daemon that rejects /v1.45."""
+        go = make_valid_go()
+        daemon = FakeDocker20Daemon(go)
+
+        tools_path = str(Path('C:/Programs/AI/MLAIGateWay/outputs/task53-sub2-nailong-20261107').resolve())
+        if tools_path not in sys.path:
+            sys.path.insert(0, tools_path)
+        import contract as real_contract
+
+        fake_migration = types.ModuleType('migration')
+
+        class Failure(Exception):
+            pass
+
+        class FakeConn:
+            def __init__(self):
+                self._res = None
+
+            def request(self, method, path, payload=None, headers=None):
+                status, raw = daemon.handle(method, path, payload)
+                self._res = (status, raw)
+
+            def getresponse(self):
+                status, raw = self._res
+                res = types.SimpleNamespace(status=status, read=lambda: raw)
+                return res
+
+            def close(self):
+                pass
+
+        # Simulate Nailong's unpatched `/opt/sub2api-nailong/tools/migration.py` which calls `/v1.45`!
+        def unpatched_api(method, path, body=None):
+            conn = FakeConn()
+            conn.request(method, '/v1.45' + path)
+            res = conn.getresponse()
+            if res.status not in (200, 201, 204):
+                raise Failure('docker_api_failed')
+            return res.read()
+
+        fake_migration.Failure = Failure
+        fake_migration.DockerConnection = FakeConn
+        fake_migration.api = unpatched_api
+        fake_migration.inspect = lambda name: json.loads(fake_migration.api('GET', '/containers/' + name + '/json'))
+
+        # Verify unpatched migration.inspect fails with Failure('docker_api_failed') on Docker 20.10
+        with self.assertRaises(Failure):
+            fake_migration.inspect('sub2api-gcp')
+
+        with mock.patch.dict(sys.modules, {'migration': fake_migration, 'contract': real_contract}):
+            local_ops = iw.LocalNailongOps(tools_dir=None)
+            probe = local_ops.probe_docker_api141(go['current_container_id'], go['target_image'])
+            self.assertTrue(probe['ok'])
+            self.assertEqual(probe['api_version'], '1.41')
+
+            spec = local_ops.capture_current_container_spec(go['current_container_id'], go['appdata'])
+            self.assertEqual(spec['id'], go['current_container_id'])
+
+            retained = iw.archive_container_name(go['window'], go['current_container_id'])
+            stopped = local_ops.stop_and_rename_current(go['current_container_id'], retained)
+            self.assertEqual(stopped['retained_name'], retained)
+            self.assertFalse(daemon.containers[go['current_container_id']]['State']['Running'])
+
+            fake_http_resp = mock.MagicMock()
+            fake_http_resp.status = 200
+            with mock.patch('urllib.request.urlopen', return_value=fake_http_resp):
+                started = local_ops.create_and_start_target(
+                    window=go['window'],
+                    target_image=go['target_image'],
+                    target_revision=go['target_revision'],
+                    env_list=spec['env'],
+                    appdata=go['appdata'],
+                )
+                self.assertEqual(started['id'], daemon.new_id)
+                self.assertEqual(started['health'], 'healthy')
+
+                # Now exercise LocalNailongOps stop_and_remove_new_container + restore_and_start_original_container
+                removed = local_ops.stop_and_remove_new_container(daemon.new_id, 'sub2api-gcp-failed-test')
+                self.assertFalse(removed['running'])
+                restored = local_ops.restore_and_start_original_container(go['current_container_id'], retained)
+                self.assertEqual(restored['id'], go['current_container_id'])
+                self.assertEqual(restored['name'], 'sub2api-gcp')
+                self.assertEqual(restored['started_at'], '2026-11-08T13:21:00.000000000Z')
+
+        # Every request issued by LocalNailongOps must have used `/v1.41/`
+        local_ops_paths = [p for _, p, _ in daemon.requests[1:]]
+        self.assertTrue(all(p.startswith('/v1.41/') for p in local_ops_paths), local_ops_paths)
+
     def test_forward_happy_path_rebinds_daily_backup_to_new_container_epoch(self):
         go = make_valid_go()
         ops = FakeNailongOps(go)
@@ -278,7 +519,6 @@ class InplaceWindowTests(unittest.TestCase):
             self.assertFalse(result['old_gcp_touched'])
 
     def test_failure_fixture_lost_ack_on_stop_current_still_converges_via_recover(self):
-        """Revision (1): stop_and_rename_current succeeds remotely but loses ACK before current-stopped.json is written."""
         go = make_valid_go()
         ops = FakeNailongOps(go)
         ops.fail_on_stop_ack = True
@@ -287,8 +527,6 @@ class InplaceWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(iw.InplaceError, 'ssh_connection_reset_after_remote_stop'):
                 iw.forward(go, ops, directory=tmp_path)
 
-            # Even though stop_and_rename_current raised before returning, stop-intent.json + live observation
-            # reconciled current-stopped.json and ran recover() to restore the original container and rebind source.json!
             self.assertTrue((tmp_path / 'stop-intent.json').is_file())
             self.assertTrue((tmp_path / 'stop-observed-after-error.json').is_file())
             self.assertTrue((tmp_path / 'current-stopped.json').is_file())
@@ -300,7 +538,6 @@ class InplaceWindowTests(unittest.TestCase):
             self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
 
     def test_failure_fixture_new_container_stop_timeout_refuses_dual_active_start_of_old(self):
-        """Revision (2): If the new container is still Running after stop timeout, never rename it or start the old container."""
         go = make_valid_go()
         ops = FakeNailongOps(go)
         ops.fail_on_create = True
@@ -310,12 +547,12 @@ class InplaceWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(iw.InplaceError, 'new_container_still_running_or_stop_unknown'):
                 iw.forward(go, ops, directory=tmp_path)
 
-            # Old container must NOT be started while the new container is still running (prevents dual-active).
             self.assertEqual(ops.original_start_calls, 0)
             self.assertFalse((tmp_path / 'recover-terminal.json').exists())
             status = json.loads((tmp_path / 'status.json').read_text(encoding='utf8'))
             self.assertEqual(status['stage'], 'recovery_requires_operator')
             self.assertEqual(status['reason'], 'new_container_still_running_or_stop_unknown')
+            self.assertEqual(status['error'], 'new_container_stop_timeout_still_running')
             self.assertFalse(status['original_started'])
 
     def test_failure_fixture_target_start_failure_auto_recovers_original_container_and_rebinds_new_started_at(self):
