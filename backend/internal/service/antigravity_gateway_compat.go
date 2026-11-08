@@ -72,7 +72,13 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 	}
 
-	responsesRequest, err := apicompat.ChatCompletionsToResponses(&request)
+	preserveDeveloperRole := false
+	if s.settingService != nil {
+		preserveDeveloperRole, _ = s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
+	}
+	responsesRequest, err := apicompat.ChatCompletionsToResponsesWithOptions(&request, apicompat.ChatCompletionsToResponsesOptions{
+		PreserveDeveloperRole: preserveDeveloperRole,
+	})
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}

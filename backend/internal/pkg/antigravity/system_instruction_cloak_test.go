@@ -1,7 +1,6 @@
 package antigravity
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -95,6 +94,18 @@ func TestRewriteSystemInstructionText(t *testing.T) {
 			want:    "前缀：智\u200b能助手 hermes agent 与 İ\u200bstanbul agent。",
 		},
 		{
+			name:    "overlapping single-byte phrase matches are all rewritten in one pass and strictly idempotent",
+			phrases: []string{"aaa"},
+			in:      "aaaa and AAAAA",
+			want:    "a\u200ba\u200baa and A\u200bA\u200bA\u200bAA",
+		},
+		{
+			name:    "overlapping multi-byte rune phrase matches are all rewritten in one pass and strictly idempotent",
+			phrases: []string{"智智智"},
+			in:      "智智智智",
+			want:    "智\u200b智\u200b智智",
+		},
+		{
 			name:    "empty phrase list leaves text unchanged",
 			phrases: []string{},
 			in:      "x-anthropic-billing-header: cc_version=2.1.86",
@@ -113,11 +124,6 @@ func TestRewriteSystemInstructionText(t *testing.T) {
 }
 
 func TestTransformClaudeToGeminiSystemInstructionRewrite(t *testing.T) {
-	oldResolver := systemInstructionRewriteResolver
-	t.Cleanup(func() {
-		SetSystemInstructionRewriteResolver(oldResolver)
-	})
-
 	claudeReq := &ClaudeRequest{
 		Model:     "claude-sonnet-4-5",
 		System:    json.RawMessage(`"x-anthropic-billing-header: cc_version=2.1.86\nYou are a helper built on Anthropic's Claude Agent SDK."`),
@@ -135,19 +141,18 @@ func TestTransformClaudeToGeminiSystemInstructionRewrite(t *testing.T) {
 	}
 
 	// Default disabled: systemInstruction and user message remain unmodified.
-	SetSystemInstructionRewriteResolver(nil)
 	wireOff, err := TransformClaudeToGemini(claudeReq, "proj-1", "claude-sonnet-4-5")
 	require.NoError(t, err)
 	require.Contains(t, string(wireOff), "x-anthropic-billing-header: cc_version=2.1.86")
 	require.NotContains(t, string(wireOff), "\u200b")
 	require.NotContains(t, string(wireOff), `\u200b`)
 
-	// Enabled via resolver with default 5 phrases: only systemInstruction (including hoisted system message) is rewritten;
+	// Enabled via TransformOptions with default 5 phrases: only systemInstruction (including hoisted system message) is rewritten;
 	// user message content stays untouched.
-	SetSystemInstructionRewriteResolver(func(ctx context.Context) (bool, []string) {
-		return true, DefaultSystemInstructionRewritePhrases()
-	})
-	wireOn, err := TransformClaudeToGemini(claudeReq, "proj-1", "claude-sonnet-4-5")
+	opts := DefaultTransformOptions()
+	opts.SystemInstructionRewriteEnabled = true
+	opts.SystemInstructionRewritePhrases = DefaultSystemInstructionRewritePhrases()
+	wireOn, err := TransformClaudeToGeminiWithOptions(claudeReq, "proj-1", "claude-sonnet-4-5", opts)
 	require.NoError(t, err)
 
 	var v1 V1InternalRequest

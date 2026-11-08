@@ -11,12 +11,26 @@ type chatMessageContent struct {
 	Parts []ChatContentPart
 }
 
+// ChatCompletionsToResponsesOptions configures optional projection behavior
+// when converting Chat Completions requests into Responses API requests.
+type ChatCompletionsToResponsesOptions struct {
+	// PreserveDeveloperRole keeps role="developer" messages as role="developer"
+	// items instead of projecting them through the default user-message branch.
+	PreserveDeveloperRole bool
+}
+
 // ChatCompletionsToResponses converts a Chat Completions request into a
 // Responses API request. The upstream always streams, so Stream is forced to
 // true. store is always false and reasoning.encrypted_content is always
 // included so that the response translator has full context.
 func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest, error) {
-	input, err := convertChatMessagesToResponsesInput(req.Messages)
+	return ChatCompletionsToResponsesWithOptions(req, ChatCompletionsToResponsesOptions{})
+}
+
+// ChatCompletionsToResponsesWithOptions converts a Chat Completions request
+// into a Responses API request with explicit conversion options.
+func ChatCompletionsToResponsesWithOptions(req *ChatCompletionsRequest, opts ChatCompletionsToResponsesOptions) (*ResponsesRequest, error) {
+	input, err := convertChatMessagesToResponsesInput(req.Messages, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +113,10 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 
 // convertChatMessagesToResponsesInput converts the Chat Completions messages
 // array into a Responses API input items array.
-func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputItem, error) {
+func convertChatMessagesToResponsesInput(msgs []ChatMessage, opts ChatCompletionsToResponsesOptions) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 	for _, m := range msgs {
-		items, err := chatMessageToResponsesItems(m)
+		items, err := chatMessageToResponsesItems(m, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -113,12 +127,15 @@ func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputIt
 
 // chatMessageToResponsesItems converts a single ChatMessage into one or more
 // ResponsesInputItem values.
-func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatMessageToResponsesItems(m ChatMessage, opts ChatCompletionsToResponsesOptions) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "system":
 		return chatSystemToResponses(m)
 	case "developer":
-		return chatDeveloperToResponses(m)
+		if opts.PreserveDeveloperRole {
+			return chatDeveloperToResponses(m)
+		}
+		return chatUserToResponses(m)
 	case "user":
 		return chatUserToResponses(m)
 	case "assistant":

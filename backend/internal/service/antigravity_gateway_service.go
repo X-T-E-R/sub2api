@@ -496,7 +496,6 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	opts.EnableIdentityPatch = s.settingService.IsIdentityPatchEnabled(ctx)
 	opts.IdentityPatch = s.settingService.GetIdentityPatchPrompt(ctx)
 	rewriteEnabled, rewritePhrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
-	opts.SystemInstructionRewriteSet = true
 	opts.SystemInstructionRewriteEnabled = rewriteEnabled
 	opts.SystemInstructionRewritePhrases = rewritePhrases
 	return opts
@@ -658,14 +657,14 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 }
 
 func (s *AntigravityGatewayService) applyAntigravitySystemInstructionRewrite(ctx context.Context, body []byte) []byte {
-	if s != nil && s.settingService != nil {
-		enabled, phrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
-		if !enabled || len(phrases) == 0 {
-			return body
-		}
-		return antigravity.RewriteV1InternalSystemInstructionWire(body, true, phrases)
+	if s == nil || s.settingService == nil {
+		return body
 	}
-	return antigravity.ApplyConfiguredSystemInstructionRewriteWire(ctx, body)
+	enabled, phrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
+	if !enabled || len(phrases) == 0 {
+		return body
+	}
+	return antigravity.RewriteV1InternalSystemInstructionWire(body, true, phrases)
 }
 
 // unwrapV1InternalResponse 解包 v1internal 响应

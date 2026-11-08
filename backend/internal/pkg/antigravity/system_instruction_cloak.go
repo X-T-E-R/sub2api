@@ -6,11 +6,9 @@
 package antigravity
 
 import (
-	"context"
 	"encoding/json"
 	"slices"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
@@ -27,43 +25,6 @@ var defaultSystemInstructionRewritePhrases = []string{
 	"you are codex, an agent based on gpt-5",
 	"you are codex, a coding agent based on gpt-5",
 	"hermes agent, an intelligent ai assistant created by nous research",
-}
-
-// SystemInstructionRewriteResolver resolves the runtime (enabled, phrases)
-// configuration for Antigravity outbound systemInstruction rewriting.
-type SystemInstructionRewriteResolver func(ctx context.Context) (bool, []string)
-
-var (
-	systemInstructionRewriteMu       sync.RWMutex
-	systemInstructionRewriteResolver SystemInstructionRewriteResolver
-)
-
-// SetSystemInstructionRewriteResolver installs the runtime settings resolver
-// used when rewriting Antigravity outbound systemInstruction payloads.
-func SetSystemInstructionRewriteResolver(resolver SystemInstructionRewriteResolver) {
-	systemInstructionRewriteMu.Lock()
-	defer systemInstructionRewriteMu.Unlock()
-	systemInstructionRewriteResolver = resolver
-}
-
-// GetSystemInstructionRewriteConfigForContext returns the active rewrite
-// switch and normalized phrase list for ctx. Defaults to disabled when no
-// resolver is installed.
-func GetSystemInstructionRewriteConfigForContext(ctx context.Context) (bool, []string) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	systemInstructionRewriteMu.RLock()
-	resolver := systemInstructionRewriteResolver
-	systemInstructionRewriteMu.RUnlock()
-	if resolver == nil {
-		return false, nil
-	}
-	enabled, phrases := resolver(ctx)
-	if !enabled {
-		return false, nil
-	}
-	return true, NormalizeSystemInstructionRewritePhrases(phrases)
 }
 
 // DefaultSystemInstructionRewritePhrases returns a defensive copy of the
@@ -135,7 +96,9 @@ func FormatStoredSystemInstructionRewritePhrases(phrases []string) string {
 // Matching uses asciiLower so byte offsets in the lowered string remain 1:1
 // with the original UTF-8 string even when system or phrases contain multi-byte
 // Unicode runes whose Unicode lowercase mapping would change byte length
-// (for example U+0130 'İ'). Already-cloaked occurrences are skipped so
+// (for example U+0130 'İ'). Each match advances by one UTF-8 rune from the
+// match start so overlapping matches (for example phrase "aaa" in "aaaa") are
+// collected in a single pass, and already-cloaked positions are skipped so
 // repeated calls are strictly idempotent.
 func RewriteSystemInstructionText(system string, phrases []string) string {
 	if system == "" || len(phrases) == 0 {
@@ -163,7 +126,7 @@ func RewriteSystemInstructionText(system string, phrases []string) string {
 			if !strings.HasPrefix(system[insertPos:], zeroWidthSpace) {
 				at = append(at, insertPos)
 			}
-			i = matchStart + len(needle)
+			i = matchStart + firstRuneLen
 		}
 	}
 	if len(at) == 0 {
@@ -234,17 +197,6 @@ func RewriteV1InternalSystemInstructionWire(wire []byte, enabled bool, phrases [
 		})
 	}
 	return out
-}
-
-// ApplyConfiguredSystemInstructionRewriteWire applies the runtime-resolved
-// Antigravity systemInstruction phrase rewrite to wire. When disabled, wire is
-// returned untouched without re-marshaling.
-func ApplyConfiguredSystemInstructionRewriteWire(ctx context.Context, wire []byte) []byte {
-	enabled, phrases := GetSystemInstructionRewriteConfigForContext(ctx)
-	if !enabled || len(phrases) == 0 {
-		return wire
-	}
-	return RewriteV1InternalSystemInstructionWire(wire, true, phrases)
 }
 
 func asciiLower(s string) string {

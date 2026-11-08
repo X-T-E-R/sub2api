@@ -15,10 +15,6 @@ import (
 
 func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
-	antigravity.SetSystemInstructionRewriteResolver(h.settingService.GetAntigravitySystemInstructionRewriteConfig)
-	t.Cleanup(func() {
-		antigravity.SetSystemInstructionRewriteResolver(nil)
-	})
 
 	get := func() *httptest.ResponseRecorder {
 		r := httptest.NewRecorder()
@@ -67,7 +63,7 @@ func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 	require.Equal(t, "true", repo.values[service.SettingKeyAntigravitySystemInstructionRewriteEnabled])
 	require.JSONEq(t, `["x-anthropic-billing-header:","İstanbul ✓ custom phrase","Second Custom Phrase"]`, repo.values[service.SettingKeyAntigravitySystemInstructionRewritePhrases])
 
-	rtEnabled, rtPhrases := antigravity.GetSystemInstructionRewriteConfigForContext(context.Background())
+	rtEnabled, rtPhrases := h.settingService.GetAntigravitySystemInstructionRewriteConfig(context.Background())
 	require.True(t, rtEnabled)
 	require.Equal(t, expectedCustom, rtPhrases)
 

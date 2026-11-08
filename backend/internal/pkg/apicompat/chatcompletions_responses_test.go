@@ -92,6 +92,39 @@ func TestChatCompletionsToResponses_SystemMessage(t *testing.T) {
 	assert.Equal(t, "user", items[1].Role)
 }
 
+func TestChatCompletionsToResponses_DeveloperRoleDefaultAndPreserved(t *testing.T) {
+	req := &ChatCompletionsRequest{
+		Model: "gpt-4o",
+		Messages: []ChatMessage{
+			{Role: "system", Content: json.RawMessage(`"System prompt."`)},
+			{Role: "developer", Content: json.RawMessage(`"Developer instruction."`)},
+			{Role: "user", Content: json.RawMessage(`"Hello."`)},
+		},
+	}
+
+	// Default contract (non-AGY callers and AGY rewrite OFF): developer falls back to user role.
+	defaultResp, err := ChatCompletionsToResponses(req)
+	require.NoError(t, err)
+	var defaultItems []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(defaultResp.Input, &defaultItems))
+	require.Len(t, defaultItems, 3)
+	assert.Equal(t, "system", defaultItems[0].Role)
+	assert.Equal(t, "user", defaultItems[1].Role)
+	assert.Equal(t, "user", defaultItems[2].Role)
+
+	// Explicit option (used by AGY Chat Completions compat when rewrite is ON): preserves developer role.
+	preservedResp, err := ChatCompletionsToResponsesWithOptions(req, ChatCompletionsToResponsesOptions{
+		PreserveDeveloperRole: true,
+	})
+	require.NoError(t, err)
+	var preservedItems []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(preservedResp.Input, &preservedItems))
+	require.Len(t, preservedItems, 3)
+	assert.Equal(t, "system", preservedItems[0].Role)
+	assert.Equal(t, "developer", preservedItems[1].Role)
+	assert.Equal(t, "user", preservedItems[2].Role)
+}
+
 func TestChatCompletionsToResponses_ToolCalls(t *testing.T) {
 	req := &ChatCompletionsRequest{
 		Model: "gpt-4o",

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/sync/singleflight"
@@ -299,6 +300,7 @@ func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *Setti
 	// Keep the request-path getter deterministic before the startup warm-up has
 	// completed. Persistent settings are loaded by ProvideSettingService.
 	svc.codexSessionAffinityCache.Store(CodexSessionAffinitySettings{GroupIDs: []int64{}})
+	svc.publishAntigravitySystemInstructionRewrite(false, antigravity.DefaultSystemInstructionRewritePhrases())
 	return svc
 }
 

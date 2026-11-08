@@ -2,7 +2,6 @@ package antigravity
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -56,11 +55,8 @@ type TransformOptions struct {
 	// SessionID is the authenticated, explicitly session-scoped gateway identity.
 	// Empty retains the existing metadata/content fallback for direct callers.
 	SessionID string
-	// SystemInstructionRewriteSet indicates that the caller explicitly populated
-	// SystemInstructionRewriteEnabled and SystemInstructionRewritePhrases.
-	// When false, TransformClaudeToGeminiWithOptions falls back to the package
-	// runtime resolver (default disabled).
-	SystemInstructionRewriteSet     bool
+	// SystemInstructionRewriteEnabled and SystemInstructionRewritePhrases are
+	// explicitly populated by AntigravityGatewayService when forwarding.
 	SystemInstructionRewriteEnabled bool
 	SystemInstructionRewritePhrases []string
 }
@@ -181,10 +177,8 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		}
 		systemInstruction.Parts = append(systemInstruction.Parts, messageSystemParts...)
 	}
-	if opts.SystemInstructionRewriteSet {
-		RewriteGeminiSystemInstructionContent(systemInstruction, opts.SystemInstructionRewriteEnabled, opts.SystemInstructionRewritePhrases)
-	} else if rewriteEnabled, rewritePhrases := GetSystemInstructionRewriteConfigForContext(context.Background()); rewriteEnabled {
-		RewriteGeminiSystemInstructionContent(systemInstruction, true, rewritePhrases)
+	if opts.SystemInstructionRewriteEnabled && len(opts.SystemInstructionRewritePhrases) > 0 {
+		RewriteGeminiSystemInstructionContent(systemInstruction, true, opts.SystemInstructionRewritePhrases)
 	}
 
 	// 3. 构建 generationConfig

@@ -105,14 +105,9 @@ const antigravityUserAgentVersionErrorTTL = 5 * time.Second
 const antigravityUserAgentVersionDBTimeout = 5 * time.Second
 
 type cachedAntigravitySystemInstructionRewrite struct {
-	enabled   bool
-	phrases   []string
-	expiresAt int64
+	enabled bool
+	phrases []string
 }
-
-const antigravitySystemInstructionRewriteCacheTTL = 60 * time.Second
-const antigravitySystemInstructionRewriteErrorTTL = 5 * time.Second
-const antigravitySystemInstructionRewriteDBTimeout = 5 * time.Second
 
 // DefaultOpenAICodexUserAgent 是 OpenAI Codex 默认 User-Agent，用于规避浏览器 UA 的质询。
 // 默认采用 codex-tui 身份，版本段随 codexCLIVersion 一起更新。
@@ -311,64 +306,44 @@ func (s *SettingService) GetAntigravityUserAgentVersion(ctx context.Context) str
 	return fallback
 }
 
-// GetAntigravitySystemInstructionRewriteConfig returns the runtime (enabled,
-// phrases) configuration for Antigravity outbound systemInstruction rewriting.
-// Defaults to (false, DefaultSystemInstructionRewritePhrases()) when
-// unconfigured.
-func (s *SettingService) GetAntigravitySystemInstructionRewriteConfig(ctx context.Context) (bool, []string) {
-	if s == nil || s.settingRepo == nil {
+// GetAntigravitySystemInstructionRewriteConfig returns the in-memory runtime
+// (enabled, phrases) snapshot for Antigravity outbound systemInstruction
+// rewriting without touching the database on the request path.
+// The snapshot is populated at startup by LoadAntigravitySystemInstructionRewriteSettings
+// and refreshed on administrative settings updates.
+func (s *SettingService) GetAntigravitySystemInstructionRewriteConfig(_ context.Context) (bool, []string) {
+	if s == nil {
 		return false, antigravity.DefaultSystemInstructionRewritePhrases()
 	}
 	if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
-		if time.Now().UnixNano() < cached.expiresAt {
-			return cached.enabled, append([]string(nil), cached.phrases...)
-		}
+		return cached.enabled, append([]string(nil), cached.phrases...)
 	}
-	s.antigravitySystemRewriteMu.Lock()
-	defer s.antigravitySystemRewriteMu.Unlock()
-	if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
-		if time.Now().UnixNano() < cached.expiresAt {
-			return cached.enabled, append([]string(nil), cached.phrases...)
-		}
+	return false, antigravity.DefaultSystemInstructionRewritePhrases()
+}
+
+// LoadAntigravitySystemInstructionRewriteSettings loads the persisted
+// Antigravity systemInstruction rewrite switch and phrase list into the
+// in-memory snapshot at startup. On read failure it publishes the safe
+// disabled default and returns the error so the caller can log a warning
+// without aborting service startup.
+func (s *SettingService) LoadAntigravitySystemInstructionRewriteSettings(ctx context.Context) error {
+	if s == nil || s.settingRepo == nil {
+		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), antigravitySystemInstructionRewriteDBTimeout)
-	defer cancel()
-	enabledRaw, enabledErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravitySystemInstructionRewriteEnabled)
+	enabledRaw, enabledErr := s.settingRepo.GetValue(ctx, SettingKeyAntigravitySystemInstructionRewriteEnabled)
 	if enabledErr != nil && !errors.Is(enabledErr, ErrSettingNotFound) {
-		slog.Warn("failed to get antigravity system instruction rewrite enabled setting", "error", enabledErr)
-		fallbackPhrases := antigravity.DefaultSystemInstructionRewritePhrases()
-		entry := &cachedAntigravitySystemInstructionRewrite{
-			enabled:   false,
-			phrases:   fallbackPhrases,
-			expiresAt: time.Now().Add(antigravitySystemInstructionRewriteErrorTTL).UnixNano(),
-		}
-		s.antigravitySystemRewriteCache.Store(entry)
-		return false, append([]string(nil), fallbackPhrases...)
+		s.publishAntigravitySystemInstructionRewrite(false, antigravity.DefaultSystemInstructionRewritePhrases())
+		return fmt.Errorf("get %s: %w", SettingKeyAntigravitySystemInstructionRewriteEnabled, enabledErr)
 	}
-	phrasesRaw, phrasesErr := s.settingRepo.GetValue(dbCtx, SettingKeyAntigravitySystemInstructionRewritePhrases)
+	phrasesRaw, phrasesErr := s.settingRepo.GetValue(ctx, SettingKeyAntigravitySystemInstructionRewritePhrases)
 	if phrasesErr != nil && !errors.Is(phrasesErr, ErrSettingNotFound) {
-		slog.Warn("failed to get antigravity system instruction rewrite phrases setting", "error", phrasesErr)
-		fallbackPhrases := antigravity.DefaultSystemInstructionRewritePhrases()
-		entry := &cachedAntigravitySystemInstructionRewrite{
-			enabled:   false,
-			phrases:   fallbackPhrases,
-			expiresAt: time.Now().Add(antigravitySystemInstructionRewriteErrorTTL).UnixNano(),
-		}
-		s.antigravitySystemRewriteCache.Store(entry)
-		return false, append([]string(nil), fallbackPhrases...)
+		s.publishAntigravitySystemInstructionRewrite(false, antigravity.DefaultSystemInstructionRewritePhrases())
+		return fmt.Errorf("get %s: %w", SettingKeyAntigravitySystemInstructionRewritePhrases, phrasesErr)
 	}
 	enabled := strings.TrimSpace(enabledRaw) == "true"
 	phrases := antigravity.ParseStoredSystemInstructionRewritePhrases(phrasesRaw)
-	entry := &cachedAntigravitySystemInstructionRewrite{
-		enabled:   enabled,
-		phrases:   append([]string(nil), phrases...),
-		expiresAt: time.Now().Add(antigravitySystemInstructionRewriteCacheTTL).UnixNano(),
-	}
-	s.antigravitySystemRewriteCache.Store(entry)
-	return entry.enabled, append([]string(nil), entry.phrases...)
+	s.publishAntigravitySystemInstructionRewrite(enabled, phrases)
+	return nil
 }
 
 func (s *SettingService) publishAntigravitySystemInstructionRewrite(enabled bool, phrases []string) {
@@ -376,9 +351,8 @@ func (s *SettingService) publishAntigravitySystemInstructionRewrite(enabled bool
 	s.antigravitySystemRewriteMu.Lock()
 	defer s.antigravitySystemRewriteMu.Unlock()
 	s.antigravitySystemRewriteCache.Store(&cachedAntigravitySystemInstructionRewrite{
-		enabled:   enabled,
-		phrases:   append([]string(nil), normalized...),
-		expiresAt: time.Now().Add(antigravitySystemInstructionRewriteCacheTTL).UnixNano(),
+		enabled: enabled,
+		phrases: append([]string(nil), normalized...),
 	})
 }
 
