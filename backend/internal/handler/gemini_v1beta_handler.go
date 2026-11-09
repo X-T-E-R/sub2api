@@ -659,6 +659,12 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	if service.FinishStreamPreheaderFailover(c, failoverErr) {
 		return
 	}
+	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	if c != nil && failoverErr.ResponseHeaders != nil {
+		if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+			c.Header("x-request-id", reqID)
+		}
+	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
@@ -672,7 +678,7 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 			}
 
 			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
+			msg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 			if !rule.PassthroughBody && rule.CustomMessage != nil {
 				msg = *rule.CustomMessage
 			}
@@ -687,11 +693,14 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	}
 
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
-	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+	upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
-	// 使用默认的错误映射
+	// 使用默认的错误映射，但若上游提供了具体原因则默认透传脱敏后的真实原因
 	status, message := mapGeminiUpstreamError(statusCode)
+	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+		message = upstreamMsg
+	}
 	googleError(c, status, message)
 }
 

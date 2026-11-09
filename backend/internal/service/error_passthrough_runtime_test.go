@@ -60,7 +60,7 @@ func TestGatewayHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, "Invalid schema for field messages", errField["message"])
 }
 
 func TestOpenAIHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
@@ -86,7 +86,7 @@ func TestOpenAIHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, "Invalid schema for field messages", errField["message"])
 }
 
 func TestOpenAIHandleErrorResponse_ContextWindow502KeepsMessageWithoutFailover(t *testing.T) {
@@ -136,7 +136,7 @@ func TestGeminiWriteGeminiMappedError_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "invalid_request_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, "Invalid schema for field messages", errField["message"])
 }
 
 func TestGatewayHandleErrorResponse_AppliesRuleFor422(t *testing.T) {
@@ -363,6 +363,249 @@ func TestGeminiWriteGeminiMappedError_SetsResponseCommitted(t *testing.T) {
 	err := svc.writeGeminiMappedError(c, account, http.StatusBadRequest, "req-99", body)
 	require.Error(t, err)
 	assert.True(t, IsResponseCommitted(c), "Gemini path must mark response committed")
+	assert.Equal(t, "req-99", rec.Header().Get("x-request-id"))
+}
+
+func TestAntigravityWriteMappedClaudeError_DefaultPassthroughAcrossStatusesAndMessages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name           string
+		upstreamStatus int
+		upstreamReqID  string
+		body           string
+		wantStatus     int
+		wantType       string
+		wantCode       string
+		wantMsg        string
+	}{
+		{
+			name:           "400_non_whitelist_schema_error_preserved",
+			upstreamStatus: http.StatusBadRequest,
+			upstreamReqID:  "req-ag-400",
+			body:           `{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \"tool_choice\" at 'request': Cannot find field.","status":"INVALID_ARGUMENT"}}`,
+			wantStatus:     http.StatusBadRequest,
+			wantType:       "invalid_request_error",
+			wantCode:       "400",
+			wantMsg:        `Invalid JSON payload received. Unknown name "tool_choice" at 'request': Cannot find field.`,
+		},
+		{
+			name:           "400_v1internal_wrapped_error_preserved",
+			upstreamStatus: http.StatusBadRequest,
+			upstreamReqID:  "req-ag-v1int",
+			body:           `{"response":{"error":{"code":400,"message":"FunctionDeclaration parameters schema must be of type OBJECT","status":"INVALID_ARGUMENT"}}}`,
+			wantStatus:     http.StatusBadRequest,
+			wantType:       "invalid_request_error",
+			wantCode:       "400",
+			wantMsg:        "FunctionDeclaration parameters schema must be of type OBJECT",
+		},
+		{
+			name:           "401_preserves_sanitized_reason",
+			upstreamStatus: http.StatusUnauthorized,
+			upstreamReqID:  "req-ag-401",
+			body:           `{"error":{"code":401,"message":"Request had invalid authentication credentials. Bearer secret-jwt-token-value","status":"UNAUTHENTICATED"}}`,
+			wantStatus:     http.StatusBadGateway,
+			wantType:       "authentication_error",
+			wantCode:       "401",
+			wantMsg:        "Request had invalid authentication credentials. Bearer ***",
+		},
+		{
+			name:           "403_preserves_reason",
+			upstreamStatus: http.StatusForbidden,
+			upstreamReqID:  "req-ag-403",
+			body:           `{"error":{"code":403,"message":"Cloud Code Private API has not been used in project 123456 before or it is disabled.","status":"PERMISSION_DENIED"}}`,
+			wantStatus:     http.StatusBadGateway,
+			wantType:       "permission_error",
+			wantCode:       "403",
+			wantMsg:        "Cloud Code Private API has not been used in project 123456 before or it is disabled.",
+		},
+		{
+			name:           "429_preserves_reason",
+			upstreamStatus: http.StatusTooManyRequests,
+			upstreamReqID:  "req-ag-429",
+			body:           `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota) for model claude-sonnet-4-5.","status":"RESOURCE_EXHAUSTED"}}`,
+			wantStatus:     http.StatusTooManyRequests,
+			wantType:       "rate_limit_error",
+			wantCode:       "429",
+			wantMsg:        "Resource has been exhausted (e.g. check quota) for model claude-sonnet-4-5.",
+		},
+		{
+			name:           "529_preserves_reason",
+			upstreamStatus: 529,
+			upstreamReqID:  "req-ag-529",
+			body:           `{"error":{"code":529,"message":"Model capacity exhausted for region us-central1","status":"UNAVAILABLE"}}`,
+			wantStatus:     http.StatusServiceUnavailable,
+			wantType:       "overloaded_error",
+			wantCode:       "529",
+			wantMsg:        "Model capacity exhausted for region us-central1",
+		},
+		{
+			name:           "500_preserves_reason_and_mapped_type",
+			upstreamStatus: http.StatusInternalServerError,
+			upstreamReqID:  "req-ag-500",
+			body:           `{"error":{"code":500,"message":"Internal backend crash id=trace-9988","status":"INTERNAL"}}`,
+			wantStatus:     http.StatusBadGateway,
+			wantType:       "api_error",
+			wantCode:       "500",
+			wantMsg:        "Internal backend crash id=trace-9988",
+		},
+		{
+			name:           "empty_body_falls_back_to_default",
+			upstreamStatus: http.StatusBadRequest,
+			upstreamReqID:  "req-ag-empty",
+			body:           ``,
+			wantStatus:     http.StatusBadRequest,
+			wantType:       "invalid_request_error",
+			wantMsg:        "Invalid request",
+		},
+		{
+			name:           "html_body_falls_back_to_default_json",
+			upstreamStatus: http.StatusBadGateway,
+			upstreamReqID:  "req-ag-html",
+			body:           `<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>`,
+			wantStatus:     http.StatusBadGateway,
+			wantType:       "upstream_error",
+			wantMsg:        "Upstream request failed",
+		},
+	}
+
+	svc := &AntigravityGatewayService{}
+	account := &Account{ID: 77, Name: "ag-acc", Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+
+			err := svc.writeMappedClaudeError(c, account, tc.upstreamStatus, tc.upstreamReqID, []byte(tc.body))
+			require.Error(t, err)
+			assert.Equal(t, tc.wantStatus, rec.Code)
+			assert.Equal(t, tc.upstreamReqID, rec.Header().Get("x-request-id"))
+
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+			assert.Equal(t, "error", payload["type"])
+			errField, ok := payload["error"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantType, errField["type"])
+			assert.Equal(t, tc.wantMsg, errField["message"])
+			if tc.wantCode != "" {
+				assert.Equal(t, tc.wantCode, errField["code"])
+			}
+		})
+	}
+}
+
+func TestAntigravityWriteMappedCompatError_PreservesFieldsAndSanitizes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	svc := &AntigravityGatewayService{}
+	account := &Account{ID: 78, Name: "ag-compat", Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+	body := []byte(`{"error":{"code":"invalid_schema","param":"tools[0].function.parameters","type":"invalid_request_error","message":"Invalid schema at https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSySecretKey12345678901234567890&alt=json"}}`)
+
+	err := svc.writeMappedAntigravityCompatError(c, account, http.StatusBadRequest, "req-compat-1", body)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "req-compat-1", rec.Header().Get("x-request-id"))
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	errField, ok := payload["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "invalid_request_error", errField["type"])
+	assert.Equal(t, "invalid_schema", errField["code"])
+	assert.Equal(t, "tools[0].function.parameters", errField["param"])
+	assert.Equal(t, "Invalid schema at https://generativelanguage.googleapis.com/v1beta/models?key=***&alt=json", errField["message"])
+	assert.NotContains(t, rec.Body.String(), "AIzaSySecretKey")
+}
+
+func TestSanitizeUpstreamErrorMessageAndBody_RedactsCredentialsPreservesContext(t *testing.T) {
+	raw := `Post "https://user:pass123@api.example.com/v1/messages?key=AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz123456&access_token=ya29.secret&model=claude-sonnet-4-5": Invalid token Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c or api_key sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345 or sk-proj-abcdefghijklmnopqrstuvwxyz012345 or xai-secretkey123456 for trace_id=req_987654321`
+	sanitized := SanitizeUpstreamErrorMessage(raw)
+
+	assert.NotContains(t, sanitized, "pass123")
+	assert.NotContains(t, sanitized, "AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz123456")
+	assert.NotContains(t, sanitized, "ya29.secret")
+	assert.NotContains(t, sanitized, "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+	assert.NotContains(t, sanitized, "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345")
+	assert.NotContains(t, sanitized, "sk-proj-abcdefghijklmnopqrstuvwxyz012345")
+	assert.NotContains(t, sanitized, "xai-secretkey123456")
+
+	// Normal diagnostic fields and internal IDs must remain intact
+	assert.Contains(t, sanitized, "api.example.com/v1/messages")
+	assert.Contains(t, sanitized, "model=claude-sonnet-4-5")
+	assert.Contains(t, sanitized, "trace_id=req_987654321")
+}
+
+func TestGatewayHandleErrorResponse_400HTMLBodyReturnsValidJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	svc := &GatewayService{}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       io.NopCloser(bytes.NewReader([]byte(`<html><body><h1>400 Bad Request</h1></body></html>`))),
+		Header:     http.Header{"X-Request-Id": []string{"req-html-400"}},
+	}
+	account := &Account{ID: 105, Platform: PlatformAnthropic, Type: AccountTypeAPIKey}
+
+	_, err := svc.handleErrorResponse(context.Background(), resp, c, account)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "req-html-400", rec.Header().Get("x-request-id"))
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload), "HTML upstream error body must not be written raw as invalid JSON")
+	errField, ok := payload["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "invalid_request_error", errField["type"])
+	assert.Equal(t, "Invalid request", errField["message"])
+}
+
+func TestGeminiNativeUpstreamError_SanitizesJSONAndHandlesHTMLFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &GeminiMessagesCompatService{}
+	account := &Account{ID: 106, Name: "gemini-native", Platform: PlatformGemini, Type: AccountTypeAPIKey}
+
+	t.Run("same_protocol_json_preserves_details_and_sanitizes_key", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		rawJSON := []byte(`{"error":{"code":400,"message":"Invalid argument at ?key=AIzaSySecretKey12345678901234567890","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","fieldViolations":[{"field":"tools[0]","description":"unknown field"}]}]}}`)
+		resp := &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}
+
+		err := svc.writeGeminiNativeUpstreamError(c, account, resp, rawJSON, "req-gem-native-1", false)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "req-gem-native-1", rec.Header().Get("x-request-id"))
+		assert.NotContains(t, rec.Body.String(), "AIzaSySecretKey12345678901234567890")
+		assert.Contains(t, rec.Body.String(), `"field":"tools[0]"`)
+		assert.Contains(t, rec.Body.String(), `"INVALID_ARGUMENT"`)
+	})
+
+	t.Run("html_body_falls_back_to_google_json_error", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		htmlBody := []byte(`<!DOCTYPE html><html><body>502 Bad Gateway</body></html>`)
+		resp := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+		}
+
+		err := svc.writeGeminiNativeUpstreamError(c, account, resp, htmlBody, "req-gem-html", false)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadGateway, rec.Code)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+		errField, ok := payload["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "Bad Gateway", errField["message"])
+	})
 }
 
 func newNonFailoverPassthroughRule(statusCode int, keyword string, respCode int, customMessage string) *model.ErrorPassthroughRule {

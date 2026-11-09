@@ -1581,6 +1581,11 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	}
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+		if c != nil && failoverErr.ResponseHeaders != nil {
+			if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+				c.Header("x-request-id", reqID)
+			}
+		}
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -1596,6 +1601,14 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		return
 	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
+	if failoverErr != nil {
+		if upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody))); upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+			errMsg = upstreamMsg
+		}
+		if upstreamType := service.ExtractUpstreamErrorType(failoverErr.ResponseBody); upstreamType != "" && errType == "upstream_error" {
+			errType = upstreamType
+		}
+	}
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
@@ -2985,7 +2998,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 			}
 
 			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
+			msg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 			if !rule.PassthroughBody && rule.CustomMessage != nil {
 				msg = *rule.CustomMessage
 			}
@@ -2999,12 +3012,24 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		}
 	}
 
+	if c != nil && failoverErr.ResponseHeaders != nil {
+		if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+			c.Header("x-request-id", reqID)
+		}
+	}
+
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
-	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+	upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
-	// 使用默认的错误映射
+	// 使用默认的错误映射，但若上游提供了具体原因则默认透传脱敏后的真实原因
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
+	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+		errMsg = upstreamMsg
+	}
+	if upstreamType := service.ExtractUpstreamErrorType(responseBody); upstreamType != "" && errType == "upstream_error" {
+		errType = upstreamType
+	}
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 

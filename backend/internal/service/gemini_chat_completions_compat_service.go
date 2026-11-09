@@ -832,6 +832,9 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 	upstreamRequestID string,
 	body []byte,
 ) error {
+	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
+		c.Header("x-request-id", upstreamRequestID)
+	}
 	upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 	setOpsUpstreamError(c, upstreamStatus, upstreamMsg, "")
 	if account != nil {
@@ -860,7 +863,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 
 	statusCode := http.StatusBadGateway
 	errType := "upstream_error"
-	errMsg := "Upstream request failed"
+	errMsg := ""
 	if mapped := mapGeminiErrorBodyToClaudeError(body); mapped != nil {
 		if mapped.Type != "" {
 			errType = mapped.Type
@@ -872,6 +875,9 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			statusCode = mapped.StatusCode
 		}
 	}
+	if errMsg == "" && upstreamMsg != "" {
+		errMsg = upstreamMsg
+	}
 
 	switch upstreamStatus {
 	case http.StatusBadRequest:
@@ -881,20 +887,15 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "invalid_request_error"
 		}
-		// 400 是确定性的请求错误：回传上游 message（已脱敏），客户端据此定位非法字段。
-		if errMsg == "Upstream request failed" {
-			if upstreamMsg != "" {
-				errMsg = upstreamMsg
-			} else {
-				errMsg = "Invalid request"
-			}
+		if errMsg == "" {
+			errMsg = "Invalid request"
 		}
 	case http.StatusNotFound:
 		statusCode = http.StatusNotFound
 		if errType == "upstream_error" {
 			errType = "not_found_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Resource not found"
 		}
 	case http.StatusTooManyRequests:
@@ -902,7 +903,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "rate_limit_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Upstream rate limit exceeded, please retry later"
 		}
 	case 529:
@@ -910,14 +911,15 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "overloaded_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Upstream service overloaded, please retry later"
+		}
+	default:
+		if errMsg == "" {
+			errMsg = "Upstream request failed"
 		}
 	}
 
-	if upstreamMsg != "" && errMsg == "Upstream request failed" {
-		errMsg = upstreamMsg
-	}
 	return s.writeChatCompletionsError(c, statusCode, errType, errMsg)
 }
 

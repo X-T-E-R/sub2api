@@ -236,6 +236,9 @@ func FinishStreamPreheaderError(c *gin.Context, status int, errType, message str
 }
 
 func FinishStreamPreheaderFailover(c *gin.Context, failure *UpstreamFailoverError) bool {
+	if StreamPreheaderFinalized(c) {
+		return true
+	}
 	if !StreamPreheaderCommitted(c) {
 		return false
 	}
@@ -244,10 +247,25 @@ func FinishStreamPreheaderFailover(c *gin.Context, failure *UpstreamFailoverErro
 		status = http.StatusBadGateway
 	}
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(failure.ClientMessage))
+	if message == "" && len(failure.ResponseBody) > 0 && !IsOpenAISilentRefusalErrorBody(failure.ResponseBody) {
+		message = sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(failure.ResponseBody)))
+	}
 	if message == "" {
 		message = http.StatusText(status)
+		if message == "" {
+			message = "Upstream request failed"
+		}
 	}
-	return FinishStreamPreheaderError(c, status, streamPreheaderErrorType(status, failure.ResponseBody), message, failure.ResponseHeaders)
+	errType := streamPreheaderErrorType(status, failure.ResponseBody)
+	if protocol, ok := c.Get(streamPreheaderCommittedKey); ok && protocol == streamPreheaderGemini {
+		if st := strings.TrimSpace(gjson.GetBytes(failure.ResponseBody, "error.status").String()); st != "" {
+			errType = st
+		} else if st := strings.TrimSpace(gjson.GetBytes(failure.ResponseBody, "response.error.status").String()); st != "" {
+			errType = st
+		}
+	}
+	_ = writeStreamPreheaderError(c, status, errType, message, failure.ResponseHeaders, failure.ResponseBody)
+	return true
 }
 
 type streamPreheaderResponseMeta struct{ id, model, retryDelay string }
@@ -356,7 +374,7 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 			UpstreamURL: safeUpstreamURL(req.URL.String()), Kind: "stream_preheader_http_error", Message: message,
 		})
 	}
-	if message == "" || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if message == "" {
 		message = http.StatusText(resp.StatusCode)
 		if message == "" {
 			message = "Upstream request failed"
@@ -364,7 +382,11 @@ func roundTripStreamPreheader(c *gin.Context, req *http.Request, account *Accoun
 	}
 	errType := streamPreheaderErrorType(resp.StatusCode, body)
 	if protocol == streamPreheaderGemini {
-		errType = gjson.GetBytes(body, "error.status").String()
+		if st := strings.TrimSpace(gjson.GetBytes(body, "error.status").String()); st != "" {
+			errType = st
+		} else if st := strings.TrimSpace(gjson.GetBytes(body, "response.error.status").String()); st != "" {
+			errType = st
+		}
 	}
 	return nil, writeStreamPreheaderError(c, resp.StatusCode, errType, message, resp.Header, body), true
 }

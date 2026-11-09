@@ -380,6 +380,11 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
+		if c != nil && lastErr.ResponseHeaders != nil {
+			if reqID := strings.TrimSpace(lastErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+				c.Header("x-request-id", reqID)
+			}
+		}
 	}
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {
@@ -397,8 +402,21 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	} else if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		status, code, message = http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage()
-	} else if lastErr != nil && statusCode == http.StatusTooManyRequests {
-		status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+	} else {
+		if lastErr != nil && statusCode == http.StatusTooManyRequests {
+			status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+		}
+		if lastErr != nil {
+			upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(lastErr.ResponseBody)))
+			if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+				message = upstreamMsg
+			}
+			if upstreamCode := service.ExtractUpstreamErrorCode(lastErr.ResponseBody); upstreamCode != "" {
+				code = upstreamCode
+			} else if upstreamType := service.ExtractUpstreamErrorType(lastErr.ResponseBody); upstreamType != "" && code == "server_error" {
+				code = upstreamType
+			}
+		}
 	}
 	if streamStarted {
 		// A slot-wait heartbeat commits HTTP 200 before any upstream response.

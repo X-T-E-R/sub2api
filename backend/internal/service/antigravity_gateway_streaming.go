@@ -967,6 +967,9 @@ func (s *AntigravityGatewayService) WriteMappedClaudeError(c *gin.Context, accou
 
 func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
 	MarkResponseCommitted(c)
+	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
+		c.Header("x-request-id", upstreamRequestID)
+	}
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	logBody, maxBytes := s.getLogConfig()
@@ -1014,28 +1017,39 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "authentication_error"
-		errMsg = "Upstream authentication failed"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream authentication failed")
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "permission_error"
-		errMsg = "Upstream access forbidden"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream access forbidden")
+	case 404:
+		statusCode = http.StatusNotFound
+		errType = "not_found_error"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Resource not found")
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream rate limit exceeded")
 	case 529:
 		statusCode = http.StatusServiceUnavailable
 		errType = "overloaded_error"
-		errMsg = "Upstream service overloaded"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream service overloaded")
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream request failed")
+	}
+	if upstreamType := extractUpstreamErrorType(body); upstreamType != "" && errType == "upstream_error" {
+		errType = upstreamType
 	}
 
+	errorObj := gin.H{"type": errType, "message": errMsg}
+	if code := extractUpstreamErrorCode(body); code != "" {
+		errorObj["code"] = code
+	}
 	c.JSON(statusCode, gin.H{
 		"type":  "error",
-		"error": gin.H{"type": errType, "message": errMsg},
+		"error": errorObj,
 	})
 	if upstreamMsg == "" {
 		return fmt.Errorf("upstream error: %d", upstreamStatus)

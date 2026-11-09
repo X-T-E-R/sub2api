@@ -161,7 +161,30 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
-		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
+		if c != nil && resp != nil {
+			if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+				c.Header("x-request-id", reqID)
+			}
+		}
+		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+			c, account.Platform, resp.StatusCode, respBody,
+			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
+		); matched {
+			writeResponsesError(c, ptStatus, ptErrType, ptErrMsg)
+			return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
+		}
+		errCode := "server_error"
+		if resp.StatusCode == http.StatusBadRequest {
+			errCode = "invalid_request_error"
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			errCode = "rate_limit_error"
+		}
+		if code := extractUpstreamErrorCode(respBody); code != "" {
+			errCode = code
+		} else if upstreamType := extractUpstreamErrorType(respBody); upstreamType != "" {
+			errCode = upstreamType
+		}
+		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), errCode, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

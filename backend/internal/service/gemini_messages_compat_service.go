@@ -1785,12 +1785,20 @@ func (s *GeminiMessagesCompatService) writeGeminiNativeUpstreamError(c *gin.Cont
 		Detail:             upstreamDetail,
 	})
 
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/json"
+	if c != nil && requestID != "" && c.Writer.Header().Get("x-request-id") == "" {
+		c.Header("x-request-id", requestID)
 	}
 	MarkResponseCommitted(c)
-	c.Data(resp.StatusCode, contentType, respBody)
+	trimmedBody := bytes.TrimSpace(respBody)
+	if len(trimmedBody) > 0 && gjson.ValidBytes(trimmedBody) {
+		c.Data(resp.StatusCode, "application/json", sanitizeUpstreamErrorBody(respBody))
+	} else {
+		fallbackMsg := getPassthroughOrDefault(upstreamMsg, http.StatusText(resp.StatusCode))
+		if fallbackMsg == "" {
+			fallbackMsg = "Upstream request failed"
+		}
+		_ = s.writeGoogleError(c, resp.StatusCode, fallbackMsg)
+	}
 	if upstreamMsg == "" {
 		return fmt.Errorf("gemini upstream error: %d", resp.StatusCode)
 	}
@@ -1814,19 +1822,61 @@ func sleepGeminiBackoff(attempt int) {
 }
 
 var (
-	sensitiveQueryParamRegex = regexp.MustCompile(`(?i)([?&](?:key|client_secret|access_token|refresh_token)=)[^&"\s]+`)
-	retryInRegex             = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
+	sensitiveQueryParamRegex  = regexp.MustCompile(`(?i)([?&](?:key|api[_-]?key|client_secret|access[_-]?token|refresh[_-]?token|token|authorization|x-api-key)=)[^&"\s']+`)
+	sensitiveURLUserinfoRegex = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@\s"]+@`)
+	sensitiveBearerTokenRegex = regexp.MustCompile(`(?i)(bearer\s+)[^\s"',}]+`)
+	sensitiveAPIKeyPatterns   = []struct {
+		pattern *regexp.Regexp
+		replace string
+	}{
+		{regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`), "sk-ant-***"},
+		{regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`), "sk-***"},
+		{regexp.MustCompile(`xai-[A-Za-z0-9_-]{6,}`), "xai-***"},
+		{regexp.MustCompile(`AIza[A-Za-z0-9_-]{20,}`), "AIza***"},
+		{regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), "eyJ***"},
+	}
+	retryInRegex = regexp.MustCompile(`Please retry in ([0-9.]+)s`)
 )
+
+// SanitizeUpstreamErrorMessage 擦除上游错误文本中明确泄露的认证凭据（URL query 密钥、Userinfo、Bearer token、API key 字面量）。
+func SanitizeUpstreamErrorMessage(msg string) string {
+	return sanitizeUpstreamErrorMessage(msg)
+}
 
 func sanitizeUpstreamErrorMessage(msg string) string {
 	if msg == "" {
 		return msg
 	}
-	return sensitiveQueryParamRegex.ReplaceAllString(msg, `$1***`)
+	msg = sensitiveQueryParamRegex.ReplaceAllString(msg, `${1}***`)
+	msg = sensitiveURLUserinfoRegex.ReplaceAllString(msg, `${1}***@`)
+	msg = sensitiveBearerTokenRegex.ReplaceAllString(msg, `${1}***`)
+	for _, p := range sensitiveAPIKeyPatterns {
+		msg = p.pattern.ReplaceAllString(msg, p.replace)
+	}
+	return msg
+}
+
+// SanitizeUpstreamErrorBody 对要透传的错误响应体做明确认证凭据脱敏，保留原有 JSON 结构与字段。
+func SanitizeUpstreamErrorBody(body []byte) []byte {
+	return sanitizeUpstreamErrorBody(body)
+}
+
+func sanitizeUpstreamErrorBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	sanitized := sanitizeUpstreamErrorMessage(string(body))
+	if sanitized == string(body) {
+		return body
+	}
+	return []byte(sanitized)
 }
 
 func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
 	MarkResponseCommitted(c)
+	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
+		c.Header("x-request-id", upstreamRequestID)
+	}
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	upstreamDetail := ""
@@ -1887,6 +1937,9 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			statusCode = mapped.StatusCode
 		}
 	}
+	if errMsg == "" && upstreamMsg != "" {
+		errMsg = upstreamMsg
+	}
 
 	switch upstreamStatus {
 	case 400:
@@ -1895,10 +1948,6 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 		}
 		if errType == "" {
 			errType = "invalid_request_error"
-		}
-		// 400 是确定性的请求错误：回传上游 message（已脱敏），客户端据此定位非法字段。
-		if errMsg == "" {
-			errMsg = upstreamMsg
 		}
 		if errMsg == "" {
 			errMsg = "Invalid request"
@@ -2019,7 +2068,7 @@ func mapGeminiErrorBodyToClaudeError(body []byte) *claudeErrorMapping {
 
 	mapped := &claudeErrorMapping{
 		Type:    mapGeminiStatusToClaudeErrorType(parsed.Error.Status),
-		Message: "",
+		Message: sanitizeUpstreamErrorMessage(strings.TrimSpace(parsed.Error.Message)),
 	}
 	if mapped.Type == "" {
 		mapped.Type = "upstream_error"
@@ -2036,7 +2085,6 @@ func mapGeminiErrorBodyToClaudeError(body []byte) *claudeErrorMapping {
 		// Keep StatusCode unset and let HTTP status mapping decide.
 	}
 
-	// Keep messages generic by default; upstream error message can be long or include sensitive fragments.
 	return mapped
 }
 

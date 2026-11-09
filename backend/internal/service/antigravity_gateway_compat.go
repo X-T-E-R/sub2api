@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -522,6 +523,9 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	body []byte,
 ) error {
 	MarkResponseCommitted(c)
+	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
+		c.Header("x-request-id", upstreamRequestID)
+	}
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(body)))
 	setOpsUpstreamError(c, upstreamStatus, message, s.getUpstreamErrorDetail(body))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -533,12 +537,52 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 		Kind:               "http_error",
 		Message:            message,
 	})
+	if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+		c, account.Platform, upstreamStatus, body,
+		mapUpstreamStatusCode(upstreamStatus), "upstream_error", "Upstream request failed",
+	); matched {
+		c.JSON(ptStatus, gin.H{
+			"error": gin.H{
+				"message": ptErrMsg,
+				"type":    ptErrType,
+				"param":   nil,
+				"code":    nil,
+			},
+		})
+		return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
+	}
+	errType := "upstream_error"
+	switch upstreamStatus {
+	case http.StatusBadRequest:
+		errType = "invalid_request_error"
+	case http.StatusUnauthorized:
+		errType = "authentication_error"
+	case http.StatusForbidden:
+		errType = "permission_error"
+	case http.StatusNotFound:
+		errType = "not_found_error"
+	case http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case 529:
+		errType = "overloaded_error"
+	}
+	if upstreamType := extractUpstreamErrorType(body); upstreamType != "" && errType == "upstream_error" {
+		errType = upstreamType
+	}
+	var codeVal any
+	if code := extractUpstreamErrorCode(body); code != "" {
+		codeVal = code
+	}
+	var paramVal any
+	if param := strings.TrimSpace(gjson.GetBytes(body, "error.param").String()); param != "" {
+		paramVal = param
+	}
 	c.JSON(mapUpstreamStatusCode(upstreamStatus), gin.H{
 		"error": gin.H{
 			"message": getPassthroughOrDefault(message, "Upstream request failed"),
-			"type":    "upstream_error",
-			"param":   nil,
-			"code":    nil,
+			"type":    errType,
+			"param":   paramVal,
+			"code":    codeVal,
 		},
 	})
 	return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)

@@ -581,44 +581,21 @@ func isPromptTooLongError(respBody []byte) bool {
 		strings.Contains(msg, "max_tokens")
 }
 
-// isPassthroughErrorMessage 检查错误消息是否在透传白名单中
+// isPassthroughErrorMessage 判断上游错误消息是否非空可透传（默认透传，不再受关键字白名单限制）
 func isPassthroughErrorMessage(msg string) bool {
-	lower := strings.ToLower(msg)
-	for _, pattern := range antigravityPassthroughErrorMessages {
-		if strings.Contains(lower, pattern) {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(msg) != ""
 }
 
-// getPassthroughOrDefault 若消息在白名单内则返回原始消息，否则返回默认消息
+// getPassthroughOrDefault 若上游提供了非空错误消息则默认透传，否则回退到默认消息
 func getPassthroughOrDefault(upstreamMsg, defaultMsg string) string {
-	if isPassthroughErrorMessage(upstreamMsg) {
-		return upstreamMsg
+	if trimmed := strings.TrimSpace(upstreamMsg); trimmed != "" {
+		return trimmed
 	}
 	return defaultMsg
 }
 
 func extractAntigravityErrorMessage(body []byte) string {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-
-	// Google-style: {"error": {"message": "..."}}
-	if errObj, ok := payload["error"].(map[string]any); ok {
-		if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
-			return msg
-		}
-	}
-
-	// Fallback: top-level message
-	if msg, ok := payload["message"].(string); ok && strings.TrimSpace(msg) != "" {
-		return msg
-	}
-
-	return ""
+	return extractUpstreamErrorMessage(body)
 }
 
 // stripThinkingFromClaudeRequest converts thinking blocks to text blocks in a Claude Messages request.

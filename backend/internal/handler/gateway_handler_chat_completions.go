@@ -395,6 +395,11 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
+		if c != nil && lastErr.ResponseHeaders != nil {
+			if reqID := strings.TrimSpace(lastErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+				c.Header("x-request-id", reqID)
+			}
+		}
 	}
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(lastErr)
@@ -418,5 +423,18 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 		h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage())
 		return
 	}
-	h.chatCompletionsErrorResponse(c, statusCode, "server_error", "All available accounts exhausted")
+	errType := "server_error"
+	if statusCode == http.StatusTooManyRequests {
+		errType = "rate_limit_error"
+	}
+	message := "All available accounts exhausted"
+	if lastErr != nil {
+		if upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(lastErr.ResponseBody))); upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+			message = upstreamMsg
+		}
+		if upstreamType := service.ExtractUpstreamErrorType(lastErr.ResponseBody); upstreamType != "" && errType == "server_error" {
+			errType = upstreamType
+		}
+	}
+	h.chatCompletionsErrorResponse(c, statusCode, errType, message)
 }

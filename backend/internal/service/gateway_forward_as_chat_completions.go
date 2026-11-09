@@ -170,7 +170,28 @@ func (s *GatewayService) ForwardAsChatCompletions(
 			}
 		}
 
-		writeGatewayCCError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
+		if c != nil && resp != nil {
+			if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
+				c.Header("x-request-id", reqID)
+			}
+		}
+		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+			c, account.Platform, resp.StatusCode, respBody,
+			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
+		); matched {
+			writeGatewayCCError(c, ptStatus, ptErrType, ptErrMsg)
+			return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
+		}
+		errType := "server_error"
+		if resp.StatusCode == http.StatusBadRequest {
+			errType = "invalid_request_error"
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			errType = "rate_limit_error"
+		}
+		if upstreamType := extractUpstreamErrorType(respBody); upstreamType != "" {
+			errType = upstreamType
+		}
+		writeGatewayCCError(c, mapUpstreamStatusCode(resp.StatusCode), errType, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

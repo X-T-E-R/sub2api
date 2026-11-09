@@ -409,7 +409,16 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		})
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] upstream error status=%d body=%s", resp.StatusCode, truncateForLog(unwrappedForOps, 500))
 		MarkResponseCommitted(c)
-		c.Data(resp.StatusCode, contentType, unwrappedForOps)
+		trimmedBody := bytes.TrimSpace(unwrappedForOps)
+		if len(trimmedBody) > 0 && json.Valid(trimmedBody) {
+			c.Data(resp.StatusCode, contentType, sanitizeUpstreamErrorBody(unwrappedForOps))
+		} else {
+			fallbackMsg := getPassthroughOrDefault(upstreamMsg, http.StatusText(resp.StatusCode))
+			if fallbackMsg == "" {
+				fallbackMsg = "Upstream request failed"
+			}
+			_ = s.writeGoogleError(c, resp.StatusCode, fallbackMsg)
+		}
 		return nil, fmt.Errorf("antigravity upstream error: %d", resp.StatusCode)
 	}
 

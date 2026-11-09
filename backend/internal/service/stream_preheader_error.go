@@ -16,21 +16,26 @@ var streamPreheaderGoogleDuration = regexp.MustCompile(`^[0-9]+(?:\.[0-9]{1,9})?
 
 func streamPreheaderBodyRetryDelay(body []byte) string {
 	var delay string
-	gjson.GetBytes(body, "error.details").ForEach(func(_, detail gjson.Result) bool {
-		if detail.Get("@type").String() != googleRPCTypeRetryInfo {
+	for _, path := range []string{"error.details", "response.error.details"} {
+		gjson.GetBytes(body, path).ForEach(func(_, detail gjson.Result) bool {
+			if detail.Get("@type").String() != googleRPCTypeRetryInfo {
+				return true
+			}
+			value := detail.Get("retryDelay").String()
+			if !streamPreheaderGoogleDuration.MatchString(value) {
+				return true
+			}
+			seconds, err := strconv.ParseFloat(strings.TrimSuffix(value, "s"), 64)
+			if err == nil && seconds <= 315576000000 {
+				delay = value
+				return false
+			}
 			return true
+		})
+		if delay != "" {
+			return delay
 		}
-		value := detail.Get("retryDelay").String()
-		if !streamPreheaderGoogleDuration.MatchString(value) {
-			return true
-		}
-		seconds, err := strconv.ParseFloat(strings.TrimSuffix(value, "s"), 64)
-		if err == nil && seconds <= 315576000000 {
-			delay = value
-			return false
-		}
-		return true
-	})
+	}
 	return delay
 }
 

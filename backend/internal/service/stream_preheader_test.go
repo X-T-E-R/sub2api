@@ -204,12 +204,14 @@ func TestStreamPreheaderSlowHTTPHeadersFourProtocols(t *testing.T) {
 					require.NotContains(t, string(rest), "[DONE]")
 					if protocol == "gemini" {
 						require.Contains(t, string(rest), `"code":`+strconv.Itoa(status))
+						require.Contains(t, string(rest), `"message":"fixture rejection"`)
 						require.Contains(t, string(rest), `"domain":"sub2api.gateway"`)
 						require.Contains(t, string(rest), `"reason":"GATEWAY_STREAM_TERMINAL_ERROR"`)
 						require.Contains(t, string(rest), `"retryDelay":"17s"`)
 						require.NotContains(t, string(rest), "event: error")
 					} else {
 						require.Contains(t, string(rest), `"code":"gateway_stream_terminal_error"`)
+						require.Contains(t, string(rest), `"message":"fixture rejection"`)
 						require.Contains(t, string(rest), `"retry_after":"17"`)
 						wantType := "authentication_error"
 						if status == 429 {
@@ -698,6 +700,40 @@ func TestStreamPreheaderGeminiMessagesDoesNotSynthesizeSuccess(t *testing.T) {
 			} else {
 				require.Equal(t, 8, result.usage.InputTokens)
 				require.Equal(t, 3, result.usage.OutputTokens)
+			}
+		})
+	}
+}
+
+func TestFinishStreamPreheaderFailover_PreservesResponseBodyMessageAndRetryDelay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{Gateway: config.GatewayConfig{StreamPreheaderKeepaliveEnabled: true, StreamKeepaliveInterval: 1}}
+
+	for _, protocol := range []string{"messages", "gemini", "chat", "responses"} {
+		t.Run(protocol, func(t *testing.T) {
+			c, recorder := newAntigravityCompatContext("POST", "/v1/"+protocol, nil)
+			ConfigureStreamPreheader(c, cfg, protocol, true)
+			c.Header("Content-Type", "text/event-stream")
+			c.Status(http.StatusOK)
+			markStreamPreheaderBodyHeartbeat(c)
+
+			failoverErr := &UpstreamFailoverError{
+				StatusCode: http.StatusTooManyRequests,
+				ResponseBody: []byte(`{"error":{"code":429,"message":"Quota exceeded for model claude-sonnet-4-5 at ?key=AIzaSySecretKey12345678901234567890","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"9.5s"}]}}`),
+			}
+			handled := FinishStreamPreheaderFailover(c, failoverErr)
+			require.True(t, handled)
+			require.True(t, StreamPreheaderFinalized(c))
+
+			wire := recorder.Body.String()
+			require.Contains(t, wire, "Quota exceeded for model claude-sonnet-4-5 at ?key=***")
+			require.NotContains(t, wire, "AIzaSySecretKey")
+			if protocol == "gemini" {
+				require.Contains(t, wire, `"retryDelay":"9.5s"`)
+				require.Contains(t, wire, `"status":"RESOURCE_EXHAUSTED"`)
+			} else {
+				require.Contains(t, wire, `"retry_after":"9.5"`)
+				require.Contains(t, wire, `"code":"gateway_stream_terminal_error"`)
 			}
 		})
 	}
