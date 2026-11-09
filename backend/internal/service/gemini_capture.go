@@ -21,11 +21,13 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 const (
-	// GeminiCaptureTargetModel is intentionally fixed. This trace is a temporary
-	// incident tool, not a general body logging switch.
+	// GeminiCaptureTargetModel is retained as the default/reference target model
+	// for existing single-model leases and tests; leases may configure any model
+	// or model list via model/models.
 	GeminiCaptureTargetModel = "gemini-3.8-flash"
 
 	geminiCaptureSchemaVersion     = 1
@@ -53,8 +55,11 @@ const (
 // renews it by replacing this small JSON file.
 type GeminiCaptureLease struct {
 	Enabled         bool     `json:"enabled"`
-	MetadataUserIDs []string `json:"metadata_user_ids"`
-	Model           string   `json:"model"`
+	MetadataUserIDs []string `json:"metadata_user_ids,omitempty"`
+	APIKeyIDs       []int64  `json:"api_key_ids,omitempty"`
+	UserIDs         []int64  `json:"user_ids,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	Models          []string `json:"models,omitempty"`
 	ExpiresAt       string   `json:"expires_at"`
 	OutputDir       string   `json:"output_dir"`
 }
@@ -75,20 +80,24 @@ type GeminiCaptureRequest struct {
 
 	mu sync.Mutex
 
-	candidate        bool
-	selectedAG       bool
-	modelChecked     bool
-	modelMatched     bool
-	activated        bool
-	finalized        bool
-	captureEnabled   bool
-	incompleteReason map[string]struct{}
+	candidate          bool
+	deferredCandidate  bool
+	selectedAG         bool
+	modelChecked       bool
+	modelMatched       bool
+	activated          bool
+	finalized          bool
+	captureEnabled     bool
+	incompleteReason   map[string]struct{}
 
 	metadataUserID      string
 	requestModel        string
+	mappedModel         string
 	finalModel          string
+	wireRequestType     string
 	stream              bool
 	userID              int64
+	apiKeyID            int64
 	groupID             int64
 	selectedAccountID   int64
 	selectedAccountType string
@@ -536,12 +545,15 @@ type geminiCaptureManifest struct {
 	RequestID             string                               `json:"request_id,omitempty"`
 	ClientRequestID       string                               `json:"client_request_id,omitempty"`
 	UserID                int64                                `json:"user_id,omitempty"`
+	APIKeyID              int64                                `json:"api_key_id,omitempty"`
 	GroupID               int64                                `json:"group_id,omitempty"`
 	SelectedAccountID     int64                                `json:"selected_account_id,omitempty"`
 	MetadataUserID        string                               `json:"metadata_user_id"`
 	RequestPath           string                               `json:"request_path"`
 	RequestModel          string                               `json:"request_model"`
+	MappedModel           string                               `json:"mapped_model,omitempty"`
 	FinalModel            string                               `json:"final_model,omitempty"`
+	WireRequestType       string                               `json:"wire_request_type,omitempty"`
 	Stream                bool                                 `json:"stream"`
 	AGChain               bool                                 `json:"ag_chain"`
 	GatewayStatus         int                                  `json:"gateway_status"`
@@ -667,17 +679,27 @@ func (b *geminiCaptureOutputBudget) release(size int64) {
 	b.mu.Unlock()
 }
 
-// Begin matches only the legal Messages endpoint and exact request model/user
-// lease entry. It does not create files yet; actual AG activation is required.
-func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBody []byte, metadataUserID, requestModel string, stream bool, userID int64) *GeminiCaptureRequest {
+// Begin matches only the legal Messages endpoint and configured lease filters.
+// It does not create files yet; actual AG activation is required.
+func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBody []byte, metadataUserID, requestModel string, stream bool, userID int64, apiKeyIDs ...int64) *GeminiCaptureRequest {
 	if g == nil || strings.TrimSpace(g.leasePath) == "" || requestPath != "/v1/messages" {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var apiKeyID int64
+	if len(apiKeyIDs) > 0 {
+		apiKeyID = apiKeyIDs[0]
+	}
 	lease, expiresAt, ok := readGeminiCaptureLease(g.leasePath)
-	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || requestModel != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, metadataUserID) {
+	if !ok || !lease.Enabled || !leaseMatchesIdentity(lease, metadataUserID, userID, apiKeyID) {
+		return nil
+	}
+	requestMatched := leaseMatchesModel(lease, requestModel)
+	identityScoped := (len(lease.APIKeyIDs) > 0 && apiKeyID > 0) || (len(lease.UserIDs) > 0 && userID > 0) || (len(lease.MetadataUserIDs) > 0 && len(lease.Models) > 1)
+	deferredCandidate := !requestMatched && (inboundHasWebSearchTool(inboundBody) || identityScoped)
+	if !requestMatched && !deferredCandidate {
 		return nil
 	}
 	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
@@ -694,7 +716,8 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 	capture := &GeminiCaptureRequest{
 		controller:         g,
 		ctx:                ctx,
-		candidate:          true,
+		candidate:          requestMatched,
+		deferredCandidate:  deferredCandidate,
 		captureEnabled:     true,
 		activationStage:    "candidate",
 		incompleteReason:   make(map[string]struct{}),
@@ -703,6 +726,7 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 		requestModel:       requestModel,
 		stream:             stream,
 		userID:             userID,
+		apiKeyID:           apiKeyID,
 		requestID:          strings.TrimSpace(requestID),
 		clientRequestID:    strings.TrimSpace(clientRequestID),
 		startedAtTime:      time.Now().UTC(),
@@ -819,44 +843,56 @@ func (r *GeminiCaptureRequest) Activate(account *Account, finalModel string, gem
 	if r == nil {
 		return false
 	}
+	wireModel := strings.TrimSpace(gjson.GetBytes(geminiBody, "model").String())
+	wireRequestType := strings.TrimSpace(gjson.GetBytes(geminiBody, "requestType").String())
+	effectiveFinalModel := strings.TrimSpace(finalModel)
+	if wireModel != "" {
+		effectiveFinalModel = wireModel
+	}
 	if account == nil {
-		r.recordDiagnosticStage("activate_rejected", "account_nil", 0, "", finalModel)
+		r.recordDiagnosticStage("activate_rejected", "account_nil", 0, "", effectiveFinalModel)
 		r.disable("account_nil")
 		return false
 	}
 	if account.Platform != PlatformAntigravity {
-		r.recordDiagnosticStage("activate_rejected", "platform_mismatch", account.ID, account.Type, finalModel)
+		r.recordDiagnosticStage("activate_rejected", "platform_mismatch", account.ID, account.Type, effectiveFinalModel)
 		r.disable("platform_mismatch")
 		return false
 	}
 	if account.Type == AccountTypeAPIKey {
-		r.recordDiagnosticStage("activate_rejected", "account_type_api_key", account.ID, account.Type, finalModel)
+		r.recordDiagnosticStage("activate_rejected", "account_type_api_key", account.ID, account.Type, effectiveFinalModel)
 		r.disable("account_type_api_key")
 		return false
 	}
 	if account.Type == AccountTypeUpstream {
-		r.recordDiagnosticStage("activate_rejected", "account_type_upstream", account.ID, account.Type, finalModel)
+		r.recordDiagnosticStage("activate_rejected", "account_type_upstream", account.ID, account.Type, effectiveFinalModel)
 		r.disable("account_type_upstream")
 		return false
 	}
-	modelMatched := isGeminiCaptureFinalModel(finalModel)
+	r.mu.Lock()
+	lease := r.lease
+	requestModel := r.requestModel
+	r.mu.Unlock()
+	modelMatched := leaseMatchesActivatedModel(lease, requestModel, finalModel, effectiveFinalModel, wireRequestType)
 	r.mu.Lock()
 	r.modelChecked = true
 	r.modelMatched = modelMatched
+	r.mappedModel = strings.TrimSpace(finalModel)
+	r.wireRequestType = wireRequestType
 	if modelMatched {
-		r.finalModel = finalModel
+		r.finalModel = effectiveFinalModel
 	}
 	r.selectedAG = true
 	r.mu.Unlock()
-	r.recordDiagnosticStage("final_model_checked", "", account.ID, account.Type, finalModel)
+	r.recordDiagnosticStage("final_model_checked", "", account.ID, account.Type, effectiveFinalModel)
 	if !modelMatched {
-		r.recordDiagnosticStage("activate_rejected", "final_model_mismatch", account.ID, account.Type, finalModel)
+		r.recordDiagnosticStage("activate_rejected", "final_model_mismatch", account.ID, account.Type, effectiveFinalModel)
 		return false
 	}
 	if !r.activateArtifact(geminiBody) {
 		return false
 	}
-	r.recordDiagnosticStage("activated", "", account.ID, account.Type, finalModel)
+	r.recordDiagnosticStage("activated", "", account.ID, account.Type, effectiveFinalModel)
 	return true
 }
 
@@ -866,10 +902,17 @@ func (r *GeminiCaptureRequest) activateArtifact(geminiBody []byte) bool {
 		r.mu.Unlock()
 		return r.activated
 	}
+	requestModel := r.requestModel
+	mappedModel := r.mappedModel
+	finalModel := r.finalModel
+	wireRequestType := r.wireRequestType
+	metadataUserID := r.metadataUserID
+	userID := r.userID
+	apiKeyID := r.apiKeyID
 	r.mu.Unlock()
 
 	lease, expiresAt, ok := readGeminiCaptureLease(r.controller.leasePath)
-	if !ok || !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || !privateOutputDir(lease.OutputDir) {
+	if !ok || !lease.Enabled || !leaseMatchesIdentity(lease, metadataUserID, userID, apiKeyID) || !leaseMatchesActivatedModel(lease, requestModel, mappedModel, finalModel, wireRequestType) || !privateOutputDir(lease.OutputDir) {
 		r.rejectActivation("lease_invalid_or_expired")
 		r.disable("lease_invalid_or_expired")
 		return false
@@ -1528,6 +1571,12 @@ func (r *GeminiCaptureRequest) leaseStillValid() bool {
 	}
 	path := r.controller.leasePath
 	metadataUserID := r.metadataUserID
+	userID := r.userID
+	apiKeyID := r.apiKeyID
+	requestModel := r.requestModel
+	mappedModel := r.mappedModel
+	finalModel := r.finalModel
+	wireRequestType := r.wireRequestType
 	r.lastLeaseCheck = now
 	r.leaseRefreshInFlight = true
 	r.mu.Unlock()
@@ -1537,7 +1586,7 @@ func (r *GeminiCaptureRequest) leaseStillValid() bool {
 	// subsequent appends. Finish performs the final manifest after queued data.
 	go func() {
 		lease, expiresAt, ok := readGeminiCaptureLease(path)
-		valid := ok && lease.Enabled && lease.Model == GeminiCaptureTargetModel && containsExact(lease.MetadataUserIDs, metadataUserID) && time.Now().Before(expiresAt)
+		valid := ok && lease.Enabled && leaseMatchesIdentity(lease, metadataUserID, userID, apiKeyID) && leaseMatchesActivatedModel(lease, requestModel, mappedModel, finalModel, wireRequestType) && time.Now().Before(expiresAt)
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.leaseRefreshInFlight = false
@@ -1710,8 +1759,12 @@ func (r *GeminiCaptureRequest) activateLocalFailureArtifact() bool {
 	r.mu.Lock()
 	lease := r.lease
 	expiresAt := r.leaseExpiresAt
+	requestModel := r.requestModel
+	metadataUserID := r.metadataUserID
+	userID := r.userID
+	apiKeyID := r.apiKeyID
 	r.mu.Unlock()
-	if !lease.Enabled || lease.Model != GeminiCaptureTargetModel || !containsExact(lease.MetadataUserIDs, r.metadataUserID) || time.Now().After(expiresAt) || !privateOutputDir(lease.OutputDir) {
+	if !lease.Enabled || !leaseMatchesIdentity(lease, metadataUserID, userID, apiKeyID) || !leaseMatchesModel(lease, requestModel) || time.Now().After(expiresAt) || !privateOutputDir(lease.OutputDir) {
 		r.disable("lease_invalid_or_expired")
 		return false
 	}
@@ -1850,14 +1903,15 @@ func (r *GeminiCaptureRequest) buildManifestLocked(files map[string]GeminiCaptur
 	}
 	return geminiCaptureManifest{
 		SchemaVersion: geminiCaptureSchemaVersion, StartedAt: r.startedAt(), FinishedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		RequestID: r.requestID, ClientRequestID: r.clientRequestID, UserID: r.userID,
+		RequestID: r.requestID, ClientRequestID: r.clientRequestID, UserID: r.userID, APIKeyID: r.apiKeyID,
 		GroupID: r.groupID, SelectedAccountID: r.selectedAccountID,
 		MetadataUserID: r.metadataUserID, RequestPath: "/v1/messages", RequestModel: r.requestModel,
-		FinalModel: r.finalModelLocked(), Stream: r.stream, AGChain: r.selectedAG,
+		MappedModel: r.mappedModel, FinalModel: r.finalModelLocked(), WireRequestType: r.wireRequestType,
+		Stream: r.stream, AGChain: r.selectedAG,
 		GatewayStatus: r.gatewayStatus, Outcome: outcome, UpstreamAttempts: len(attempts),
 		UpstreamFinishReasons: r.collectFinishReasons(files), Usage: r.usage, Termination: termination,
 		Incomplete: incomplete, IncompleteReasons: incompleteReasons, RedactedFields: r.redactedFields,
-		HeadersRecorded: false, CredentialHandling: "JSON credential-like fields are replaced with [REDACTED]; HTTP headers are never recorded; thoughtSignature is retained.",
+		HeadersRecorded: false, CredentialHandling: "Top-level/envelope credential fields are replaced with [REDACTED]; business content (messages, system, tools, contents, candidates, thoughtSignature) is retained verbatim; HTTP headers are never recorded.",
 		CaptureStage: r.activationStage, SelectedAccountType: r.selectedAccountType, ActivationReason: r.activationReason,
 		Files: files, Attempts: attempts,
 	}
@@ -2034,16 +2088,121 @@ func readGeminiCaptureLease(path string) (GeminiCaptureLease, time.Time, bool) {
 	if err != nil || expiresAt.IsZero() || !expiresAt.After(time.Now()) {
 		return lease, time.Time{}, false
 	}
-	if strings.TrimSpace(lease.Model) != GeminiCaptureTargetModel || strings.TrimSpace(lease.OutputDir) == "" || len(lease.MetadataUserIDs) == 0 {
+	if strings.TrimSpace(lease.OutputDir) == "" {
 		return lease, time.Time{}, false
+	}
+	models := make([]string, 0, 1+len(lease.Models))
+	if trimmedModel := strings.TrimPrefix(strings.TrimSpace(lease.Model), "models/"); trimmedModel != "" {
+		models = appendUniqueStrings(models, trimmedModel)
+		lease.Model = trimmedModel
+	}
+	for _, rawModel := range lease.Models {
+		trimmedModel := strings.TrimPrefix(strings.TrimSpace(rawModel), "models/")
+		if trimmedModel == "" {
+			return lease, time.Time{}, false
+		}
+		models = appendUniqueStrings(models, trimmedModel)
+	}
+	if len(models) == 0 {
+		return lease, time.Time{}, false
+	}
+	lease.Models = models
+	if lease.Model == "" {
+		lease.Model = models[0]
 	}
 	for _, userID := range lease.MetadataUserIDs {
 		if strings.TrimSpace(userID) == "" {
 			return lease, time.Time{}, false
 		}
 	}
+	for _, keyID := range lease.APIKeyIDs {
+		if keyID <= 0 {
+			return lease, time.Time{}, false
+		}
+	}
+	for _, uid := range lease.UserIDs {
+		if uid <= 0 {
+			return lease, time.Time{}, false
+		}
+	}
 	lease.ExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
 	return lease, expiresAt, true
+}
+
+func leaseTargetModels(lease GeminiCaptureLease) []string {
+	models := make([]string, 0, 1+len(lease.Models))
+	if trimmed := strings.TrimPrefix(strings.TrimSpace(lease.Model), "models/"); trimmed != "" {
+		models = appendUniqueStrings(models, trimmed)
+	}
+	for _, m := range lease.Models {
+		if trimmed := strings.TrimPrefix(strings.TrimSpace(m), "models/"); trimmed != "" {
+			models = appendUniqueStrings(models, trimmed)
+		}
+	}
+	return models
+}
+
+func leaseMatchesModel(lease GeminiCaptureLease, candidate string) bool {
+	for _, target := range leaseTargetModels(lease) {
+		if isGeminiCaptureModelMatch(target, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func leaseMatchesActivatedModel(lease GeminiCaptureLease, requestModel, mappedModel, effectiveFinalModel, wireRequestType string) bool {
+	if leaseMatchesModel(lease, effectiveFinalModel) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(wireRequestType), "web_search") {
+		if leaseMatchesModel(lease, requestModel) || leaseMatchesModel(lease, mappedModel) {
+			return true
+		}
+	}
+	return false
+}
+
+func leaseMatchesIdentity(lease GeminiCaptureLease, metadataUserID string, userID, apiKeyID int64) bool {
+	if len(lease.MetadataUserIDs) > 0 && !containsExact(lease.MetadataUserIDs, metadataUserID) {
+		return false
+	}
+	if len(lease.UserIDs) > 0 && !containsInt64(lease.UserIDs, userID) {
+		return false
+	}
+	if len(lease.APIKeyIDs) > 0 && !containsInt64(lease.APIKeyIDs, apiKeyID) {
+		return false
+	}
+	return true
+}
+
+func inboundHasWebSearchTool(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	found := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		if strings.HasPrefix(toolType, "web_search") || toolType == "google_search" {
+			found = true
+			return false
+		}
+		toolName := strings.TrimSpace(tool.Get("name").String())
+		if toolName == "web_search" || toolName == "google_search" || toolName == "web_search_20250305" {
+			found = true
+			return false
+		}
+		if tool.Get("googleSearch").Exists() || tool.Get("google_search").Exists() {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func privateOutputDir(path string) bool {
@@ -2138,15 +2297,22 @@ func redactGeminiCaptureJSON(body []byte) ([]byte, []string, bool) {
 }
 
 func redactGeminiCaptureValue(value any, parent string, fields *[]string) any {
+	if isBusinessContentCapturePath(parent) {
+		return value
+	}
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
-			if isCredentialCaptureField(key) && !strings.EqualFold(key, "thoughtSignature") {
-				typed[key] = "[REDACTED]"
-				*fields = appendUniqueStrings(*fields, parentPath(parent, key))
+			nextPath := parentPath(parent, key)
+			if isBusinessContentCapturePath(nextPath) {
 				continue
 			}
-			typed[key] = redactGeminiCaptureValue(child, parentPath(parent, key), fields)
+			if isCredentialCaptureField(key) && !strings.EqualFold(key, "thoughtSignature") {
+				typed[key] = "[REDACTED]"
+				*fields = appendUniqueStrings(*fields, nextPath)
+				continue
+			}
+			typed[key] = redactGeminiCaptureValue(child, nextPath, fields)
 		}
 	case []any:
 		for i, child := range typed {
@@ -2154,6 +2320,54 @@ func redactGeminiCaptureValue(value any, parent string, fields *[]string) any {
 		}
 	}
 	return value
+}
+
+func isBusinessContentCapturePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, root := range []string{
+		"messages",
+		"system",
+		"tools",
+		"tool_choice",
+		"thinking",
+		"output_config",
+		"contents",
+		"systemInstruction",
+		"system_instruction",
+		"toolConfig",
+		"tool_config",
+		"generationConfig",
+		"generation_config",
+		"safetySettings",
+		"safety_settings",
+		"candidates",
+		"content",
+		"parts",
+		"delta",
+		"content_block",
+		"groundingMetadata",
+		"grounding_metadata",
+		"request.contents",
+		"request.systemInstruction",
+		"request.system_instruction",
+		"request.tools",
+		"request.toolConfig",
+		"request.tool_config",
+		"request.generationConfig",
+		"request.generation_config",
+		"request.safetySettings",
+		"request.safety_settings",
+		"response.candidates",
+		"response.groundingMetadata",
+		"message.content",
+	} {
+		if path == root || strings.HasPrefix(path, root+".") || strings.HasPrefix(path, root+"[") {
+			return true
+		}
+	}
+	return false
 }
 
 func parentPath(parent, key string) string {

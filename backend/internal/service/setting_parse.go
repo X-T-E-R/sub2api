@@ -240,6 +240,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAntigravityUserAgentVersion:                        "",
 		SettingKeyAntigravitySystemInstructionRewriteEnabled:         "false",
 		SettingKeyAntigravitySystemInstructionRewritePhrases:         "",
+		SettingKeyAntigravityWebSearchModel:                          "",
 		SettingKeyOpenAICodexUserAgent:                               "",
 		SettingKeyOpenAICodexClientVersion:                           "",
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
@@ -879,6 +880,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.AntigravitySystemInstructionRewriteEnabled = strings.TrimSpace(settings[SettingKeyAntigravitySystemInstructionRewriteEnabled]) == "true"
 	result.AntigravitySystemInstructionRewritePhrases = antigravity.ParseStoredSystemInstructionRewritePhrases(settings[SettingKeyAntigravitySystemInstructionRewritePhrases])
 	result.AntigravitySystemInstructionRewritePhrasesSet = true
+	result.AntigravityWebSearchModel, _ = antigravity.NormalizeWebSearchModel(settings[SettingKeyAntigravityWebSearchModel])
 	result.OpenAICodexUserAgent = strings.TrimSpace(settings[SettingKeyOpenAICodexUserAgent])
 	result.OpenAICodexClientVersion = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersion])
 	result.OpenAICodexClientVersionSynced = NormalizeCodexClientVersion(settings[SettingKeyOpenAICodexClientVersionSynced])

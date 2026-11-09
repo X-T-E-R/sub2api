@@ -654,6 +654,8 @@ const (
 	SettingKeyAntigravitySystemInstructionRewriteEnabled = "antigravity_system_instruction_rewrite_enabled"
 	// SettingKeyAntigravitySystemInstructionRewritePhrases stores the JSON array of Antigravity outbound systemInstruction rewrite phrases; unconfigured/empty raw falls back to the Magpie default five phrases, while "[]" means an explicitly cleared list.
 	SettingKeyAntigravitySystemInstructionRewritePhrases = "antigravity_system_instruction_rewrite_phrases"
+	// SettingKeyAntigravityWebSearchModel overrides the target model used when Antigravity requests carry built-in web_search/google_search tools (empty uses built-in default gemini-2.5-flash).
+	SettingKeyAntigravityWebSearchModel = "antigravity_web_search_model"
 	// SettingKeyOpenAICodexUserAgent OpenAI Codex 完整 User-Agent（空值使用内置默认）
 	// 当客户端 UA 被识别为浏览器（Chrome/Firefox/Safari/Edge 等）时，转发给 OpenAI 上游前会替换为此值，
 	// 用于避免 Cloudflare 对浏览器型 UA 的质询拦截。

@@ -59,6 +59,10 @@ type TransformOptions struct {
 	// explicitly populated by AntigravityGatewayService when forwarding.
 	SystemInstructionRewriteEnabled bool
 	SystemInstructionRewritePhrases []string
+	// WebSearchModel overrides the default target model used when built-in
+	// web_search / google_search tools are present on the request. Empty uses
+	// webSearchFallbackModel ("gemini-2.5-flash").
+	WebSearchModel string
 }
 
 func DefaultTransformOptions() TransformOptions {
@@ -70,6 +74,37 @@ func DefaultTransformOptions() TransformOptions {
 
 // webSearchFallbackModel web_search 请求使用的降级模型
 const webSearchFallbackModel = "gemini-2.5-flash"
+
+// DefaultWebSearchFallbackModel returns the default Antigravity model used for
+// built-in web_search requests when no custom search model is configured.
+const DefaultWebSearchFallbackModel = webSearchFallbackModel
+
+// NormalizeWebSearchModel validates and trims an optional Antigravity web search
+// target model ID. Empty string means use DefaultWebSearchFallbackModel.
+func NormalizeWebSearchModel(raw string) (string, error) {
+	trimmed := strings.TrimPrefix(strings.TrimSpace(raw), "models/")
+	if trimmed == "" {
+		return "", nil
+	}
+	if len(trimmed) > 128 {
+		return "", fmt.Errorf("antigravity_web_search_model must be at most 128 characters")
+	}
+	for _, r := range trimmed {
+		if r <= 0x20 || r >= 0x7f {
+			return "", fmt.Errorf("antigravity_web_search_model must contain only printable ASCII characters without whitespace")
+		}
+	}
+	return trimmed, nil
+}
+
+// EffectiveWebSearchModel returns the configured web search model or
+// DefaultWebSearchFallbackModel when unconfigured/invalid.
+func EffectiveWebSearchModel(raw string) string {
+	if normalized, err := NormalizeWebSearchModel(raw); err == nil && normalized != "" {
+		return normalized
+	}
+	return webSearchFallbackModel
+}
 
 // MaxTokensBudgetPadding max_tokens 自动调整时在 budget_tokens 基础上增加的额度
 // Claude API 要求 max_tokens > thinking.budget_tokens，否则返回 400 错误
@@ -108,8 +143,9 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	targetModel := mappedModel
 	if hasWebSearchTool {
 		requestType = "web_search"
-		if targetModel != webSearchFallbackModel {
-			targetModel = webSearchFallbackModel
+		searchModel := EffectiveWebSearchModel(opts.WebSearchModel)
+		if targetModel != searchModel {
+			targetModel = searchModel
 		}
 	}
 
@@ -947,6 +983,11 @@ func buildGenerationConfig(req *ClaudeRequest, effortResolvedByMapping bool) *Ge
 	}
 
 	return config
+}
+
+// HasWebSearchTool reports whether tools contains a built-in web_search / google_search tool.
+func HasWebSearchTool(tools []ClaudeTool) bool {
+	return hasWebSearchTool(tools)
 }
 
 func hasWebSearchTool(tools []ClaudeTool) bool {

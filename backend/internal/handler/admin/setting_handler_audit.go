@@ -488,6 +488,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if !equalStringSlice(before.AntigravitySystemInstructionRewritePhrases, after.AntigravitySystemInstructionRewritePhrases) {
 		changed = append(changed, "antigravity_system_instruction_rewrite_phrases")
 	}
+	if before.AntigravityWebSearchModel != after.AntigravityWebSearchModel {
+		changed = append(changed, "antigravity_web_search_model")
+	}
 	if before.OpenAICodexUserAgent != after.OpenAICodexUserAgent {
 		changed = append(changed, "openai_codex_user_agent")
 	}

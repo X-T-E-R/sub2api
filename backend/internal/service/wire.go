@@ -786,6 +786,9 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	if err := svc.LoadAntigravitySystemInstructionRewriteSettings(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: load Antigravity systemInstruction rewrite settings failed: %v", err)
 	}
+	if err := svc.LoadAntigravityWebSearchModelSettings(context.Background()); err != nil {
+		logger.LegacyPrintf("service.setting", "Warning: load Antigravity web search model settings failed: %v", err)
+	}
 	if err := svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: migrate openai allow Claude Code Codex plugin setting failed: %v", err)
 	}

@@ -214,6 +214,7 @@ type SystemSettings struct {
 	AntigravityUserAgentVersion                 string   `json:"antigravity_user_agent_version"`
 	AntigravitySystemInstructionRewriteEnabled  bool     `json:"antigravity_system_instruction_rewrite_enabled"`
 	AntigravitySystemInstructionRewritePhrases  []string `json:"antigravity_system_instruction_rewrite_phrases"`
+	AntigravityWebSearchModel                   string   `json:"antigravity_web_search_model"`
 	OpenAICodexUserAgent                   string `json:"openai_codex_user_agent"`
 	OpenAICodexClientVersion               string `json:"openai_codex_client_version"`
 	OpenAICodexClientVersionSynced         string `json:"openai_codex_client_version_synced"`

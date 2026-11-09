@@ -498,6 +498,7 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	rewriteEnabled, rewritePhrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
 	opts.SystemInstructionRewriteEnabled = rewriteEnabled
 	opts.SystemInstructionRewritePhrases = rewritePhrases
+	opts.WebSearchModel = s.settingService.GetAntigravityWebSearchModel(ctx)
 	return opts
 }
 
@@ -644,16 +645,54 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 		return nil, errAntigravityProjectIDRequired
 	}
 
+	requestType := "agent"
+	targetModel := model
+	if hasGeminiGoogleSearchTool(request) {
+		requestType = "web_search"
+		configuredSearchModel := ""
+		if s != nil && s.settingService != nil {
+			configuredSearchModel = s.settingService.GetAntigravityWebSearchModel(context.Background())
+		}
+		searchModel := antigravity.EffectiveWebSearchModel(configuredSearchModel)
+		if configuredSearchModel != "" || targetModel == "" {
+			targetModel = searchModel
+		}
+	}
+
 	wrapped := map[string]any{
 		"project":     projectID,
 		"requestId":   "agent-" + uuid.New().String(),
 		"userAgent":   "antigravity", // 固定值，与官方客户端一致
-		"requestType": "agent",
-		"model":       model,
+		"requestType": requestType,
+		"model":       targetModel,
 		"request":     request,
 	}
 
 	return json.Marshal(wrapped)
+}
+
+func hasGeminiGoogleSearchTool(request any) bool {
+	reqMap, ok := request.(map[string]any)
+	if !ok {
+		return false
+	}
+	tools, ok := reqMap["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawTool := range tools {
+		toolMap, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, has := toolMap["googleSearch"]; has {
+			return true
+		}
+		if _, has := toolMap["google_search"]; has {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *AntigravityGatewayService) applyAntigravitySystemInstructionRewrite(ctx context.Context, body []byte) []byte {

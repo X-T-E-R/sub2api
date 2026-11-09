@@ -656,3 +656,86 @@ func TestToolConfigAlwaysPresent(t *testing.T) {
 		})
 	}
 }
+
+func TestTransformClaudeToGeminiWithOptions_ConfigurableWebSearchModel(t *testing.T) {
+	webSearchTool := ClaudeTool{
+		Type: "web_search_20250305",
+		Name: "web_search",
+	}
+	functionTool := ClaudeTool{
+		Name:        "read_file",
+		Description: "Read a file",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
+	}
+
+	t.Run("default empty WebSearchModel falls back to gemini-2.5-flash when web_search tool present", func(t *testing.T) {
+		claudeReq := &ClaudeRequest{
+			Model:    "gemini-4-argon-high",
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"Search latest Go release"`)}},
+			Tools:    []ClaudeTool{webSearchTool},
+		}
+		opts := DefaultTransformOptions()
+		body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-4-argon-high", opts)
+		require.NoError(t, err)
+
+		var req V1InternalRequest
+		require.NoError(t, json.Unmarshal(body, &req))
+		require.Equal(t, DefaultWebSearchFallbackModel, req.Model)
+		require.Equal(t, "web_search", req.RequestType)
+		require.Len(t, req.Request.Tools, 1)
+		require.NotNil(t, req.Request.Tools[0].GoogleSearch)
+	})
+
+	t.Run("configured gemini-3.1-flash-lite switches targetModel and sets requestType=web_search", func(t *testing.T) {
+		claudeReq := &ClaudeRequest{
+			Model:    "gemini-4-argon-high",
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"Find the latest news"}]`)}},
+			Tools:    []ClaudeTool{webSearchTool},
+		}
+		opts := DefaultTransformOptions()
+		opts.WebSearchModel = "models/gemini-3.1-flash-lite"
+		body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-4-argon-high", opts)
+		require.NoError(t, err)
+
+		var req V1InternalRequest
+		require.NoError(t, json.Unmarshal(body, &req))
+		require.Equal(t, "gemini-3.1-flash-lite", req.Model)
+		require.Equal(t, "web_search", req.RequestType)
+		require.Len(t, req.Request.Tools, 1)
+		require.NotNil(t, req.Request.Tools[0].GoogleSearch)
+	})
+
+	t.Run("normal Argon request without web_search tool never switches to WebSearchModel", func(t *testing.T) {
+		claudeReq := &ClaudeRequest{
+			Model:    "gemini-4-argon-high",
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"Write a function"`)}},
+			Tools:    []ClaudeTool{functionTool},
+		}
+		opts := DefaultTransformOptions()
+		opts.WebSearchModel = "gemini-3.1-flash-lite"
+		body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-4-argon-high", opts)
+		require.NoError(t, err)
+
+		var req V1InternalRequest
+		require.NoError(t, json.Unmarshal(body, &req))
+		require.Equal(t, "gemini-4-argon-high", req.Model)
+		require.Equal(t, "agent", req.RequestType)
+		require.Len(t, req.Request.Tools, 1)
+		require.Nil(t, req.Request.Tools[0].GoogleSearch)
+	})
+}
+
+func TestNormalizeWebSearchModel(t *testing.T) {
+	model, err := NormalizeWebSearchModel("  models/gemini-3.1-flash-lite ")
+	require.NoError(t, err)
+	require.Equal(t, "gemini-3.1-flash-lite", model)
+
+	model, err = NormalizeWebSearchModel("")
+	require.NoError(t, err)
+	require.Equal(t, "", model)
+	require.Equal(t, DefaultWebSearchFallbackModel, EffectiveWebSearchModel(model))
+
+	_, err = NormalizeWebSearchModel("bad model name")
+	require.Error(t, err)
+}
+

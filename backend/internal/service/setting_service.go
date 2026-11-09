@@ -132,6 +132,8 @@ type SettingService struct {
 	antigravityUAVersionSF                singleflight.Group
 	antigravitySystemRewriteCache         atomic.Value // *cachedAntigravitySystemInstructionRewrite
 	antigravitySystemRewriteMu            sync.Mutex
+	antigravityWebSearchModelCache        atomic.Value // *cachedAntigravityWebSearchModel
+	antigravityWebSearchModelMu           sync.Mutex
 	openAICodexUACache          atomic.Value // *cachedOpenAICodexUserAgent
 	openAICodexUASF             singleflight.Group
 	openAICodexVersionCache     atomic.Value // *cachedOpenAICodexClientVersion
@@ -301,6 +303,7 @@ func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *Setti
 	// completed. Persistent settings are loaded by ProvideSettingService.
 	svc.codexSessionAffinityCache.Store(CodexSessionAffinitySettings{GroupIDs: []int64{}})
 	svc.publishAntigravitySystemInstructionRewrite(false, antigravity.DefaultSystemInstructionRewritePhrases())
+	svc.publishAntigravityWebSearchModel("")
 	return svc
 }
 
