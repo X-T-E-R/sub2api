@@ -109,6 +109,10 @@ type cachedAntigravitySystemInstructionRewrite struct {
 	phrases []string
 }
 
+type cachedAntigravityWebSearchModel struct {
+	model string
+}
+
 // DefaultOpenAICodexUserAgent 是 OpenAI Codex 默认 User-Agent，用于规避浏览器 UA 的质询。
 // 默认采用 codex-tui 身份，版本段随 codexCLIVersion 一起更新。
 const DefaultOpenAICodexUserAgent = codexCLIUserAgent
@@ -353,6 +357,53 @@ func (s *SettingService) publishAntigravitySystemInstructionRewrite(enabled bool
 	s.antigravitySystemRewriteCache.Store(&cachedAntigravitySystemInstructionRewrite{
 		enabled: enabled,
 		phrases: append([]string(nil), normalized...),
+	})
+}
+
+// GetAntigravityWebSearchModel returns the configured Antigravity built-in web
+// search target model from the in-memory runtime snapshot without touching the
+// database on the request hot path. Empty string means use the built-in default
+// (gemini-2.5-flash).
+func (s *SettingService) GetAntigravityWebSearchModel(_ context.Context) string {
+	if s == nil {
+		return ""
+	}
+	if cached, ok := s.antigravityWebSearchModelCache.Load().(*cachedAntigravityWebSearchModel); ok && cached != nil {
+		return cached.model
+	}
+	return ""
+}
+
+// LoadAntigravityWebSearchModelSettings loads the persisted Antigravity built-in
+// web search target model into the in-memory snapshot at startup. On read
+// failure it publishes the empty default and returns the error so the caller
+// can log a warning without aborting service startup.
+func (s *SettingService) LoadAntigravityWebSearchModelSettings(ctx context.Context) error {
+	if s == nil || s.settingRepo == nil {
+		return nil
+	}
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyAntigravityWebSearchModel)
+	if err != nil && !errors.Is(err, ErrSettingNotFound) {
+		s.publishAntigravityWebSearchModel("")
+		return fmt.Errorf("get %s: %w", SettingKeyAntigravityWebSearchModel, err)
+	}
+	model, normErr := antigravity.NormalizeWebSearchModel(raw)
+	if normErr != nil {
+		model = ""
+	}
+	s.publishAntigravityWebSearchModel(model)
+	return nil
+}
+
+func (s *SettingService) publishAntigravityWebSearchModel(raw string) {
+	model, err := antigravity.NormalizeWebSearchModel(raw)
+	if err != nil {
+		model = ""
+	}
+	s.antigravityWebSearchModelMu.Lock()
+	defer s.antigravityWebSearchModelMu.Unlock()
+	s.antigravityWebSearchModelCache.Store(&cachedAntigravityWebSearchModel{
+		model: model,
 	})
 }
 

@@ -257,6 +257,7 @@ type UpdateSettingsRequest struct {
 	AntigravityUserAgentVersion                *string  `json:"antigravity_user_agent_version"`
 	AntigravitySystemInstructionRewriteEnabled bool     `json:"antigravity_system_instruction_rewrite_enabled"`
 	AntigravitySystemInstructionRewritePhrases []string `json:"antigravity_system_instruction_rewrite_phrases"`
+	AntigravityWebSearchModel                  string   `json:"antigravity_web_search_model"`
 	OpenAICodexUserAgent                   *string `json:"openai_codex_user_agent"`
 	OpenAICodexClientVersion               *string `json:"openai_codex_client_version"`
 	OpenAICodexVersionAutoSyncEnabled      *bool   `json:"openai_codex_version_auto_sync_enabled"`
@@ -1434,6 +1435,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	req.AntigravityUserAgent = antigravityUA
+	antigravityWebSearchModel, err := antigravity.NormalizeWebSearchModel(req.AntigravityWebSearchModel)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.AntigravityWebSearchModel = antigravityWebSearchModel
 	if req.AntigravityUserAgentVersion != nil {
 		normalized := strings.TrimSpace(*req.AntigravityUserAgentVersion)
 		req.AntigravityUserAgentVersion = &normalized
@@ -1761,6 +1768,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			return antigravity.NormalizeSystemInstructionRewritePhrases(req.AntigravitySystemInstructionRewritePhrases)
 		}(),
 		AntigravitySystemInstructionRewritePhrasesSet: true,
+		AntigravityWebSearchModel: func() string {
+			if _, skipped := omitted[service.SettingKeyAntigravityWebSearchModel]; skipped {
+				return previousSettings.AntigravityWebSearchModel
+			}
+			return req.AntigravityWebSearchModel
+		}(),
 		OpenAICodexUserAgent: func() string {
 			if req.OpenAICodexUserAgent != nil {
 				return *req.OpenAICodexUserAgent
@@ -2310,6 +2323,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		AntigravityUserAgentVersion:                            updatedSettings.AntigravityUserAgentVersion,
 		AntigravitySystemInstructionRewriteEnabled:             updatedSettings.AntigravitySystemInstructionRewriteEnabled,
 		AntigravitySystemInstructionRewritePhrases:             updatedSettings.AntigravitySystemInstructionRewritePhrases,
+		AntigravityWebSearchModel:                              updatedSettings.AntigravityWebSearchModel,
 		OpenAICodexUserAgent:                                   updatedSettings.OpenAICodexUserAgent,
 		OpenAICodexClientVersion:                               updatedSettings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         updatedSettings.OpenAICodexClientVersionSynced,

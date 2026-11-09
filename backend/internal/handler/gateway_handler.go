@@ -178,7 +178,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		// Begin performs the exact lease/path/model/user match before copying
 		// body, so capture-off and unrelated Messages requests do not allocate a
 		// second request-body buffer. body is still the pre-rewrite bytes here.
-		geminiCapture = h.geminiCapture.Begin(c.Request.Context(), requestPath, body, parsedReq.MetadataUserID, reqModel, parsedReq.Stream, subject.UserID)
+		geminiCapture = h.geminiCapture.Begin(c.Request.Context(), requestPath, body, parsedReq.MetadataUserID, reqModel, parsedReq.Stream, subject.UserID, apiKey.ID)
 		if geminiCapture != nil {
 			c.Request = c.Request.WithContext(service.WithGeminiCapture(c.Request.Context(), geminiCapture))
 			defer func() { geminiCapture.Finish(c.Writer.Status()) }()

@@ -101,6 +101,9 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 	if _, skipped := omitted[SettingKeyAntigravityUserAgent]; !skipped && settings != nil {
 		s.publishAntigravityUserAgent(settings.AntigravityUserAgent)
 	}
+	if _, skipped := omitted[SettingKeyAntigravityWebSearchModel]; !skipped && settings != nil {
+		s.publishAntigravityWebSearchModel(settings.AntigravityWebSearchModel)
+	}
 	s.refreshAntigravitySystemInstructionRewriteAfterWrite(ctx, settings, omitted)
 	if len(omitted) == 0 {
 		s.refreshCachedSettings(settings)
@@ -588,6 +591,12 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		settings.AntigravitySystemInstructionRewritePhrases = defaultPhrases
 		updates[SettingKeyAntigravitySystemInstructionRewritePhrases] = antigravity.FormatStoredSystemInstructionRewritePhrases(defaultPhrases)
 	}
+	normalizedWebSearchModel, err := antigravity.NormalizeWebSearchModel(settings.AntigravityWebSearchModel)
+	if err != nil {
+		return nil, err
+	}
+	settings.AntigravityWebSearchModel = normalizedWebSearchModel
+	updates[SettingKeyAntigravityWebSearchModel] = normalizedWebSearchModel
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)
 	updates[SettingKeyOpenAICodexVersionAutoSyncEnabled] = strconv.FormatBool(settings.OpenAICodexVersionAutoSyncEnabled)
@@ -848,6 +857,7 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		rewritePhrases = antigravity.DefaultSystemInstructionRewritePhrases()
 	}
 	s.publishAntigravitySystemInstructionRewrite(settings.AntigravitySystemInstructionRewriteEnabled, rewritePhrases)
+	s.publishAntigravityWebSearchModel(settings.AntigravityWebSearchModel)
 	s.openAICodexUASF.Forget("openai_codex_user_agent")
 	codexUA := strings.TrimSpace(settings.OpenAICodexUserAgent)
 	if codexUA == "" {

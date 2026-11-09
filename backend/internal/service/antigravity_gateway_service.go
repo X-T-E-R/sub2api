@@ -498,6 +498,7 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	rewriteEnabled, rewritePhrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
 	opts.SystemInstructionRewriteEnabled = rewriteEnabled
 	opts.SystemInstructionRewritePhrases = rewritePhrases
+	opts.WebSearchModel = s.settingService.GetAntigravityWebSearchModel(ctx)
 	return opts
 }
 
@@ -634,7 +635,11 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 
 // wrapV1InternalRequest 包装请求为 v1internal 格式
 func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model string, originalBody []byte) ([]byte, error) {
-	originalBody = s.applyAntigravitySystemInstructionRewrite(context.Background(), originalBody)
+	return s.wrapV1InternalRequestWithType(context.Background(), projectID, model, "agent", originalBody)
+}
+
+func (s *AntigravityGatewayService) wrapV1InternalRequestWithType(ctx context.Context, projectID, model, requestType string, originalBody []byte) ([]byte, error) {
+	originalBody = s.applyAntigravitySystemInstructionRewrite(ctx, originalBody)
 	var request any
 	if err := json.Unmarshal(originalBody, &request); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
@@ -643,12 +648,15 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 	if projectID == "" {
 		return nil, errAntigravityProjectIDRequired
 	}
+	if strings.TrimSpace(requestType) == "" {
+		requestType = "agent"
+	}
 
 	wrapped := map[string]any{
 		"project":     projectID,
 		"requestId":   "agent-" + uuid.New().String(),
 		"userAgent":   "antigravity", // 固定值，与官方客户端一致
-		"requestType": "agent",
+		"requestType": requestType,
 		"model":       model,
 		"request":     request,
 	}

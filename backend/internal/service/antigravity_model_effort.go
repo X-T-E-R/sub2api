@@ -273,8 +273,23 @@ func RebuildAntigravityModelMapping(mapping map[string]string, familyDefaults ma
 	return result, nil
 }
 
-// Task19 capture authorization stays fixed; configurable effort names do not
-// authorize capturing a new model or a new session.
+// Configurable effort names do not expand the effort suffix allowlist beyond
+// -low/-medium/-high for a matched lease target model.
+func isGeminiCaptureModelMatch(target, model string) bool {
+	target = strings.TrimPrefix(strings.TrimSpace(target), "models/")
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if target == "" || model == "" {
+		return false
+	}
+	if target == "*" {
+		return true
+	}
+	if strings.Contains(target, "*") {
+		return matchWildcard(target, model)
+	}
+	return model == target || model == target+"-low" || model == target+"-medium" || model == target+"-high"
+}
+
 func isGeminiCaptureFinalModel(model string) bool {
-	return model == GeminiCaptureTargetModel || model == GeminiCaptureTargetModel+"-low" || model == GeminiCaptureTargetModel+"-medium" || model == GeminiCaptureTargetModel+"-high"
+	return isGeminiCaptureModelMatch(GeminiCaptureTargetModel, model)
 }

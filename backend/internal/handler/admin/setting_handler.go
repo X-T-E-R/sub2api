@@ -301,6 +301,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		AntigravityUserAgentVersion:                            settings.AntigravityUserAgentVersion,
 		AntigravitySystemInstructionRewriteEnabled:             settings.AntigravitySystemInstructionRewriteEnabled,
 		AntigravitySystemInstructionRewritePhrases:             settings.AntigravitySystemInstructionRewritePhrases,
+		AntigravityWebSearchModel:                              settings.AntigravityWebSearchModel,
 		OpenAICodexUserAgent:                                   settings.OpenAICodexUserAgent,
 		OpenAICodexClientVersion:                               settings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         settings.OpenAICodexClientVersionSynced,
