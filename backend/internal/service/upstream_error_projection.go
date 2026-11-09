@@ -651,39 +651,22 @@ func mergeStreamPreheaderGeminiDiagnostics(errorObj gin.H, details []any, body [
 		return details
 	}
 
-	hasGatewayRetryInfo := false
-	var gatewayRetryDelay string
-	for _, existing := range details {
-		if m, ok := existing.(gin.H); ok && m["@type"] == googleRPCTypeRetryInfo {
-			hasGatewayRetryInfo = true
-			gatewayRetryDelay, _ = m["retryDelay"].(string)
-			break
-		}
-	}
-
 	if rawDetails, ok := rawFields["details"]; ok {
-		if _, exists := errorObj["upstream_details"]; !exists {
-			errorObj["upstream_details"] = rawDetails
-		}
 		parsedDetails := gjson.ParseBytes(rawDetails)
 		if parsedDetails.IsArray() {
 			parsedDetails.ForEach(func(_, item gjson.Result) bool {
 				itemType := strings.TrimSpace(item.Get("@type").String())
+				if itemType == googleRPCTypeRetryInfo {
+					return true
+				}
 				if itemType == "type.googleapis.com/google.rpc.ErrorInfo" &&
 					strings.TrimSpace(item.Get("domain").String()) == "sub2api.gateway" {
 					return true
 				}
 				rawItem := bytes.TrimSpace([]byte(item.Raw))
-				if len(rawItem) == 0 || !gjson.ValidBytes(rawItem) {
-					return true
+				if len(rawItem) > 0 && gjson.ValidBytes(rawItem) {
+					details = append(details, json.RawMessage(rawItem))
 				}
-				if itemType == googleRPCTypeRetryInfo {
-					if !hasGatewayRetryInfo || strings.TrimSpace(item.Get("retryDelay").String()) != gatewayRetryDelay || len(item.Map()) > 2 {
-						details = append(details, json.RawMessage(rawItem))
-					}
-					return true
-				}
-				details = append(details, json.RawMessage(rawItem))
 				return true
 			})
 		}

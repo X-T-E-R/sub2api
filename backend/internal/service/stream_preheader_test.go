@@ -905,22 +905,32 @@ func TestStreamPreheaderLateError_GeminiPreservesDistinctUpstreamCodeStatusAndRe
 	jsonPayload := strings.TrimSpace(strings.TrimPrefix(wire, "data: "))
 	require.True(t, gjson.Valid(jsonPayload), jsonPayload)
 
-	// Gateway Gemini protocol contract preserved
+	// Gateway Gemini protocol contract preserved: canonical error.details has exactly
+	// one RetryInfo (the gateway's authoritative 17s), while non-RetryInfo upstream
+	// details are merged in.
 	require.EqualValues(t, http.StatusServiceUnavailable, gjson.Get(jsonPayload, "error.code").Int())
 	require.Equal(t, "UNAVAILABLE", gjson.Get(jsonPayload, "error.status").String())
 	require.Equal(t, "GATEWAY_STREAM_TERMINAL_ERROR", gjson.Get(jsonPayload, "error.details.0.reason").String())
 	require.Equal(t, "17", gjson.Get(jsonPayload, "error.details.0.metadata.retryAfter").String())
 	require.Equal(t, "17s", gjson.Get(jsonPayload, "error.details.1.retryDelay").String())
+	require.Equal(t, "SHARD_OVERLOADED", gjson.Get(jsonPayload, "error.details.2.reason").String())
+	require.EqualValues(t, 3, gjson.Get(jsonPayload, "error.details.#").Int())
+	retryInfoCount := 0
+	gjson.Get(jsonPayload, "error.details").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("@type").String() == googleRPCTypeRetryInfo {
+			retryInfoCount++
+		}
+		return true
+	})
+	require.Equal(t, 1, retryInfoCount)
+	require.False(t, gjson.Get(jsonPayload, "error.upstream_details").Exists())
 
-	// Upstream distinct code, status, RetryInfo, and raw error object preserved losslessly
+	// Upstream distinct code, status, and original 4.25s RetryInfo + 64-bit token in upstream_error preserved losslessly
 	require.EqualValues(t, 85291001, gjson.Get(jsonPayload, "error.upstream_code").Int())
 	require.Equal(t, "MODEL_CAPACITY_SHED_CUSTOM", gjson.Get(jsonPayload, "error.upstream_status").String())
-	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.details.2.retryDelay").String())
-	require.Contains(t, jsonPayload, `"retryToken":9007199254740993`)
-	require.Equal(t, "SHARD_OVERLOADED", gjson.Get(jsonPayload, "error.details.3.reason").String())
-	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.upstream_details.0.retryDelay").String())
 	require.EqualValues(t, 85291001, gjson.Get(jsonPayload, "error.upstream_error.code").Int())
 	require.Equal(t, "MODEL_CAPACITY_SHED_CUSTOM", gjson.Get(jsonPayload, "error.upstream_error.status").String())
 	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.upstream_error.details.0.retryDelay").String())
+	require.Contains(t, jsonPayload, `"retryToken":9007199254740993`)
 	require.NotContains(t, jsonPayload, "AIzaSySecretKey12345678901234567890")
 }
