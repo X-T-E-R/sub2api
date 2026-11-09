@@ -820,10 +820,107 @@ func TestStreamPreheaderLateError_PreservesStructuredDiagnosticsWithoutReplay(t 
 			if protocol == "gemini" {
 				require.Contains(t, wire, `"reason":"GATEWAY_STREAM_TERMINAL_ERROR"`)
 				require.Contains(t, wire, `"status":"INVALID_ARGUMENT"`)
+				require.Contains(t, wire, `"upstream_code":400`)
+				require.Contains(t, wire, `"upstream_status":"INVALID_ARGUMENT"`)
+				require.Contains(t, wire, `"upstream_error":{`)
 			} else {
 				require.Equal(t, 1, strings.Count(wire, streamPreheaderTerminalCode))
 				require.Contains(t, wire, `"type":"custom_tool_schema_error"`)
+				require.Contains(t, wire, `"upstream_code":400`)
+				require.Contains(t, wire, `"upstream_status":"INVALID_ARGUMENT"`)
+				require.Contains(t, wire, `"upstream_error":{`)
 			}
 		})
 	}
+}
+
+func TestStreamPreheaderLateError_GeminiPreservesDistinctUpstreamCodeStatusAndRetryInfo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Upstream returns HTTP 503 with Retry-After: 17, while the upstream JSON body carries
+	// a distinct internal code (85291001), a custom non-enum status ("MODEL_CAPACITY_SHED_CUSTOM"),
+	// and an upstream RetryInfo with retryDelay="4.25s" plus extra diagnostic fields.
+	lateDistinctErrorJSON := `{"response":{"error":{"code":85291001,"status":"MODEL_CAPACITY_SHED_CUSTOM","message":"Model shard capacity exhausted at ?key=AIzaSySecretKey12345678901234567890","requestId":"agy-gem-late-503","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"4.25s","retryToken":9007199254740993},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SHARD_OVERLOADED","domain":"googleapis.com","metadata":{"shardId":"9007199254740999"}}]}}}`
+
+	head := make(chan struct{})
+	var headOnce sync.Once
+	releaseHead := func() { headOnce.Do(func() { close(head) }) }
+	defer releaseHead()
+
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-head:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "17")
+		w.Header().Set("X-Goog-Request-Id", "goog-hdr-503")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, lateDistinctErrorJSON)
+	}))
+	t.Cleanup(upstreamServer.Close)
+
+	base, err := url.Parse(upstreamServer.URL)
+	require.NoError(t, err)
+	upstream := &preheaderHTTPUpstream{base: base, client: upstreamServer.Client()}
+	cfg := &config.Config{Gateway: config.GatewayConfig{StreamPreheaderKeepaliveEnabled: true, StreamKeepaliveInterval: 1}}
+	outcomes := make(chan preheaderForwardOutcome, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, _ := gin.CreateTestContext(w)
+		c.Request = r
+		ConfigureStreamPreheader(c, cfg, "gemini", true)
+		account := &Account{ID: 9501, Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+		request, _ := http.NewRequestWithContext(r.Context(), "POST", upstreamServer.URL, nil)
+		openai := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+		resp, err, terminal := openai.doOpenAIStreamUpstream(c, request, "", account)
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		outcomes <- preheaderForwardOutcome{err: err, finalized: terminal}
+	}))
+	t.Cleanup(server.Close)
+
+	response, err := (&http.Client{Timeout: 6 * time.Second}).Get(server.URL)
+	require.NoError(t, err)
+	defer response.Body.Close()
+
+	// Downstream HTTP 200 committed by preheader keepalive
+	readPreheaderPing(t, response, "gemini")
+	require.Equal(t, http.StatusOK, response.StatusCode)
+
+	releaseHead()
+
+	wireBytes, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	wire := strings.TrimSpace(string(wireBytes))
+
+	outcome := awaitPreheaderOutcome(t, outcomes)
+	require.ErrorIs(t, outcome.err, errStreamPreheaderTerminal)
+	require.True(t, outcome.finalized)
+	require.EqualValues(t, 1, upstream.calls.Load())
+
+	require.True(t, strings.HasPrefix(wire, "data: "), wire)
+	jsonPayload := strings.TrimSpace(strings.TrimPrefix(wire, "data: "))
+	require.True(t, gjson.Valid(jsonPayload), jsonPayload)
+
+	// Gateway Gemini protocol contract preserved
+	require.EqualValues(t, http.StatusServiceUnavailable, gjson.Get(jsonPayload, "error.code").Int())
+	require.Equal(t, "UNAVAILABLE", gjson.Get(jsonPayload, "error.status").String())
+	require.Equal(t, "GATEWAY_STREAM_TERMINAL_ERROR", gjson.Get(jsonPayload, "error.details.0.reason").String())
+	require.Equal(t, "17", gjson.Get(jsonPayload, "error.details.0.metadata.retryAfter").String())
+	require.Equal(t, "17s", gjson.Get(jsonPayload, "error.details.1.retryDelay").String())
+
+	// Upstream distinct code, status, RetryInfo, and raw error object preserved losslessly
+	require.EqualValues(t, 85291001, gjson.Get(jsonPayload, "error.upstream_code").Int())
+	require.Equal(t, "MODEL_CAPACITY_SHED_CUSTOM", gjson.Get(jsonPayload, "error.upstream_status").String())
+	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.details.2.retryDelay").String())
+	require.Contains(t, jsonPayload, `"retryToken":9007199254740993`)
+	require.Equal(t, "SHARD_OVERLOADED", gjson.Get(jsonPayload, "error.details.3.reason").String())
+	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.upstream_details.0.retryDelay").String())
+	require.EqualValues(t, 85291001, gjson.Get(jsonPayload, "error.upstream_error.code").Int())
+	require.Equal(t, "MODEL_CAPACITY_SHED_CUSTOM", gjson.Get(jsonPayload, "error.upstream_error.status").String())
+	require.Equal(t, "4.25s", gjson.Get(jsonPayload, "error.upstream_error.details.0.retryDelay").String())
+	require.NotContains(t, jsonPayload, "AIzaSySecretKey12345678901234567890")
 }

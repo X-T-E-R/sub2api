@@ -395,6 +395,27 @@ func extractUpstreamRawDiagnosticFields(body []byte) map[string]json.RawMessage 
 	return fields
 }
 
+func extractUpstreamRawErrorObject(body []byte) json.RawMessage {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || looksLikeHTMLBody(trimmed) || !gjson.ValidBytes(trimmed) {
+		return nil
+	}
+	sanitized := sanitizeUpstreamErrorBody(trimmed)
+	if !gjson.ValidBytes(sanitized) {
+		return nil
+	}
+	root := gjson.ParseBytes(sanitized)
+	for _, path := range []string{"response.error", "error"} {
+		if sub := root.Get(path); sub.IsObject() {
+			raw := bytes.TrimSpace([]byte(sub.Raw))
+			if len(raw) > 0 && gjson.ValidBytes(raw) {
+				return json.RawMessage(raw)
+			}
+		}
+	}
+	return json.RawMessage(bytes.TrimSpace(sanitized))
+}
+
 // ResolveUpstreamErrorType resolves the most specific error type from the
 // upstream body, preferring an explicit error.type / response.error.type, then
 // mapping Google status codes if present, and finally falling back to defaultType.
@@ -587,6 +608,8 @@ func mergeStreamPreheaderFailureDiagnostics(failure gin.H, body []byte, headers 
 			var statusStr string
 			if json.Unmarshal(v, &statusStr) == nil && strings.TrimSpace(statusStr) != "" {
 				failure["upstream_status"] = statusStr
+			} else if len(bytes.TrimSpace(v)) > 0 {
+				failure["upstream_status"] = v
 			}
 		default:
 			if _, exists := failure[k]; !exists {
@@ -596,6 +619,11 @@ func mergeStreamPreheaderFailureDiagnostics(failure gin.H, body []byte, headers 
 	}
 
 	if len(rawFields) > 0 {
+		if rawErr := extractUpstreamRawErrorObject(body); len(rawErr) > 0 {
+			if _, exists := failure["upstream_error"]; !exists {
+				failure["upstream_error"] = rawErr
+			}
+		}
 		if _, hasReqID := failure["request_id"]; !hasReqID {
 			if _, hasCamelReqID := failure["requestId"]; !hasCamelReqID {
 				if reqID := ExtractUpstreamRequestID(headers, body); reqID != "" {
@@ -623,22 +651,39 @@ func mergeStreamPreheaderGeminiDiagnostics(errorObj gin.H, details []any, body [
 		return details
 	}
 
+	hasGatewayRetryInfo := false
+	var gatewayRetryDelay string
+	for _, existing := range details {
+		if m, ok := existing.(gin.H); ok && m["@type"] == googleRPCTypeRetryInfo {
+			hasGatewayRetryInfo = true
+			gatewayRetryDelay, _ = m["retryDelay"].(string)
+			break
+		}
+	}
+
 	if rawDetails, ok := rawFields["details"]; ok {
+		if _, exists := errorObj["upstream_details"]; !exists {
+			errorObj["upstream_details"] = rawDetails
+		}
 		parsedDetails := gjson.ParseBytes(rawDetails)
 		if parsedDetails.IsArray() {
 			parsedDetails.ForEach(func(_, item gjson.Result) bool {
 				itemType := strings.TrimSpace(item.Get("@type").String())
-				if itemType == googleRPCTypeRetryInfo {
-					return true
-				}
 				if itemType == "type.googleapis.com/google.rpc.ErrorInfo" &&
 					strings.TrimSpace(item.Get("domain").String()) == "sub2api.gateway" {
 					return true
 				}
 				rawItem := bytes.TrimSpace([]byte(item.Raw))
-				if len(rawItem) > 0 && gjson.ValidBytes(rawItem) {
-					details = append(details, json.RawMessage(rawItem))
+				if len(rawItem) == 0 || !gjson.ValidBytes(rawItem) {
+					return true
 				}
+				if itemType == googleRPCTypeRetryInfo {
+					if !hasGatewayRetryInfo || strings.TrimSpace(item.Get("retryDelay").String()) != gatewayRetryDelay || len(item.Map()) > 2 {
+						details = append(details, json.RawMessage(rawItem))
+					}
+					return true
+				}
+				details = append(details, json.RawMessage(rawItem))
 				return true
 			})
 		}
@@ -646,12 +691,36 @@ func mergeStreamPreheaderGeminiDiagnostics(errorObj gin.H, details []any, body [
 
 	for k, v := range rawFields {
 		switch k {
-		case "code", "message", "status", "details":
+		case "message", "details":
 			continue
+		case "code":
+			var codeStr string
+			if json.Unmarshal(v, &codeStr) == nil {
+				if strings.TrimSpace(codeStr) != "" && codeStr != streamPreheaderTerminalCode {
+					errorObj["upstream_code"] = codeStr
+				}
+			} else if len(bytes.TrimSpace(v)) > 0 {
+				errorObj["upstream_code"] = v
+			}
+		case "status":
+			var statusStr string
+			if json.Unmarshal(v, &statusStr) == nil {
+				if strings.TrimSpace(statusStr) != "" {
+					errorObj["upstream_status"] = statusStr
+				}
+			} else if len(bytes.TrimSpace(v)) > 0 {
+				errorObj["upstream_status"] = v
+			}
 		default:
 			if _, exists := errorObj[k]; !exists {
 				errorObj[k] = v
 			}
+		}
+	}
+
+	if rawErr := extractUpstreamRawErrorObject(body); len(rawErr) > 0 {
+		if _, exists := errorObj["upstream_error"]; !exists {
+			errorObj["upstream_error"] = rawErr
 		}
 	}
 
