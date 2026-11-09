@@ -49,7 +49,7 @@ BACKUP_TIMER = 'sub2-core-backup.timer'
 BACKUP_SOURCE_JSON = '/etc/sub2-core-backup/source.json'
 CORE_BACKUP_PY = '/opt/sub2-core-backup/core-backup/core_backup.py'
 CORE_IDENTITY_PY = '/opt/sub2-core-backup/core-backup/core_identity.py'
-PARENT_CORE_IDENTITY_SHA = '7b7449ea4309216cde4a72432fb867073989635cfea207e8d7ab517e0800991d'
+PARENT_CORE_IDENTITY_SHA = '4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3'
 CANDIDATE_CORE_IDENTITY = HERE / 'core_identity_candidate.py'
 NAILONG_INPLACE_ROOT = '/opt/sub2api-nailong/inplace'
 NAILONG_SYSTEMD_UNIT_PATH = '/etc/systemd/system/sub2-nailong-inplace@.service'
@@ -948,7 +948,7 @@ if current_sha not in (old_sha, want_sha):
     raise SystemExit("unexpected_existing_identity_sha")
 
 if current_sha == old_sha:
-    saved = checkpoint_dir / "core_identity.before-1d14bbdc3.py"
+    saved = checkpoint_dir / ("core_identity.before-" + old_sha[:12] + ".py")
     if not saved.exists():
         saved.write_bytes(path.read_bytes())
         os.chmod(saved, 0o600)
