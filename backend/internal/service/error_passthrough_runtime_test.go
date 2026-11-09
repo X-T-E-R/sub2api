@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestApplyErrorPassthroughRule_NoBoundService(t *testing.T) {
@@ -490,7 +492,7 @@ func TestAntigravityWriteMappedClaudeError_DefaultPassthroughAcrossStatusesAndMe
 			assert.Equal(t, tc.wantType, errField["type"])
 			assert.Equal(t, tc.wantMsg, errField["message"])
 			if tc.wantCode != "" {
-				assert.Equal(t, tc.wantCode, errField["code"])
+				assert.Equal(t, tc.wantCode, fmt.Sprint(errField["code"]))
 			}
 		})
 	}
@@ -622,4 +624,164 @@ func newNonFailoverPassthroughRule(statusCode int, keyword string, respCode int,
 		PassthroughBody: false,
 		CustomMessage:   &customMessage,
 	}
+}
+
+func TestSameProtocolError_503And529PreserveUnknownFieldsDetailsParamAndLargeInt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("gateway_handleErrorResponse_529_preserves_unknown_fields_details_param_and_64bit_int", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+		svc := &GatewayService{}
+		rawBody := `{"type":"error","request_id":"req-body-529","error":{"type":"overloaded_error","code":"capacity_shed_529","message":"Cluster overloaded for key=AIzaSySecretKey12345678901234567890","param":"max_tokens","vendor_meta":{"cluster_id":9007199254740993,"region":"us-east-5"},"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_OVERLOADED","quota_id":18446744073709551615}]}}`
+		resp := &http.Response{
+			StatusCode: 529,
+			Body:       io.NopCloser(bytes.NewReader([]byte(rawBody))),
+			Header: http.Header{
+				"Anthropic-Request-Id": []string{"anth-req-529"},
+				"Traceparent":          []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+			},
+		}
+		account := &Account{ID: 301, Platform: PlatformAnthropic, Type: AccountTypeAPIKey}
+
+		_, err := svc.handleErrorResponse(context.Background(), resp, c, account)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, "anth-req-529", rec.Header().Get("anthropic-request-id"))
+		assert.Equal(t, "anth-req-529", rec.Header().Get("x-request-id"))
+		assert.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", rec.Header().Get("traceparent"))
+		assert.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", rec.Header().Get("x-trace-id"))
+
+		wire := rec.Body.String()
+		assert.NotContains(t, wire, "AIzaSySecretKey12345678901234567890")
+		assert.Contains(t, wire, "Cluster overloaded for key=AIza***")
+		// 64-bit integers beyond float64 precision must remain exact in JSON output
+		assert.Contains(t, wire, `"cluster_id":9007199254740993`)
+		assert.Contains(t, wire, `"quota_id":18446744073709551615`)
+		assert.Equal(t, "max_tokens", gjson.Get(wire, "error.param").String())
+		assert.Equal(t, "capacity_shed_529", gjson.Get(wire, "error.code").String())
+		assert.Equal(t, "MODEL_OVERLOADED", gjson.Get(wire, "error.details.0.reason").String())
+		assert.Equal(t, "us-east-5", gjson.Get(wire, "error.vendor_meta.region").String())
+		assert.Equal(t, "req-body-529", gjson.Get(wire, "request_id").String())
+	})
+
+	t.Run("gateway_handleRetryExhaustedError_503_preserves_unknown_fields_details_param_and_64bit_int", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+		svc := &GatewayService{}
+		rawBody := `{"error":{"type":"service_unavailable","code":"upstream_503","message":"Backend shard 9007199254740993 unavailable","param":"thinking.budget_tokens","retry_token":9007199254740993,"details":[{"shard_id":9007199254740995,"retryable":true}]}}`
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(bytes.NewReader([]byte(rawBody))),
+			Header: http.Header{
+				"X-Amzn-Requestid": []string{"amzn-req-503"},
+				"X-B3-Traceid":     []string{"b3-trace-503"},
+			},
+		}
+		account := &Account{ID: 302, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
+
+		_, err := svc.handleRetryExhaustedError(context.Background(), resp, c, account)
+		require.Error(t, err)
+		var failoverErr *UpstreamFailoverError
+		require.False(t, errors.As(err, &failoverErr))
+		assert.Equal(t, http.StatusBadGateway, rec.Code)
+		assert.Equal(t, "amzn-req-503", rec.Header().Get("x-amzn-requestid"))
+		assert.Equal(t, "amzn-req-503", rec.Header().Get("x-request-id"))
+		assert.Equal(t, "b3-trace-503", rec.Header().Get("x-b3-traceid"))
+		assert.Equal(t, "b3-trace-503", rec.Header().Get("x-trace-id"))
+
+		wire := rec.Body.String()
+		assert.Contains(t, wire, `"retry_token":9007199254740993`)
+		assert.Contains(t, wire, `"shard_id":9007199254740995`)
+		assert.Equal(t, "thinking.budget_tokens", gjson.Get(wire, "error.param").String())
+		assert.Equal(t, "upstream_503", gjson.Get(wire, "error.code").String())
+	})
+
+	t.Run("openai_handleErrorResponse_503_preserves_unknown_fields_details_param_and_64bit_int", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+		svc := &OpenAIGatewayService{}
+		rawBody := `{"error":{"message":"Engine overloaded","type":"server_error","code":"engine_overloaded","param":"reasoning.effort","sequence_id":9007199254740993,"details":[{"node_id":9007199254740999,"reason":"CAPACITY"}]}}`
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(bytes.NewReader([]byte(rawBody))),
+			Header: http.Header{
+				"Xai-Request-Id":       []string{"xai-req-503"},
+				"X-Cloud-Trace-Context": []string{"105445aa7843bc8bf206b12000100000/1;o=1"},
+			},
+		}
+		account := &Account{ID: 303, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+		_, err := svc.handleErrorResponse(context.Background(), resp, c, account, nil)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadGateway, rec.Code)
+		assert.Equal(t, "xai-req-503", rec.Header().Get("xai-request-id"))
+		assert.Equal(t, "xai-req-503", rec.Header().Get("x-request-id"))
+		assert.Equal(t, "105445aa7843bc8bf206b12000100000/1;o=1", rec.Header().Get("x-cloud-trace-context"))
+		assert.Equal(t, "105445aa7843bc8bf206b12000100000/1;o=1", rec.Header().Get("x-trace-id"))
+
+		wire := rec.Body.String()
+		assert.Contains(t, wire, `"sequence_id":9007199254740993`)
+		assert.Contains(t, wire, `"node_id":9007199254740999`)
+		assert.Equal(t, "reasoning.effort", gjson.Get(wire, "error.param").String())
+		assert.Equal(t, "engine_overloaded", gjson.Get(wire, "error.code").String())
+		assert.Equal(t, "CAPACITY", gjson.Get(wire, "error.details.0.reason").String())
+	})
+}
+
+func TestCrossProtocolAntigravity_PreservesResponseErrorDetailsParamCustomTypeAndRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &AntigravityGatewayService{}
+	account := &Account{ID: 309, Name: "ag-cross", Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+
+	rawBody := []byte(`{"response":{"error":{"code":400,"type":"custom_tool_schema_error","status":"INVALID_ARGUMENT","message":"Invalid tool parameter at ?key=AIzaSySecretKey12345678901234567890","param":"tools[1].input_schema","requestId":"agy-req-9988","traceId":"agy-trace-7766","vendor_ext":{"trace_seq":9007199254740995},"details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","violationId":9007199254740997,"fieldViolations":[{"field":"tools[1].input_schema","description":"unsupported keyword"}]}]}}}`)
+
+	t.Run("writeMappedClaudeError_preserves_response_error_diagnostics", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+
+		err := svc.writeMappedClaudeError(c, account, http.StatusBadRequest, "", rawBody)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "agy-req-9988", rec.Header().Get("x-request-id"))
+		assert.Equal(t, "agy-trace-7766", rec.Header().Get("x-trace-id"))
+
+		wire := rec.Body.String()
+		assert.NotContains(t, wire, "AIzaSySecretKey12345678901234567890")
+		assert.Contains(t, wire, "Invalid tool parameter at ?key=***")
+		assert.Equal(t, "error", gjson.Get(wire, "type").String())
+		assert.Equal(t, "custom_tool_schema_error", gjson.Get(wire, "error.type").String())
+		assert.Equal(t, "INVALID_ARGUMENT", gjson.Get(wire, "error.status").String())
+		assert.Equal(t, "tools[1].input_schema", gjson.Get(wire, "error.param").String())
+		assert.Equal(t, "agy-req-9988", gjson.Get(wire, "error.requestId").String())
+		assert.Equal(t, "agy-trace-7766", gjson.Get(wire, "error.traceId").String())
+		assert.Equal(t, "unsupported keyword", gjson.Get(wire, "error.details.0.fieldViolations.0.description").String())
+		assert.Contains(t, wire, `"violationId":9007199254740997`)
+		assert.Contains(t, wire, `"trace_seq":9007199254740995`)
+	})
+
+	t.Run("writeMappedAntigravityCompatError_preserves_response_error_diagnostics", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+
+		err := svc.writeMappedAntigravityCompatError(c, account, http.StatusBadRequest, "", rawBody)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "agy-req-9988", rec.Header().Get("x-request-id"))
+		assert.Equal(t, "agy-trace-7766", rec.Header().Get("x-trace-id"))
+
+		wire := rec.Body.String()
+		assert.Equal(t, "custom_tool_schema_error", gjson.Get(wire, "error.type").String())
+		assert.Equal(t, "tools[1].input_schema", gjson.Get(wire, "error.param").String())
+		assert.Equal(t, "agy-req-9988", gjson.Get(wire, "error.requestId").String())
+		assert.Equal(t, "agy-trace-7766", gjson.Get(wire, "error.traceId").String())
+		assert.Contains(t, wire, `"violationId":9007199254740997`)
+		assert.Contains(t, wire, `"trace_seq":9007199254740995`)
+	})
 }

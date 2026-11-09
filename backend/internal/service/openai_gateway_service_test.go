@@ -3987,7 +3987,7 @@ func TestHandleCompatErrorResponseCyberPolicyEarlyReturn(t *testing.T) {
 	}
 	var gotStatus int
 	var gotType, gotMsg string
-	writeError := func(_ *gin.Context, statusCode int, errType, message string) {
+	writeError := func(_ *gin.Context, statusCode int, errType, message string, _ ...[]byte) {
 		gotStatus, gotType, gotMsg = statusCode, errType, message
 	}
 	// cyber 命中应早返回(写兼容错误 + 不冷却账号)，而非落到通用 "Upstream request failed"。

@@ -944,35 +944,83 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
-		respBody := s.readUpstreamErrorBody(resp)
-		// 统一错误策略：自定义错误码 + 临时不可调度
-		if s.rateLimitService != nil {
-			policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
-			switch policy {
-			case ErrorPolicySkipped:
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
-				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
-					return nil, failoverErr
-				}
-				if account.IsCustomErrorCodesEnabled() {
-					return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, upstreamReqID, respBody, func() {
-						_ = s.writeClaudeError(c, http.StatusInternalServerError, "api_error", geminiCustomCodeSkippedClientMessage)
+		if resp.StatusCode >= 400 {
+			respBody := s.readUpstreamErrorBody(resp)
+			upstreamReqID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader), respBody)
+			// 统一错误策略：自定义错误码 + 临时不可调度
+			if s.rateLimitService != nil {
+				policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
+				switch policy {
+				case ErrorPolicySkipped:
+					if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
+						failoverErr.ResponseHeaders = resp.Header.Clone()
+						return nil, failoverErr
+					}
+					if account.IsCustomErrorCodesEnabled() {
+						return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, upstreamReqID, respBody, func() {
+							_ = s.writeClaudeError(c, http.StatusInternalServerError, "api_error", geminiCustomCodeSkippedClientMessage)
+						})
+					}
+					// 池模式：客户端写出与 ErrorPolicyNone 相同（按上游真实状态码映射），仅跳过账号状态标记。
+					return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
+				case ErrorPolicyMatched, ErrorPolicyTempUnscheduled:
+					if policy == ErrorPolicyMatched {
+						s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+					}
+					upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+					upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+					upstreamDetail := ""
+					if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+						maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+						if maxBytes <= 0 {
+							maxBytes = 2048
+						}
+						upstreamDetail = truncateString(string(respBody), maxBytes)
+					}
+					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						Platform:           account.Platform,
+						AccountID:          account.ID,
+						AccountName:        account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						UpstreamRequestID:  upstreamReqID,
+						Kind:               "failover",
+						Message:            upstreamMsg,
+						Detail:             upstreamDetail,
 					})
+					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 				}
-				// 池模式：客户端写出与 ErrorPolicyNone 相同（按上游真实状态码映射），仅跳过账号状态标记。
-				return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
-			case ErrorPolicyMatched, ErrorPolicyTempUnscheduled:
-				if policy == ErrorPolicyMatched {
-					s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			}
+
+			// ErrorPolicyNone → 原有逻辑
+			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
+			if resp.StatusCode == http.StatusBadRequest {
+				msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+				if isGoogleProjectConfigError(msg400) {
+					upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+					upstreamDetail := ""
+					if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+						maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+						if maxBytes <= 0 {
+							maxBytes = 2048
+						}
+						upstreamDetail = truncateString(string(respBody), maxBytes)
+					}
+					log.Printf("[Gemini] status=400 google_config_error failover=true upstream_message=%q account=%d", upstreamMsg, account.ID)
+					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						Platform:           account.Platform,
+						AccountID:          account.ID,
+						AccountName:        account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						UpstreamRequestID:  upstreamReqID,
+						Kind:               "failover",
+						Message:            upstreamMsg,
+						Detail:             upstreamDetail,
+					})
+					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 				}
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
+			}
+			if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -993,84 +1041,12 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 			}
+			return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
 		}
 
-		// ErrorPolicyNone → 原有逻辑
-		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
-		if resp.StatusCode == http.StatusBadRequest {
-			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
-			if isGoogleProjectConfigError(msg400) {
-				upstreamReqID := resp.Header.Get(requestIDHeader)
-				if upstreamReqID == "" {
-					upstreamReqID = resp.Header.Get("x-goog-request-id")
-				}
-				upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
-				upstreamDetail := ""
-				if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
-					maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
-					if maxBytes <= 0 {
-						maxBytes = 2048
-					}
-					upstreamDetail = truncateString(string(respBody), maxBytes)
-				}
-				log.Printf("[Gemini] status=400 google_config_error failover=true upstream_message=%q account=%d", upstreamMsg, account.ID)
-				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-					Platform:           account.Platform,
-					AccountID:          account.ID,
-					AccountName:        account.Name,
-					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  upstreamReqID,
-					Kind:               "failover",
-					Message:            upstreamMsg,
-					Detail:             upstreamDetail,
-				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, RetryableOnSameAccount: true}
-			}
-		}
-		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
-			upstreamReqID := resp.Header.Get(requestIDHeader)
-			if upstreamReqID == "" {
-				upstreamReqID = resp.Header.Get("x-goog-request-id")
-			}
-			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
-			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-			upstreamDetail := ""
-			if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
-				maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
-				if maxBytes <= 0 {
-					maxBytes = 2048
-				}
-				upstreamDetail = truncateString(string(respBody), maxBytes)
-			}
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  upstreamReqID,
-				Kind:               "failover",
-				Message:            upstreamMsg,
-				Detail:             upstreamDetail,
-			})
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
-		}
-		upstreamReqID := resp.Header.Get(requestIDHeader)
-		if upstreamReqID == "" {
-			upstreamReqID = resp.Header.Get("x-goog-request-id")
-		}
-		return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
-	}
-
-	requestID := resp.Header.Get(requestIDHeader)
-	if requestID == "" {
-		requestID = resp.Header.Get("x-goog-request-id")
-	}
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+		requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader))
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int
@@ -1452,18 +1428,13 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	requestID := resp.Header.Get(requestIDHeader)
-	if requestID == "" {
-		requestID = resp.Header.Get("x-goog-request-id")
-	}
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader))
 
 	isOAuth := account.Type == AccountTypeOAuth
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
+		requestID = PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, requestID, respBody)
 		// Best-effort fallback for OAuth tokens missing AI Studio scopes when calling countTokens.
 		// This avoids Gemini SDKs failing hard during preflight token counting.
 		// Checked before error policy so it always works regardless of custom error codes.
@@ -1487,6 +1458,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			switch policy {
 			case ErrorPolicySkipped:
 				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, requestID); failoverErr != nil {
+					failoverErr.ResponseHeaders = resp.Header.Clone()
 					return nil, failoverErr
 				}
 				if account.IsCustomErrorCodesEnabled() {
@@ -1521,7 +1493,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 			}
 		}
 
@@ -1552,7 +1524,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: evBody, RetryableOnSameAccount: true}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: evBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 			}
 		}
 		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
@@ -1577,7 +1549,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: evBody}
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: evBody, ResponseHeaders: resp.Header.Clone()}
 		}
 
 		return nil, s.writeGeminiNativeUpstreamError(c, account, resp, respBody, requestID, isOAuth)
@@ -1767,6 +1739,11 @@ func (s *GeminiMessagesCompatService) writeGeminiCustomCodeSkippedError(c *gin.C
 // 并记录 ops 错误事件。状态码保真：下游据此区分请求级错误与可重试的链路故障。
 func (s *GeminiMessagesCompatService) writeGeminiNativeUpstreamError(c *gin.Context, account *Account, resp *http.Response, respBody []byte, requestID string, isOAuth bool) error {
 	respBody = unwrapIfNeeded(isOAuth, respBody)
+	var headers http.Header
+	if resp != nil {
+		headers = resp.Header
+	}
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, headers, requestID, respBody)
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	upstreamDetail := s.upstreamErrorDetail(respBody)
@@ -1779,15 +1756,12 @@ func (s *GeminiMessagesCompatService) writeGeminiNativeUpstreamError(c *gin.Cont
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  requestID,
+		UpstreamRequestID:  resolvedReqID,
 		Kind:               "http_error",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
 	})
 
-	if c != nil && requestID != "" && c.Writer.Header().Get("x-request-id") == "" {
-		c.Header("x-request-id", requestID)
-	}
 	MarkResponseCommitted(c)
 	trimmedBody := bytes.TrimSpace(respBody)
 	if len(trimmedBody) > 0 && gjson.ValidBytes(trimmedBody) {
@@ -1874,9 +1848,7 @@ func sanitizeUpstreamErrorBody(body []byte) []byte {
 
 func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
 	MarkResponseCommitted(c)
-	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
-		c.Header("x-request-id", upstreamRequestID)
-	}
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, nil, upstreamRequestID, body)
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	upstreamDetail := ""
@@ -1893,7 +1865,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: upstreamStatus,
-		UpstreamRequestID:  upstreamRequestID,
+		UpstreamRequestID:  resolvedReqID,
 		Kind:               "http_error",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -2031,10 +2003,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 		}
 	}
 
-	c.JSON(statusCode, gin.H{
-		"type":  "error",
-		"error": gin.H{"type": errType, "message": errMsg},
-	})
+	WriteProjectedClaudeError(c, statusCode, body, errType, errMsg)
 	if upstreamMsg == "" {
 		return fmt.Errorf("upstream error: %d", upstreamStatus)
 	}

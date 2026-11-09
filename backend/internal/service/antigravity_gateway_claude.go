@@ -437,12 +437,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 						AccountID:          account.ID,
 						AccountName:        account.Name,
 						UpstreamStatusCode: resp.StatusCode,
-						UpstreamRequestID:  resp.Header.Get("x-request-id"),
+						UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 						Kind:               "failover",
 						Message:            upstreamMsg,
 						Detail:             upstreamDetail,
 					})
-					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, RetryableOnSameAccount: true}
+					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 				}
 			}
 
@@ -455,22 +455,20 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					AccountID:          account.ID,
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  resp.Header.Get("x-request-id"),
+					UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 					Kind:               "failover",
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 			}
 
-			return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, resp.Header.Get("x-request-id"), respBody)
+			PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+			return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, ExtractUpstreamRequestID(resp.Header, respBody), respBody)
 		}
 	}
 
-	requestID := resp.Header.Get("x-request-id")
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "")
 
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)

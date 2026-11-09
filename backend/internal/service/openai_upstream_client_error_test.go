@@ -92,7 +92,7 @@ func TestHandleErrorResponse_MatchesCompatSiblingForDeterministic400(t *testing.
 	compatCtx, _ := newOpenAIUpstreamErrorTestContext(t)
 	var compatStatus int
 	var compatType, compatMsg string
-	writeError := func(_ *gin.Context, statusCode int, errType, message string) {
+	writeError := func(_ *gin.Context, statusCode int, errType, message string, _ ...[]byte) {
 		compatStatus, compatType, compatMsg = statusCode, errType, message
 	}
 	_, compatErr := svc.handleCompatErrorResponse(

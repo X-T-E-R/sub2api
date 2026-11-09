@@ -45,9 +45,12 @@ func finishStreamPreheaderSSEError(c *gin.Context, payload []byte, headers http.
 	if StreamPreheaderFinalized(c) {
 		return errStreamPreheaderTerminal
 	}
-	meta := streamPreheaderResponseMeta{}
+	meta := streamPreheaderResponseMeta{headers: headers}
 	if len(response) > 0 {
 		meta = response[0]
+		if meta.headers == nil {
+			meta.headers = headers
+		}
 	}
 	if meta.id == "" {
 		meta.id = gjson.GetBytes(payload, "response.id").String()
@@ -55,6 +58,7 @@ func finishStreamPreheaderSSEError(c *gin.Context, payload []byte, headers http.
 	if nested := gjson.GetBytes(payload, "response.error"); nested.Exists() {
 		payload, _ = json.Marshal(gin.H{"error": json.RawMessage(nested.Raw)})
 	}
+	meta.body = payload
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(payload)))
 	status := openAIStreamFailedEventSemanticStatus(payload, message)
 	for _, path := range []string{"error.code", "error.status", "error.status_code", "status_code"} {

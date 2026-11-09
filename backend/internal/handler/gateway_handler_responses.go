@@ -380,17 +380,14 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
-		if c != nil && lastErr.ResponseHeaders != nil {
-			if reqID := strings.TrimSpace(lastErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-				c.Header("x-request-id", reqID)
-			}
-		}
+		service.PropagateUpstreamRequestAndTraceHeaders(c, lastErr.ResponseHeaders, "", lastErr.ResponseBody)
 	}
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
 	}
 	status, code, message := statusCode, "server_error", "All available accounts exhausted"
+	useProjectedBody := false
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message = credentialFailoverClientResponse(lastErr)
 	} else if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
@@ -403,6 +400,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		status, code, message = http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage()
 	} else {
+		useProjectedBody = lastErr != nil && len(lastErr.ResponseBody) > 0
 		if lastErr != nil && statusCode == http.StatusTooManyRequests {
 			status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
 		}
@@ -427,6 +425,10 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || gatewayStreamHasOnlyHeartbeats(c)) {
 			writeResponsesFailedSSE(c, code, message)
 		}
+		return
+	}
+	if useProjectedBody {
+		service.WriteProjectedResponsesError(c, status, lastErr.ResponseBody, code, message)
 		return
 	}
 	h.responsesErrorResponse(c, status, code, message)

@@ -637,7 +637,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -646,15 +646,14 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
-	if c != nil && resp != nil {
-		if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
 	}
 
 	// 上游 400 是确定性的请求错误：同一份请求体换账号、重试多少次都会失败。归一成
@@ -675,7 +674,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 	}
 
-	// Return appropriate error response (preserve sanitized upstream message/code/param/type by default)
+	// Return appropriate error response (preserve sanitized upstream JSON structure, unknown fields, and 64-bit integers by default)
 	var errType, errMsg string
 	var statusCode int
 
@@ -705,19 +704,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		errType = upstreamType
 	}
 
-	errorPayload := gin.H{
-		"type":    errType,
-		"message": errMsg,
-	}
-	if code := strings.TrimSpace(extractUpstreamErrorCode(body)); code != "" {
-		errorPayload["code"] = code
-	}
-	if param := strings.TrimSpace(gjson.GetBytes(body, "error.param").String()); param != "" {
-		errorPayload["param"] = param
-	}
-	c.JSON(statusCode, gin.H{
-		"error": errorPayload,
-	})
+	writeSameProtocolOpenAIError(c, statusCode, body, errType, errMsg, errMsg)
 
 	if upstreamMsg == "" {
 		return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
@@ -727,7 +714,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 
 // compatErrorWriter is the signature for format-specific error writers used by
 // the compat paths (Chat Completions and Anthropic Messages).
-type compatErrorWriter func(c *gin.Context, statusCode int, errType, message string)
+type compatErrorWriter func(c *gin.Context, statusCode int, errType, message string, body ...[]byte)
 
 // handleCompatErrorResponse is the shared non-failover error handler for the
 // Chat Completions and Anthropic Messages compat paths. It mirrors the logic of
@@ -844,7 +831,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -853,15 +840,14 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
-	if c != nil && resp != nil {
-		if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
 	}
 
 	// Map status code to error type and write response
@@ -877,6 +863,6 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		errType = "api_error"
 	}
 
-	writeError(c, resp.StatusCode, errType, upstreamMsg)
+	writeError(c, resp.StatusCode, errType, upstreamMsg, body)
 	return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 }

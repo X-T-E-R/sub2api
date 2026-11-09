@@ -268,7 +268,11 @@ func FinishStreamPreheaderFailover(c *gin.Context, failure *UpstreamFailoverErro
 	return true
 }
 
-type streamPreheaderResponseMeta struct{ id, model, retryDelay string }
+type streamPreheaderResponseMeta struct {
+	id, model, retryDelay string
+	body                  []byte
+	headers               http.Header
+}
 
 func configuredStreamFailureFrame(c *gin.Context, status int, errType, message string, response ...streamPreheaderResponseMeta) string {
 	policy, _ := c.Get(streamPreheaderPolicyKey)
@@ -276,6 +280,13 @@ func configuredStreamFailureFrame(c *gin.Context, status int, errType, message s
 }
 
 func writeConfiguredStreamFailure(c *gin.Context, status int, errType, message string, response ...streamPreheaderResponseMeta) error {
+	var diagBody []byte
+	var diagHeaders http.Header
+	if len(response) > 0 {
+		diagBody = response[0].body
+		diagHeaders = response[0].headers
+	}
+	PropagateUpstreamRequestAndTraceHeaders(c, diagHeaders, "", diagBody)
 	if !c.Writer.Written() {
 		c.Set(streamPreheaderFinalizedKey, true)
 		MarkResponseCommitted(c)
@@ -284,6 +295,19 @@ func writeConfiguredStreamFailure(c *gin.Context, status int, errType, message s
 		}
 		policy, _ := c.Get(streamPreheaderPolicyKey)
 		p := policy.(streamPreheaderPolicy)
+		if len(diagBody) > 0 {
+			switch p.protocol {
+			case streamPreheaderMessages:
+				WriteProjectedClaudeError(c, status, diagBody, errType, message)
+			case streamPreheaderGemini:
+				WriteProjectedGoogleError(c, status, diagBody, streamPreheaderGoogleStatus(status, errType), message)
+			case streamPreheaderResponses:
+				WriteProjectedResponsesError(c, status, diagBody, errType, message)
+			default:
+				WriteProjectedOpenAIError(c, status, diagBody, errType, message)
+			}
+			return errStreamPreheaderTerminal
+		}
 		payload := gin.H{"error": gin.H{"type": errType, "message": message}}
 		switch p.protocol {
 		case streamPreheaderMessages:
@@ -308,9 +332,11 @@ func recordStreamPreheaderFailure(c *gin.Context, protocol streamPreheaderProtoc
 }
 
 func writeStreamPreheaderError(c *gin.Context, status int, errType, message string, headers http.Header, body ...[]byte) error {
+	PropagateUpstreamRequestAndTraceHeaders(c, headers, "", body...)
 	protocol, _ := c.Get(streamPreheaderCommittedKey)
-	meta := streamPreheaderResponseMeta{}
+	meta := streamPreheaderResponseMeta{headers: headers}
 	if len(body) > 0 {
+		meta.body = body[0]
 		meta.retryDelay = streamPreheaderBodyRetryDelay(body[0])
 	}
 	return writeStreamPreheaderFailureFrame(c, recordStreamPreheaderFailure(c, protocol.(streamPreheaderProtocol), status, errType, message, headers.Get("Retry-After"), meta))
@@ -426,26 +452,36 @@ func readStreamPreheaderErrorBody(c *gin.Context, body io.Reader, protocol strea
 }
 
 func streamPreheaderErrorType(status int, body []byte) string {
-	if value := gjson.GetBytes(body, "error.type"); value.Type == gjson.String && value.String() != "" {
-		return value.String()
+	for _, path := range []string{"error.type", "response.error.type"} {
+		if value := gjson.GetBytes(body, path); value.Type == gjson.String && value.String() != "" {
+			return value.String()
+		}
 	}
+	var defaultType string
 	switch status {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
-		return "invalid_request_error"
+		defaultType = "invalid_request_error"
 	case http.StatusUnauthorized:
-		return "authentication_error"
+		defaultType = "authentication_error"
 	case http.StatusForbidden:
-		return "permission_error"
+		defaultType = "permission_error"
 	case http.StatusTooManyRequests:
-		return "rate_limit_error"
+		defaultType = "rate_limit_error"
 	case http.StatusServiceUnavailable, 529:
-		return "overloaded_error"
+		defaultType = "overloaded_error"
 	default:
-		return "upstream_error"
+		defaultType = "upstream_error"
 	}
+	return ResolveUpstreamErrorType(body, defaultType)
 }
 
 func buildStreamPreheaderError(protocol streamPreheaderProtocol, status int, errType, message, retryAfter string, now time.Time, response ...streamPreheaderResponseMeta) string {
+	var diagBody []byte
+	var diagHeaders http.Header
+	if len(response) > 0 {
+		diagBody = response[0].body
+		diagHeaders = response[0].headers
+	}
 	retryAfter, retryDelay := streamPreheaderRetryAfter(retryAfter, now)
 	// A valid HTTP Retry-After is authoritative; otherwise retain the upstream
 	// Google duration verbatim, including fractional seconds.
@@ -457,6 +493,7 @@ func buildStreamPreheaderError(protocol streamPreheaderProtocol, status int, err
 	if retryAfter != "" {
 		failure["retry_after"] = retryAfter
 	}
+	mergeStreamPreheaderFailureDiagnostics(failure, diagBody, diagHeaders)
 	event := ""
 	var payload gin.H
 	switch protocol {
@@ -471,11 +508,14 @@ func buildStreamPreheaderError(protocol streamPreheaderProtocol, status int, err
 		if retryAfter != "" {
 			info["metadata"] = gin.H{"retryAfter": retryAfter}
 		}
-		details := []gin.H{info}
+		details := []any{info}
 		if retryDelay != "" {
 			details = append(details, gin.H{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retryDelay})
 		}
-		payload = gin.H{"error": gin.H{"code": status, "message": message, "status": streamPreheaderGoogleStatus(status, errType), "details": details}}
+		errObj := gin.H{"code": status, "message": message, "status": streamPreheaderGoogleStatus(status, errType)}
+		details = mergeStreamPreheaderGeminiDiagnostics(errObj, details, diagBody, diagHeaders)
+		errObj["details"] = details
+		payload = gin.H{"error": errObj}
 	case streamPreheaderChat:
 		payload = gin.H{"error": failure}
 	case streamPreheaderResponses:

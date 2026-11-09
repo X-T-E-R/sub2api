@@ -131,11 +131,7 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
-		if c != nil && resp != nil {
-			if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-				c.Header("x-request-id", reqID)
-			}
-		}
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
 		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
 			c, account.Platform, resp.StatusCode, respBody,
 			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
@@ -149,10 +145,7 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		} else if resp.StatusCode == http.StatusTooManyRequests {
 			errType = "rate_limit_error"
 		}
-		if upstreamType := extractUpstreamErrorType(respBody); upstreamType != "" {
-			errType = upstreamType
-		}
-		writeChatCompletionsError(c, mapUpstreamStatusCode(resp.StatusCode), errType, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
+		WriteProjectedOpenAIError(c, mapUpstreamStatusCode(resp.StatusCode), respBody, errType, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

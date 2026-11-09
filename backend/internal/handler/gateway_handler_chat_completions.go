@@ -395,11 +395,7 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
-		if c != nil && lastErr.ResponseHeaders != nil {
-			if reqID := strings.TrimSpace(lastErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-				c.Header("x-request-id", reqID)
-			}
-		}
+		service.PropagateUpstreamRequestAndTraceHeaders(c, lastErr.ResponseHeaders, "", lastErr.ResponseBody)
 	}
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(lastErr)
@@ -432,8 +428,10 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 		if upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(lastErr.ResponseBody))); upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
 			message = upstreamMsg
 		}
-		if upstreamType := service.ExtractUpstreamErrorType(lastErr.ResponseBody); upstreamType != "" && errType == "server_error" {
-			errType = upstreamType
+		errType = service.ResolveUpstreamErrorType(lastErr.ResponseBody, errType)
+		if len(lastErr.ResponseBody) > 0 {
+			service.WriteProjectedOpenAIError(c, statusCode, lastErr.ResponseBody, errType, message)
+			return
 		}
 	}
 	h.chatCompletionsErrorResponse(c, statusCode, errType, message)

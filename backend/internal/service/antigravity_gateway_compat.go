@@ -13,7 +13,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -461,7 +460,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 			Kind:               "failover",
 			Message:            message,
 			Detail:             s.getUpstreamErrorDetail(body),
@@ -480,7 +479,8 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 			ResponseHeaders: resp.Header.Clone(),
 		}
 	}
-	return s.writeMappedAntigravityCompatError(c, account, resp.StatusCode, resp.Header.Get("x-request-id"), body)
+	PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
+	return s.writeMappedAntigravityCompatError(c, account, resp.StatusCode, ExtractUpstreamRequestID(resp.Header, body), body)
 }
 
 func antigravityCredentialRejectedError(resp *http.Response, body []byte) *UpstreamFailoverError {
@@ -523,9 +523,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	body []byte,
 ) error {
 	MarkResponseCommitted(c)
-	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
-		c.Header("x-request-id", upstreamRequestID)
-	}
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, nil, upstreamRequestID, body)
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(body)))
 	setOpsUpstreamError(c, upstreamStatus, message, s.getUpstreamErrorDetail(body))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -533,7 +531,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: upstreamStatus,
-		UpstreamRequestID:  upstreamRequestID,
+		UpstreamRequestID:  resolvedReqID,
 		Kind:               "http_error",
 		Message:            message,
 	})
@@ -566,24 +564,15 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	case 529:
 		errType = "overloaded_error"
 	}
-	if upstreamType := extractUpstreamErrorType(body); upstreamType != "" && errType == "upstream_error" {
-		errType = upstreamType
+	errorObj := BuildProjectedErrorMap(body, errType, "Upstream request failed")
+	if _, hasParam := errorObj["param"]; !hasParam {
+		errorObj["param"] = nil
 	}
-	var codeVal any
-	if code := extractUpstreamErrorCode(body); code != "" {
-		codeVal = code
-	}
-	var paramVal any
-	if param := strings.TrimSpace(gjson.GetBytes(body, "error.param").String()); param != "" {
-		paramVal = param
+	if _, hasCode := errorObj["code"]; !hasCode {
+		errorObj["code"] = nil
 	}
 	c.JSON(mapUpstreamStatusCode(upstreamStatus), gin.H{
-		"error": gin.H{
-			"message": getPassthroughOrDefault(message, "Upstream request failed"),
-			"type":    errType,
-			"param":   paramVal,
-			"code":    codeVal,
-		},
+		"error": errorObj,
 	})
 	return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
 }

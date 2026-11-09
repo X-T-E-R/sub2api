@@ -277,7 +277,7 @@ func TestGatewayHandlers_FailoverExhaustedPreservesUpstreamErrorDetails(t *testi
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
 		errObj, ok := parsed["error"].(map[string]any)
 		require.True(t, ok)
-		assert.Equal(t, "rate_limit_error", errObj["type"])
+		assert.Equal(t, "tokens_rate_limit_exceeded", errObj["type"])
 		assert.Equal(t, "Token rate limit exceeded for organization org-123", errObj["message"])
 	})
 

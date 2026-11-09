@@ -347,16 +347,12 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 			goto handleSuccess
 		}
 
-		requestID := resp.Header.Get("x-request-id")
-		if requestID != "" {
-			c.Header("x-request-id", requestID)
-		}
-
 		unwrapped, unwrapErr := s.unwrapV1InternalResponse(respBody)
 		unwrappedForOps := unwrapped
 		if unwrapErr != nil || len(unwrappedForOps) == 0 {
 			unwrappedForOps = respBody
 		}
+		requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", unwrappedForOps)
 		s.handleUpstreamError(ctx, prefix, account, resp.StatusCode, resp.Header, respBody, originalModel, forwardOpts.groupID, forwardOpts.sessionHash, isStickySession)
 		upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(unwrappedForOps))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
@@ -378,7 +374,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps, RetryableOnSameAccount: true}
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 		}
 
 		if s.shouldFailoverUpstreamError(resp.StatusCode) {
@@ -392,7 +388,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps}
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps, ResponseHeaders: resp.Header.Clone()}
 		}
 		if contentType == "" {
 			contentType = "application/json"
@@ -423,10 +419,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	}
 
 handleSuccess:
-	requestID := resp.Header.Get("x-request-id")
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "")
 
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, upstreamAction, finalBody)
 	defer cont.startResponse(c, "gemini", stream)()

@@ -660,11 +660,7 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
-	if c != nil && failoverErr.ResponseHeaders != nil {
-		if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
-	}
+	service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", failoverErr.ResponseBody)
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 
@@ -687,6 +683,10 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 				c.Set(service.OpsSkipPassthroughKey, true)
 			}
 
+			if rule.PassthroughBody {
+				service.WriteProjectedGoogleError(c, respCode, responseBody, "", msg)
+				return
+			}
 			googleError(c, respCode, msg)
 			return
 		}
@@ -700,6 +700,10 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 	status, message := mapGeminiUpstreamError(statusCode)
 	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
 		message = upstreamMsg
+	}
+	if len(responseBody) > 0 {
+		service.WriteProjectedGoogleError(c, status, responseBody, "", message)
+		return
 	}
 	googleError(c, status, message)
 }

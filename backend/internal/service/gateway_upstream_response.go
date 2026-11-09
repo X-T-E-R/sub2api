@@ -454,7 +454,7 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               "http_error",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -470,14 +470,16 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		}
 	}
 	if shouldDisable {
-		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: body}
+		return nil, &UpstreamFailoverError{
+			StatusCode:      resp.StatusCode,
+			ResponseBody:    body,
+			ResponseHeaders: resp.Header.Clone(),
+		}
 	}
 
 	MarkResponseCommitted(c)
-	if c != nil && resp != nil {
-		if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
 	}
 
 	// 记录上游错误响应体摘要便于排障（可选：由配置控制；不回显到客户端）
@@ -525,26 +527,9 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 
 	switch resp.StatusCode {
 	case 400:
-		trimmedBody := bytes.TrimSpace(body)
-		if len(trimmedBody) > 0 && gjson.ValidBytes(trimmedBody) {
-			c.Data(http.StatusBadRequest, "application/json", sanitizeUpstreamErrorBody(body))
-		} else {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"type": "error",
-				"error": gin.H{
-					"type":    "invalid_request_error",
-					"message": getPassthroughOrDefault(upstreamMsg, "Invalid request"),
-				},
-			})
-		}
-		summary := upstreamMsg
-		if summary == "" && !looksLikeHTMLBody(body) {
-			summary = truncateForLog(body, 512)
-		}
-		if summary == "" {
-			return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, summary)
+		statusCode = http.StatusBadRequest
+		errType = "invalid_request_error"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Invalid request")
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
@@ -578,22 +563,16 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		errType = upstreamType
 	}
 
-	errorObj := gin.H{
-		"type":    errType,
-		"message": errMsg,
-	}
-	if code := extractUpstreamErrorCode(body); code != "" {
-		errorObj["code"] = code
-	}
-	c.JSON(statusCode, gin.H{
-		"type":  "error",
-		"error": errorObj,
-	})
+	writeSameProtocolClaudeError(c, statusCode, body, errType, errMsg)
 
-	if upstreamMsg == "" {
+	summary := upstreamMsg
+	if resp.StatusCode == 400 && summary == "" && !looksLikeHTMLBody(body) {
+		summary = truncateForLog(body, 512)
+	}
+	if summary == "" {
 		return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
 	}
-	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
+	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, summary)
 }
 
 func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, resp *http.Response, account *Account) {
@@ -624,15 +603,13 @@ func (s *GatewayService) handleFailoverSideEffects(ctx context.Context, resp *ht
 // API Key 未配置错误码：仅返回错误，不标记账号
 func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *http.Response, c *gin.Context, account *Account) (*ForwardResult, error) {
 	MarkResponseCommitted(c)
-	if c != nil && resp != nil {
-		if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
-	}
 	// Capture upstream error body before side-effects consume the stream.
 	respBody, _ := s.readUpstreamErrorBody(resp)
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+	}
 
 	s.handleRetryExhaustedSideEffects(ctx, resp, account)
 
@@ -644,7 +621,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 			if line, ok := v.(string); ok && strings.TrimSpace(line) != "" {
 				logger.LegacyPrintf("service.gateway", "[ClaudeMimicDebugOnError] status=%d request_id=%s %s",
 					resp.StatusCode,
-					resp.Header.Get("x-request-id"),
+					ExtractUpstreamRequestID(resp.Header, respBody),
 					line,
 				)
 			}
@@ -664,7 +641,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 		Kind:               "retry_exhausted",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -713,17 +690,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		errType = upstreamType
 	}
 	errMsg := getPassthroughOrDefault(upstreamMsg, "Upstream request failed after retries")
-	errorObj := gin.H{
-		"type":    errType,
-		"message": errMsg,
-	}
-	if code := extractUpstreamErrorCode(respBody); code != "" {
-		errorObj["code"] = code
-	}
-	c.JSON(http.StatusBadGateway, gin.H{
-		"type":  "error",
-		"error": errorObj,
-	})
+	writeSameProtocolClaudeError(c, http.StatusBadGateway, respBody, errType, errMsg)
 
 	if upstreamMsg == "" {
 		return nil, fmt.Errorf("upstream error: %d (retries exhausted)", resp.StatusCode)

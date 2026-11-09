@@ -168,7 +168,7 @@ func (s *GatewayService) ForwardAsResponses(
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  resp.Header.Get("x-request-id"),
+				UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 				Kind:               "failover",
 				Message:            upstreamMsg,
 			})
@@ -179,16 +179,13 @@ func (s *GatewayService) ForwardAsResponses(
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
+				ResponseHeaders:        resp.Header.Clone(),
 				RetryableOnSameAccount: !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
 
 		// Non-failover error: return Responses-formatted error to client
-		if c != nil && resp != nil {
-			if reqID := strings.TrimSpace(resp.Header.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-				c.Header("x-request-id", reqID)
-			}
-		}
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
 		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
 			c, account.Platform, resp.StatusCode, respBody,
 			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
@@ -202,12 +199,7 @@ func (s *GatewayService) ForwardAsResponses(
 		} else if resp.StatusCode == http.StatusTooManyRequests {
 			errCode = "rate_limit_error"
 		}
-		if code := extractUpstreamErrorCode(respBody); code != "" {
-			errCode = code
-		} else if upstreamType := extractUpstreamErrorType(respBody); upstreamType != "" {
-			errCode = upstreamType
-		}
-		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), errCode, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
+		WriteProjectedResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), respBody, errCode, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

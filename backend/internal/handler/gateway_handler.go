@@ -1886,11 +1886,7 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
-	if c != nil && failoverErr.ResponseHeaders != nil {
-		if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
-	}
+	service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", failoverErr.ResponseBody)
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
 	if service.IsOpenAISilentRefusalErrorBody(responseBody) {
@@ -1918,6 +1914,10 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 				c.Set(service.OpsSkipPassthroughKey, true)
 			}
 
+			if rule.PassthroughBody && !streamStarted && !service.StreamPreheaderCommitted(c) {
+				service.WriteProjectedClaudeError(c, respCode, responseBody, "upstream_error", msg)
+				return
+			}
 			h.handleStreamingAwareError(c, respCode, "upstream_error", msg, streamStarted)
 			return
 		}
@@ -1932,8 +1932,10 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
 		errMsg = upstreamMsg
 	}
-	if upstreamType := service.ExtractUpstreamErrorType(responseBody); upstreamType != "" && errType == "upstream_error" {
-		errType = upstreamType
+	errType = service.ResolveUpstreamErrorType(responseBody, errType)
+	if !streamStarted && !service.StreamPreheaderCommitted(c) && len(responseBody) > 0 {
+		service.WriteProjectedClaudeError(c, status, responseBody, errType, errMsg)
+		return
 	}
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }

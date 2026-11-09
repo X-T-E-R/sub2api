@@ -1581,11 +1581,7 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	}
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
-		if c != nil && failoverErr.ResponseHeaders != nil {
-			if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-				c.Header("x-request-id", reqID)
-			}
-		}
+		service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", failoverErr.ResponseBody)
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -1605,8 +1601,10 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		if upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody))); upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
 			errMsg = upstreamMsg
 		}
-		if upstreamType := service.ExtractUpstreamErrorType(failoverErr.ResponseBody); upstreamType != "" && errType == "upstream_error" {
-			errType = upstreamType
+		errType = service.ResolveUpstreamErrorType(failoverErr.ResponseBody, errType)
+		if !streamStarted && !service.StreamPreheaderCommitted(c) && len(failoverErr.ResponseBody) > 0 {
+			service.WriteProjectedClaudeError(c, status, failoverErr.ResponseBody, errType, errMsg)
+			return
 		}
 	}
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
@@ -3007,16 +3005,17 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 				c.Set(service.OpsSkipPassthroughKey, true)
 			}
 
+			service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", responseBody)
+			if rule.PassthroughBody && !streamStarted && !service.StreamPreheaderCommitted(c) {
+				service.WriteProjectedOpenAIError(c, respCode, responseBody, "upstream_error", msg)
+				return
+			}
 			h.handleStreamingAwareError(c, respCode, "upstream_error", msg, streamStarted)
 			return
 		}
 	}
 
-	if c != nil && failoverErr.ResponseHeaders != nil {
-		if reqID := strings.TrimSpace(failoverErr.ResponseHeaders.Get("x-request-id")); reqID != "" && c.Writer.Header().Get("x-request-id") == "" {
-			c.Header("x-request-id", reqID)
-		}
-	}
+	service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", responseBody)
 
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
 	upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
@@ -3027,8 +3026,10 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
 		errMsg = upstreamMsg
 	}
-	if upstreamType := service.ExtractUpstreamErrorType(responseBody); upstreamType != "" && errType == "upstream_error" {
-		errType = upstreamType
+	errType = service.ResolveUpstreamErrorType(responseBody, errType)
+	if !streamStarted && !service.StreamPreheaderCommitted(c) && len(responseBody) > 0 && !service.StopOpenAICompactSSEKeepaliveCommitted(c) {
+		service.WriteProjectedOpenAIError(c, status, responseBody, errType, errMsg)
+		return
 	}
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }

@@ -967,9 +967,7 @@ func (s *AntigravityGatewayService) WriteMappedClaudeError(c *gin.Context, accou
 
 func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, account *Account, upstreamStatus int, upstreamRequestID string, body []byte) error {
 	MarkResponseCommitted(c)
-	if c != nil && upstreamRequestID != "" && c.Writer.Header().Get("x-request-id") == "" {
-		c.Header("x-request-id", upstreamRequestID)
-	}
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, nil, upstreamRequestID, body)
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 	logBody, maxBytes := s.getLogConfig()
@@ -980,7 +978,7 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: upstreamStatus,
-		UpstreamRequestID:  upstreamRequestID,
+		UpstreamRequestID:  resolvedReqID,
 		Kind:               "http_error",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -1039,18 +1037,8 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 		errType = "upstream_error"
 		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream request failed")
 	}
-	if upstreamType := extractUpstreamErrorType(body); upstreamType != "" && errType == "upstream_error" {
-		errType = upstreamType
-	}
 
-	errorObj := gin.H{"type": errType, "message": errMsg}
-	if code := extractUpstreamErrorCode(body); code != "" {
-		errorObj["code"] = code
-	}
-	c.JSON(statusCode, gin.H{
-		"type":  "error",
-		"error": errorObj,
-	})
+	WriteProjectedClaudeError(c, statusCode, body, errType, errMsg)
 	if upstreamMsg == "" {
 		return fmt.Errorf("upstream error: %d", upstreamStatus)
 	}
