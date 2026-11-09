@@ -182,3 +182,122 @@ func TestGatewayForwardErrorAlreadyCommunicated(t *testing.T) {
 		require.False(t, reported)
 	})
 }
+
+func TestGatewayHandlers_FailoverExhaustedPreservesUpstreamErrorDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("messages_failover_exhausted_preserves_reason_and_request_id", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+
+		h := &GatewayHandler{}
+		h.handleFailoverExhausted(c, &service.UpstreamFailoverError{
+			StatusCode:      http.StatusTooManyRequests,
+			ResponseHeaders: http.Header{"Retry-After": []string{"15"}, "X-Request-Id": []string{"req-msg-429"}},
+			ResponseBody:    []byte(`{"error":{"type":"rate_limit_error","message":"Rate limit exceeded for claude-sonnet-4-5, retry after 15s (key=sk-ant-api03-1234567890abcdefghij)"}}`),
+		}, service.PlatformAnthropic, false)
+
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.Equal(t, "15", w.Header().Get("Retry-After"))
+		assert.Equal(t, "req-msg-429", w.Header().Get("x-request-id"))
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "rate_limit_error", errObj["type"])
+		assert.Equal(t, "Rate limit exceeded for claude-sonnet-4-5, retry after 15s (key=sk-ant-***)", errObj["message"])
+		assert.NotContains(t, w.Body.String(), "sk-ant-api03")
+	})
+
+	t.Run("gemini_failover_exhausted_preserves_reason_and_request_id", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent", nil)
+
+		h := &GatewayHandler{}
+		h.handleGeminiFailoverExhausted(c, &service.UpstreamFailoverError{
+			StatusCode:      http.StatusServiceUnavailable,
+			ResponseHeaders: http.Header{"X-Request-Id": []string{"req-gem-503"}},
+			ResponseBody:    []byte(`{"error":{"code":503,"message":"The model is overloaded. Please try again later.","status":"UNAVAILABLE"}}`),
+		})
+
+		require.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Equal(t, "req-gem-503", w.Header().Get("x-request-id"))
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "The model is overloaded. Please try again later.", errObj["message"])
+	})
+
+	t.Run("responses_failover_exhausted_preserves_code_and_reason", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, EndpointResponses, nil)
+
+		h := &GatewayHandler{}
+		h.handleResponsesFailoverExhausted(c, &service.UpstreamFailoverError{
+			StatusCode:      http.StatusTooManyRequests,
+			ResponseHeaders: http.Header{"Retry-After": []string{"9"}, "X-Request-Id": []string{"req-resp-429"}},
+			ResponseBody:    []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan."}}`),
+		}, false)
+
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.Equal(t, "9", w.Header().Get("Retry-After"))
+		assert.Equal(t, "req-resp-429", w.Header().Get("x-request-id"))
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "insufficient_quota", errObj["code"])
+		assert.Equal(t, "You exceeded your current quota, please check your plan.", errObj["message"])
+	})
+
+	t.Run("chat_completions_failover_exhausted_preserves_type_and_reason", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		h := &GatewayHandler{}
+		h.handleCCFailoverExhausted(c, &service.UpstreamFailoverError{
+			StatusCode:      http.StatusTooManyRequests,
+			ResponseHeaders: http.Header{"Retry-After": []string{"12"}, "X-Request-Id": []string{"req-cc-429"}},
+			ResponseBody:    []byte(`{"error":{"type":"tokens_rate_limit_exceeded","message":"Token rate limit exceeded for organization org-123"}}`),
+		}, false)
+
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.Equal(t, "12", w.Header().Get("Retry-After"))
+		assert.Equal(t, "req-cc-429", w.Header().Get("x-request-id"))
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "tokens_rate_limit_exceeded", errObj["type"])
+		assert.Equal(t, "Token rate limit exceeded for organization org-123", errObj["message"])
+	})
+
+	t.Run("failover_exhausted_empty_or_html_falls_back_to_default", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+
+		h := &GatewayHandler{}
+		h.handleFailoverExhausted(c, &service.UpstreamFailoverError{
+			StatusCode:   http.StatusBadGateway,
+			ResponseBody: []byte(`<html><body>502 Bad Gateway</body></html>`),
+		}, service.PlatformAnthropic, false)
+
+		require.Equal(t, http.StatusBadGateway, w.Code)
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &parsed))
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "upstream_error", errObj["type"])
+		assert.Equal(t, "Upstream service temporarily unavailable", errObj["message"])
+	})
+}

@@ -380,12 +380,14 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	}
 	if lastErr != nil {
 		copyFailoverRetryAfter(c, lastErr.ResponseHeaders)
+		service.PropagateUpstreamRequestAndTraceHeaders(c, lastErr.ResponseHeaders, "", lastErr.ResponseBody)
 	}
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
 	}
 	status, code, message := statusCode, "server_error", "All available accounts exhausted"
+	useProjectedBody := false
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message = credentialFailoverClientResponse(lastErr)
 	} else if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
@@ -397,8 +399,22 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	} else if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		status, code, message = http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage()
-	} else if lastErr != nil && statusCode == http.StatusTooManyRequests {
-		status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+	} else {
+		useProjectedBody = lastErr != nil && len(lastErr.ResponseBody) > 0
+		if lastErr != nil && statusCode == http.StatusTooManyRequests {
+			status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+		}
+		if lastErr != nil {
+			upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(lastErr.ResponseBody)))
+			if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+				message = upstreamMsg
+			}
+			if upstreamCode := service.ExtractUpstreamErrorCode(lastErr.ResponseBody); upstreamCode != "" {
+				code = upstreamCode
+			} else if upstreamType := service.ExtractUpstreamErrorType(lastErr.ResponseBody); upstreamType != "" && code == "server_error" {
+				code = upstreamType
+			}
+		}
 	}
 	if streamStarted {
 		// A slot-wait heartbeat commits HTTP 200 before any upstream response.
@@ -409,6 +425,10 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || gatewayStreamHasOnlyHeartbeats(c)) {
 			writeResponsesFailedSSE(c, code, message)
 		}
+		return
+	}
+	if useProjectedBody {
+		service.WriteProjectedResponsesError(c, status, lastErr.ResponseBody, code, message)
 		return
 	}
 	h.responsesErrorResponse(c, status, code, message)

@@ -437,12 +437,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 						AccountID:          account.ID,
 						AccountName:        account.Name,
 						UpstreamStatusCode: resp.StatusCode,
-						UpstreamRequestID:  resp.Header.Get("x-request-id"),
+						UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 						Kind:               "failover",
 						Message:            upstreamMsg,
 						Detail:             upstreamDetail,
 					})
-					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, RetryableOnSameAccount: true}
+					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 				}
 			}
 
@@ -455,22 +455,20 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					AccountID:          account.ID,
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  resp.Header.Get("x-request-id"),
+					UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 					Kind:               "failover",
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 			}
 
-			return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, resp.Header.Get("x-request-id"), respBody)
+			PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+			return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, ExtractUpstreamRequestID(resp.Header, respBody), respBody)
 		}
 	}
 
-	requestID := resp.Header.Get("x-request-id")
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "")
 
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)
@@ -581,44 +579,21 @@ func isPromptTooLongError(respBody []byte) bool {
 		strings.Contains(msg, "max_tokens")
 }
 
-// isPassthroughErrorMessage 检查错误消息是否在透传白名单中
+// isPassthroughErrorMessage 判断上游错误消息是否非空可透传（默认透传，不再受关键字白名单限制）
 func isPassthroughErrorMessage(msg string) bool {
-	lower := strings.ToLower(msg)
-	for _, pattern := range antigravityPassthroughErrorMessages {
-		if strings.Contains(lower, pattern) {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(msg) != ""
 }
 
-// getPassthroughOrDefault 若消息在白名单内则返回原始消息，否则返回默认消息
+// getPassthroughOrDefault 若上游提供了非空错误消息则默认透传，否则回退到默认消息
 func getPassthroughOrDefault(upstreamMsg, defaultMsg string) string {
-	if isPassthroughErrorMessage(upstreamMsg) {
-		return upstreamMsg
+	if trimmed := strings.TrimSpace(upstreamMsg); trimmed != "" {
+		return trimmed
 	}
 	return defaultMsg
 }
 
 func extractAntigravityErrorMessage(body []byte) string {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-
-	// Google-style: {"error": {"message": "..."}}
-	if errObj, ok := payload["error"].(map[string]any); ok {
-		if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
-			return msg
-		}
-	}
-
-	// Fallback: top-level message
-	if msg, ok := payload["message"].(string); ok && strings.TrimSpace(msg) != "" {
-		return msg
-	}
-
-	return ""
+	return extractUpstreamErrorMessage(body)
 }
 
 // stripThinkingFromClaudeRequest converts thinking blocks to text blocks in a Claude Messages request.

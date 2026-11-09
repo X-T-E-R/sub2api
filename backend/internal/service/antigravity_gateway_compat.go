@@ -466,7 +466,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 			Kind:               "failover",
 			Message:            message,
 			Detail:             s.getUpstreamErrorDetail(body),
@@ -485,7 +485,8 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 			ResponseHeaders: resp.Header.Clone(),
 		}
 	}
-	return s.writeMappedAntigravityCompatError(c, account, resp.StatusCode, resp.Header.Get("x-request-id"), body)
+	PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
+	return s.writeMappedAntigravityCompatError(c, account, resp.StatusCode, ExtractUpstreamRequestID(resp.Header, body), body)
 }
 
 func antigravityCredentialRejectedError(resp *http.Response, body []byte) *UpstreamFailoverError {
@@ -528,6 +529,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	body []byte,
 ) error {
 	MarkResponseCommitted(c)
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, nil, upstreamRequestID, body)
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(body)))
 	setOpsUpstreamError(c, upstreamStatus, message, s.getUpstreamErrorDetail(body))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -535,17 +537,48 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: upstreamStatus,
-		UpstreamRequestID:  upstreamRequestID,
+		UpstreamRequestID:  resolvedReqID,
 		Kind:               "http_error",
 		Message:            message,
 	})
+	if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+		c, account.Platform, upstreamStatus, body,
+		mapUpstreamStatusCode(upstreamStatus), "upstream_error", "Upstream request failed",
+	); matched {
+		c.JSON(ptStatus, gin.H{
+			"error": gin.H{
+				"message": ptErrMsg,
+				"type":    ptErrType,
+				"param":   nil,
+				"code":    nil,
+			},
+		})
+		return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
+	}
+	errType := "upstream_error"
+	switch upstreamStatus {
+	case http.StatusBadRequest:
+		errType = "invalid_request_error"
+	case http.StatusUnauthorized:
+		errType = "authentication_error"
+	case http.StatusForbidden:
+		errType = "permission_error"
+	case http.StatusNotFound:
+		errType = "not_found_error"
+	case http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case 529:
+		errType = "overloaded_error"
+	}
+	errorObj := BuildProjectedErrorMap(body, errType, "Upstream request failed")
+	if _, hasParam := errorObj["param"]; !hasParam {
+		errorObj["param"] = nil
+	}
+	if _, hasCode := errorObj["code"]; !hasCode {
+		errorObj["code"] = nil
+	}
 	c.JSON(mapUpstreamStatusCode(upstreamStatus), gin.H{
-		"error": gin.H{
-			"message": getPassthroughOrDefault(message, "Upstream request failed"),
-			"type":    "upstream_error",
-			"param":   nil,
-			"code":    nil,
-		},
+		"error": errorObj,
 	})
 	return fmt.Errorf("upstream error: %d %s", upstreamStatus, message)
 }

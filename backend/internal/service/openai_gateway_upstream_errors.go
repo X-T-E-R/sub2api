@@ -637,7 +637,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -646,11 +646,15 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
+	}
 
 	// 上游 400 是确定性的请求错误：同一份请求体换账号、重试多少次都会失败。归一成
 	// 502 upstream_error 会让下游网关把它当成可重试的上游故障反复重放（#5479 实测
@@ -670,7 +674,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
 	}
 
-	// Return appropriate error response
+	// Return appropriate error response (preserve sanitized upstream JSON structure, unknown fields, and 64-bit integers by default)
 	var errType, errMsg string
 	var statusCode int
 
@@ -678,34 +682,29 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream authentication failed, please contact administrator"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream authentication failed, please contact administrator")
 	case 402:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream payment required: insufficient balance or billing issue"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream payment required: insufficient balance or billing issue")
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream access forbidden, please contact administrator"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream access forbidden, please contact administrator")
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded, please retry later"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream rate limit exceeded, please retry later")
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream request failed")
 	}
-	if isOpenAIContextWindowError(upstreamMsg, body) && upstreamMsg != "" {
-		errMsg = upstreamMsg
+	if upstreamType := strings.TrimSpace(gjson.GetBytes(body, "error.type").String()); upstreamType != "" && errType == "upstream_error" {
+		errType = upstreamType
 	}
 
-	c.JSON(statusCode, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": errMsg,
-		},
-	})
+	writeSameProtocolOpenAIError(c, statusCode, body, errType, errMsg, errMsg)
 
 	if upstreamMsg == "" {
 		return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
@@ -715,7 +714,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 
 // compatErrorWriter is the signature for format-specific error writers used by
 // the compat paths (Chat Completions and Anthropic Messages).
-type compatErrorWriter func(c *gin.Context, statusCode int, errType, message string)
+type compatErrorWriter func(c *gin.Context, statusCode int, errType, message string, body ...[]byte)
 
 // handleCompatErrorResponse is the shared non-failover error handler for the
 // Chat Completions and Anthropic Messages compat paths. It mirrors the logic of
@@ -832,7 +831,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -841,11 +840,15 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
+	}
 
 	// Map status code to error type and write response
 	errType := "api_error"
@@ -860,6 +863,6 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		errType = "api_error"
 	}
 
-	writeError(c, resp.StatusCode, errType, upstreamMsg)
+	writeError(c, resp.StatusCode, errType, upstreamMsg, body)
 	return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 }

@@ -92,7 +92,7 @@ func TestHandleErrorResponse_MatchesCompatSiblingForDeterministic400(t *testing.
 	compatCtx, _ := newOpenAIUpstreamErrorTestContext(t)
 	var compatStatus int
 	var compatType, compatMsg string
-	writeError := func(_ *gin.Context, statusCode int, errType, message string) {
+	writeError := func(_ *gin.Context, statusCode int, errType, message string, _ ...[]byte) {
 		compatStatus, compatType, compatMsg = statusCode, errType, message
 	}
 	_, compatErr := svc.handleCompatErrorResponse(
@@ -147,8 +147,7 @@ func TestHandleErrorResponse_Deterministic400WithNonJSONBody(t *testing.T) {
 	require.NotEmpty(t, gjson.Get(body, "error.message").String())
 }
 
-// 作用域守卫：本次只放行 400。其余落到 default 的状态码必须维持原样，
-// 避免后续有人顺手把 404/422/5xx 一起改掉。
+// 非 400 状态码继续保持各自的状态码映射（如 502 / 429），同时默认透传脱敏后的真实上游原因。
 func TestHandleErrorResponse_NonDeterministicStatusesKeepGeneric502(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -158,20 +157,16 @@ func TestHandleErrorResponse_NonDeterministicStatusesKeepGeneric502(t *testing.T
 		wantType   string
 		wantMsg    string
 	}{
-		// 404/405 可能是上游 base_url 配错（运营方问题），不当成客户端错误暴露。
 		{"not_found", http.StatusNotFound, `{"error":{"message":"Unknown request URL"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream request failed"},
+			http.StatusBadGateway, "upstream_error", "Unknown request URL"},
 		{"unprocessable", http.StatusUnprocessableEntity, `{"error":{"message":"Invalid schema for field messages"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream request failed"},
-		// 401/402/403 是网关运营方的凭据/账单问题，必须继续对客户端屏蔽上游账号状态。
-		// 403 的自由文本不能升级成 durable access-state typed failover；只有明确结构化 code 才可以。
+			http.StatusBadGateway, "upstream_error", "Invalid schema for field messages"},
 		{"unauthorized", http.StatusUnauthorized, `{"error":{"message":"Incorrect API key provided: sk-abc"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream authentication failed, please contact administrator"},
+			http.StatusBadGateway, "upstream_error", "Incorrect API key provided: sk-abc"},
 		{"forbidden", http.StatusForbidden, `{"error":{"message":"Your account is deactivated"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream access forbidden, please contact administrator"},
-		// 429 保持独立映射。
+			http.StatusBadGateway, "upstream_error", "Your account is deactivated"},
 		{"rate_limited", http.StatusTooManyRequests, `{"error":{"message":"Rate limit reached"}}`,
-			http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit exceeded, please retry later"},
+			http.StatusTooManyRequests, "rate_limit_error", "Rate limit reached"},
 	}
 
 	for _, tc := range cases {

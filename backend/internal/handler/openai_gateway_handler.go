@@ -1581,6 +1581,7 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	}
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+		service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", failoverErr.ResponseBody)
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -1596,6 +1597,16 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		return
 	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
+	if failoverErr != nil {
+		if upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody))); upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+			errMsg = upstreamMsg
+		}
+		errType = service.ResolveUpstreamErrorType(failoverErr.ResponseBody, errType)
+		if !streamStarted && !service.StreamPreheaderCommitted(c) && len(failoverErr.ResponseBody) > 0 {
+			service.WriteProjectedClaudeError(c, status, failoverErr.ResponseBody, errType, errMsg)
+			return
+		}
+	}
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
@@ -2985,7 +2996,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 			}
 
 			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
+			msg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 			if !rule.PassthroughBody && rule.CustomMessage != nil {
 				msg = *rule.CustomMessage
 			}
@@ -2994,17 +3005,32 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 				c.Set(service.OpsSkipPassthroughKey, true)
 			}
 
+			service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", responseBody)
+			if rule.PassthroughBody && !streamStarted && !service.StreamPreheaderCommitted(c) {
+				service.WriteProjectedOpenAIError(c, respCode, responseBody, "upstream_error", msg)
+				return
+			}
 			h.handleStreamingAwareError(c, respCode, "upstream_error", msg, streamStarted)
 			return
 		}
 	}
 
+	service.PropagateUpstreamRequestAndTraceHeaders(c, failoverErr.ResponseHeaders, "", responseBody)
+
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
-	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+	upstreamMsg := service.SanitizeUpstreamErrorMessage(strings.TrimSpace(service.ExtractUpstreamErrorMessage(responseBody)))
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
-	// 使用默认的错误映射
+	// 使用默认的错误映射，但若上游提供了具体原因则默认透传脱敏后的真实原因
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
+	if upstreamMsg != "" && upstreamMsg != "Upstream request failed" {
+		errMsg = upstreamMsg
+	}
+	errType = service.ResolveUpstreamErrorType(responseBody, errType)
+	if !streamStarted && !service.StreamPreheaderCommitted(c) && len(responseBody) > 0 && !service.StopOpenAICompactSSEKeepaliveCommitted(c) {
+		service.WriteProjectedOpenAIError(c, status, responseBody, errType, errMsg)
+		return
+	}
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 

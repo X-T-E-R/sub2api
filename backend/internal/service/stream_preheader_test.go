@@ -204,12 +204,14 @@ func TestStreamPreheaderSlowHTTPHeadersFourProtocols(t *testing.T) {
 					require.NotContains(t, string(rest), "[DONE]")
 					if protocol == "gemini" {
 						require.Contains(t, string(rest), `"code":`+strconv.Itoa(status))
+						require.Contains(t, string(rest), `"message":"fixture rejection"`)
 						require.Contains(t, string(rest), `"domain":"sub2api.gateway"`)
 						require.Contains(t, string(rest), `"reason":"GATEWAY_STREAM_TERMINAL_ERROR"`)
 						require.Contains(t, string(rest), `"retryDelay":"17s"`)
 						require.NotContains(t, string(rest), "event: error")
 					} else {
 						require.Contains(t, string(rest), `"code":"gateway_stream_terminal_error"`)
+						require.Contains(t, string(rest), `"message":"fixture rejection"`)
 						require.Contains(t, string(rest), `"retry_after":"17"`)
 						wantType := "authentication_error"
 						if status == 429 {
@@ -698,6 +700,129 @@ func TestStreamPreheaderGeminiMessagesDoesNotSynthesizeSuccess(t *testing.T) {
 			} else {
 				require.Equal(t, 8, result.usage.InputTokens)
 				require.Equal(t, 3, result.usage.OutputTokens)
+			}
+		})
+	}
+}
+
+func TestFinishStreamPreheaderFailover_PreservesResponseBodyMessageAndRetryDelay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{Gateway: config.GatewayConfig{StreamPreheaderKeepaliveEnabled: true, StreamKeepaliveInterval: 1}}
+
+	for _, protocol := range []string{"messages", "gemini", "chat", "responses"} {
+		t.Run(protocol, func(t *testing.T) {
+			c, recorder := newAntigravityCompatContext("POST", "/v1/"+protocol, nil)
+			ConfigureStreamPreheader(c, cfg, protocol, true)
+			c.Header("Content-Type", "text/event-stream")
+			c.Status(http.StatusOK)
+			markStreamPreheaderBodyHeartbeat(c)
+
+			failoverErr := &UpstreamFailoverError{
+				StatusCode: http.StatusTooManyRequests,
+				ResponseBody: []byte(`{"error":{"code":429,"message":"Quota exceeded for model claude-sonnet-4-5 at ?key=AIzaSySecretKey12345678901234567890","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"9.5s"}]}}`),
+			}
+			handled := FinishStreamPreheaderFailover(c, failoverErr)
+			require.True(t, handled)
+			require.True(t, StreamPreheaderFinalized(c))
+
+			wire := recorder.Body.String()
+			require.Contains(t, wire, "Quota exceeded for model claude-sonnet-4-5 at ?key=***")
+			require.NotContains(t, wire, "AIzaSySecretKey")
+			if protocol == "gemini" {
+				require.Contains(t, wire, `"retryDelay":"9.5s"`)
+				require.Contains(t, wire, `"status":"RESOURCE_EXHAUSTED"`)
+			} else {
+				require.Contains(t, wire, `"retry_after":"9.5"`)
+				require.Contains(t, wire, `"code":"gateway_stream_terminal_error"`)
+			}
+		})
+	}
+}
+
+func TestStreamPreheaderLateError_PreservesStructuredDiagnosticsWithoutReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	lateErrorJSON := `{"response":{"error":{"code":400,"type":"custom_tool_schema_error","status":"INVALID_ARGUMENT","message":"Invalid tool parameter at ?key=AIzaSySecretKey12345678901234567890","param":"tools[2].input_schema","requestId":"agy-late-req-42","details":[{"@type":"type.googleapis.com/google.rpc.BadRequest","violationId":9007199254740997,"fieldViolations":[{"field":"tools[2].input_schema","description":"schema depth exceeded"}]}]}}}`
+
+	for _, protocol := range []string{"messages", "gemini", "chat", "responses"} {
+		t.Run(protocol, func(t *testing.T) {
+			head := make(chan struct{})
+			var headOnce sync.Once
+			releaseHead := func() { headOnce.Do(func() { close(head) }) }
+			defer releaseHead()
+
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-head:
+				case <-r.Context().Done():
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Goog-Request-Id", "goog-hdr-req-42")
+				w.Header().Set("Traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, lateErrorJSON)
+			}))
+			t.Cleanup(upstreamServer.Close)
+
+			base, err := url.Parse(upstreamServer.URL)
+			require.NoError(t, err)
+			upstream := &preheaderHTTPUpstream{base: base, client: upstreamServer.Client()}
+			cfg := &config.Config{Gateway: config.GatewayConfig{StreamPreheaderKeepaliveEnabled: true, StreamKeepaliveInterval: 1}}
+			outcomes := make(chan preheaderForwardOutcome, 1)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c, _ := gin.CreateTestContext(w)
+				c.Request = r
+				ConfigureStreamPreheader(c, cfg, protocol, true)
+				account := &Account{ID: 9500, Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+				request, _ := http.NewRequestWithContext(r.Context(), "POST", upstreamServer.URL, nil)
+				openai := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+				resp, err, terminal := openai.doOpenAIStreamUpstream(c, request, "", account)
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				outcomes <- preheaderForwardOutcome{err: err, finalized: terminal}
+			}))
+			t.Cleanup(server.Close)
+
+			response, err := (&http.Client{Timeout: 6 * time.Second}).Get(server.URL)
+			require.NoError(t, err)
+			defer response.Body.Close()
+
+			// Wait for initial keepalive ping (commits HTTP 200 to downstream)
+			readPreheaderPing(t, response, protocol)
+			require.Equal(t, http.StatusOK, response.StatusCode)
+
+			// Now release upstream late HTTP 400 error
+			releaseHead()
+
+			wireBytes, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			wire := string(wireBytes)
+
+			outcome := awaitPreheaderOutcome(t, outcomes)
+			require.ErrorIs(t, outcome.err, errStreamPreheaderTerminal)
+			require.True(t, outcome.finalized)
+			// Strictly 1 upstream call — never replayed
+			require.EqualValues(t, 1, upstream.calls.Load())
+
+			// Credentials sanitized
+			require.NotContains(t, wire, "AIzaSySecretKey12345678901234567890")
+			require.Contains(t, wire, "Invalid tool parameter at ?key=***")
+			// 64-bit integer and structured diagnostic fields preserved
+			require.Contains(t, wire, `"violationId":9007199254740997`)
+			require.Contains(t, wire, `"schema depth exceeded"`)
+			require.Contains(t, wire, `"tools[2].input_schema"`)
+			require.Contains(t, wire, `"agy-late-req-42"`)
+			require.Contains(t, wire, `"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"`)
+
+			if protocol == "gemini" {
+				require.Contains(t, wire, `"reason":"GATEWAY_STREAM_TERMINAL_ERROR"`)
+				require.Contains(t, wire, `"status":"INVALID_ARGUMENT"`)
+			} else {
+				require.Equal(t, 1, strings.Count(wire, streamPreheaderTerminalCode))
+				require.Contains(t, wire, `"type":"custom_tool_schema_error"`)
 			}
 		})
 	}

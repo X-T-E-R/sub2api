@@ -16,21 +16,26 @@ var streamPreheaderGoogleDuration = regexp.MustCompile(`^[0-9]+(?:\.[0-9]{1,9})?
 
 func streamPreheaderBodyRetryDelay(body []byte) string {
 	var delay string
-	gjson.GetBytes(body, "error.details").ForEach(func(_, detail gjson.Result) bool {
-		if detail.Get("@type").String() != googleRPCTypeRetryInfo {
+	for _, path := range []string{"error.details", "response.error.details"} {
+		gjson.GetBytes(body, path).ForEach(func(_, detail gjson.Result) bool {
+			if detail.Get("@type").String() != googleRPCTypeRetryInfo {
+				return true
+			}
+			value := detail.Get("retryDelay").String()
+			if !streamPreheaderGoogleDuration.MatchString(value) {
+				return true
+			}
+			seconds, err := strconv.ParseFloat(strings.TrimSuffix(value, "s"), 64)
+			if err == nil && seconds <= 315576000000 {
+				delay = value
+				return false
+			}
 			return true
+		})
+		if delay != "" {
+			return delay
 		}
-		value := detail.Get("retryDelay").String()
-		if !streamPreheaderGoogleDuration.MatchString(value) {
-			return true
-		}
-		seconds, err := strconv.ParseFloat(strings.TrimSuffix(value, "s"), 64)
-		if err == nil && seconds <= 315576000000 {
-			delay = value
-			return false
-		}
-		return true
-	})
+	}
 	return delay
 }
 
@@ -40,9 +45,12 @@ func finishStreamPreheaderSSEError(c *gin.Context, payload []byte, headers http.
 	if StreamPreheaderFinalized(c) {
 		return errStreamPreheaderTerminal
 	}
-	meta := streamPreheaderResponseMeta{}
+	meta := streamPreheaderResponseMeta{headers: headers}
 	if len(response) > 0 {
 		meta = response[0]
+		if meta.headers == nil {
+			meta.headers = headers
+		}
 	}
 	if meta.id == "" {
 		meta.id = gjson.GetBytes(payload, "response.id").String()
@@ -50,6 +58,7 @@ func finishStreamPreheaderSSEError(c *gin.Context, payload []byte, headers http.
 	if nested := gjson.GetBytes(payload, "response.error"); nested.Exists() {
 		payload, _ = json.Marshal(gin.H{"error": json.RawMessage(nested.Raw)})
 	}
+	meta.body = payload
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(payload)))
 	status := openAIStreamFailedEventSemanticStatus(payload, message)
 	for _, path := range []string{"error.code", "error.status", "error.status_code", "status_code"} {

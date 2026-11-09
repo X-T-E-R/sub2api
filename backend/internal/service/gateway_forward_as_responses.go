@@ -168,7 +168,7 @@ func (s *GatewayService) ForwardAsResponses(
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  resp.Header.Get("x-request-id"),
+				UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 				Kind:               "failover",
 				Message:            upstreamMsg,
 			})
@@ -179,12 +179,27 @@ func (s *GatewayService) ForwardAsResponses(
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
+				ResponseHeaders:        resp.Header.Clone(),
 				RetryableOnSameAccount: !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
 
 		// Non-failover error: return Responses-formatted error to client
-		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+			c, account.Platform, resp.StatusCode, respBody,
+			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
+		); matched {
+			writeResponsesError(c, ptStatus, ptErrType, ptErrMsg)
+			return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
+		}
+		errCode := "server_error"
+		if resp.StatusCode == http.StatusBadRequest {
+			errCode = "invalid_request_error"
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			errCode = "rate_limit_error"
+		}
+		WriteProjectedResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), respBody, errCode, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

@@ -1142,8 +1142,12 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 }
 
 // writeChatCompletionsError writes an error response in OpenAI Chat Completions format.
-func writeChatCompletionsError(c *gin.Context, statusCode int, errType, message string) {
+func writeChatCompletionsError(c *gin.Context, statusCode int, errType, message string, body ...[]byte) {
 	MarkResponseCommitted(c)
+	if len(body) > 0 && len(body[0]) > 0 {
+		WriteProjectedOpenAIError(c, statusCode, body[0], errType, message)
+		return
+	}
 	c.JSON(statusCode, gin.H{
 		"error": gin.H{
 			"type":    errType,

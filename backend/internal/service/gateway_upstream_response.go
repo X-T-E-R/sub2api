@@ -280,22 +280,56 @@ func sanitizeStreamError(err error) string {
 }
 
 // ExtractUpstreamErrorMessage 从上游响应体中提取错误消息
-// 支持 Claude 风格的错误格式：{"type":"error","error":{"type":"...","message":"..."}}
+// 支持 Claude / OpenAI / Google / v1internal 等错误格式。
 func ExtractUpstreamErrorMessage(body []byte) string {
 	return extractUpstreamErrorMessage(body)
 }
 
+// ExtractUpstreamErrorCode 从上游响应体中提取错误码。
+func ExtractUpstreamErrorCode(body []byte) string {
+	return extractUpstreamErrorCode(body)
+}
+
+// ExtractUpstreamErrorType 从上游响应体中提取错误类型或状态标识。
+func ExtractUpstreamErrorType(body []byte) string {
+	return extractUpstreamErrorType(body)
+}
+
+func looksLikeHTMLBody(body []byte) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(string(body)))
+	if trimmed == "" {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "<!doctype") ||
+		strings.HasPrefix(trimmed, "<html") ||
+		strings.HasPrefix(trimmed, "<head") ||
+		strings.HasPrefix(trimmed, "<body") ||
+		strings.HasPrefix(trimmed, "<title") ||
+		(strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">"))
+}
+
 func extractUpstreamErrorMessage(body []byte) string {
-	// Claude 风格：{"type":"error","error":{"type":"...","message":"..."}}
-	if m := gjson.GetBytes(body, "error.message").String(); strings.TrimSpace(m) != "" {
-		inner := strings.TrimSpace(m)
-		// 有些上游会把完整 JSON 作为字符串塞进 message
-		if strings.HasPrefix(inner, "{") {
-			if innerMsg := gjson.Get(inner, "error.message").String(); strings.TrimSpace(innerMsg) != "" {
-				return innerMsg
+	for _, path := range []string{"error.message", "response.error.message"} {
+		if m := gjson.GetBytes(body, path).String(); strings.TrimSpace(m) != "" {
+			inner := strings.TrimSpace(m)
+			// 有些上游会把完整 JSON 作为字符串塞进 message
+			if strings.HasPrefix(inner, "{") {
+				for _, innerPath := range []string{"error.message", "response.error.message", "message", "detail"} {
+					if innerMsg := gjson.Get(inner, innerPath).String(); strings.TrimSpace(innerMsg) != "" {
+						return innerMsg
+					}
+				}
 			}
+			return m
 		}
-		return m
+	}
+
+	// OAuth / 简单 JSON 错误风格：{"error_description":"..."} 或 {"error":"..."}
+	if desc := gjson.GetBytes(body, "error_description").String(); strings.TrimSpace(desc) != "" {
+		return desc
+	}
+	if errVal := gjson.GetBytes(body, "error"); errVal.Type == gjson.String && strings.TrimSpace(errVal.String()) != "" {
+		return errVal.String()
 	}
 
 	// ChatGPT 内部 API 风格：{"detail":"..."}
@@ -308,8 +342,10 @@ func extractUpstreamErrorMessage(body []byte) string {
 }
 
 func extractUpstreamErrorCode(body []byte) string {
-	if code := strings.TrimSpace(gjson.GetBytes(body, "error.code").String()); code != "" {
-		return code
+	for _, path := range []string{"error.code", "response.error.code", "code"} {
+		if code := strings.TrimSpace(gjson.GetBytes(body, path).String()); code != "" {
+			return code
+		}
 	}
 
 	inner := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
@@ -327,6 +363,23 @@ func extractUpstreamErrorCode(body []byte) string {
 		}
 	}
 
+	return ""
+}
+
+func extractUpstreamErrorType(body []byte) string {
+	for _, path := range []string{"error.type", "response.error.type"} {
+		if t := strings.TrimSpace(gjson.GetBytes(body, path).String()); t != "" {
+			return t
+		}
+	}
+	for _, path := range []string{"error.status", "response.error.status"} {
+		if st := strings.TrimSpace(gjson.GetBytes(body, path).String()); st != "" {
+			if mapped := mapGeminiStatusToClaudeErrorType(st); mapped != "" {
+				return mapped
+			}
+			return st
+		}
+	}
 	return ""
 }
 
@@ -401,7 +454,7 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, body),
 		Kind:               "http_error",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -417,10 +470,17 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		}
 	}
 	if shouldDisable {
-		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: body}
+		return nil, &UpstreamFailoverError{
+			StatusCode:      resp.StatusCode,
+			ResponseBody:    body,
+			ResponseHeaders: resp.Header.Clone(),
+		}
 	}
 
 	MarkResponseCommitted(c)
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)
+	}
 
 	// 记录上游错误响应体摘要便于排障（可选：由配置控制；不回显到客户端）
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
@@ -462,60 +522,57 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, summary)
 	}
 
-	// 根据状态码返回适当的自定义错误响应（不透传上游详细信息）
 	var errType, errMsg string
 	var statusCode int
 
 	switch resp.StatusCode {
 	case 400:
-		c.Data(http.StatusBadRequest, "application/json", body)
-		summary := upstreamMsg
-		if summary == "" {
-			summary = truncateForLog(body, 512)
-		}
-		if summary == "" {
-			return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, summary)
+		statusCode = http.StatusBadRequest
+		errType = "invalid_request_error"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Invalid request")
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream authentication failed, please contact administrator"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream authentication failed, please contact administrator")
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream access forbidden, please contact administrator"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream access forbidden, please contact administrator")
+	case 404:
+		statusCode = http.StatusNotFound
+		errType = "not_found_error"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Resource not found")
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded, please retry later"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream rate limit exceeded, please retry later")
 	case 529:
 		statusCode = http.StatusServiceUnavailable
 		errType = "overloaded_error"
-		errMsg = "Upstream service overloaded, please retry later"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream service overloaded, please retry later")
 	case 500, 502, 503, 504:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream service temporarily unavailable"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream service temporarily unavailable")
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = getPassthroughOrDefault(upstreamMsg, "Upstream request failed")
+	}
+	if upstreamType := extractUpstreamErrorType(body); upstreamType != "" && errType == "upstream_error" {
+		errType = upstreamType
 	}
 
-	// 返回自定义错误响应
-	c.JSON(statusCode, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": errMsg,
-		},
-	})
+	writeSameProtocolClaudeError(c, statusCode, body, errType, errMsg)
 
-	if upstreamMsg == "" {
+	summary := upstreamMsg
+	if resp.StatusCode == 400 && summary == "" && !looksLikeHTMLBody(body) {
+		summary = truncateForLog(body, 512)
+	}
+	if summary == "" {
 		return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
 	}
-	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, upstreamMsg)
+	return nil, fmt.Errorf("upstream error: %d message=%s", resp.StatusCode, summary)
 }
 
 func (s *GatewayService) handleRetryExhaustedSideEffects(ctx context.Context, resp *http.Response, account *Account) {
@@ -550,6 +607,9 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 	respBody, _ := s.readUpstreamErrorBody(resp)
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	if resp != nil {
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+	}
 
 	s.handleRetryExhaustedSideEffects(ctx, resp, account)
 
@@ -561,7 +621,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 			if line, ok := v.(string); ok && strings.TrimSpace(line) != "" {
 				logger.LegacyPrintf("service.gateway", "[ClaudeMimicDebugOnError] status=%d request_id=%s %s",
 					resp.StatusCode,
-					resp.Header.Get("x-request-id"),
+					ExtractUpstreamRequestID(resp.Header, respBody),
 					line,
 				)
 			}
@@ -581,7 +641,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  ExtractUpstreamRequestID(resp.Header, respBody),
 		Kind:               "retry_exhausted",
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -625,14 +685,12 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		return nil, fmt.Errorf("upstream error: %d (retries exhausted, passthrough rule matched) message=%s", resp.StatusCode, summary)
 	}
 
-	// 返回统一的重试耗尽错误响应
-	c.JSON(http.StatusBadGateway, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    "upstream_error",
-			"message": "Upstream request failed after retries",
-		},
-	})
+	errType := "upstream_error"
+	if upstreamType := extractUpstreamErrorType(respBody); upstreamType != "" {
+		errType = upstreamType
+	}
+	errMsg := getPassthroughOrDefault(upstreamMsg, "Upstream request failed after retries")
+	writeSameProtocolClaudeError(c, http.StatusBadGateway, respBody, errType, errMsg)
 
 	if upstreamMsg == "" {
 		return nil, fmt.Errorf("upstream error: %d (retries exhausted)", resp.StatusCode)

@@ -131,7 +131,21 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
-		writeChatCompletionsError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
+		PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+		if ptStatus, ptErrType, ptErrMsg, matched := applyErrorPassthroughRule(
+			c, account.Platform, resp.StatusCode, respBody,
+			mapUpstreamStatusCode(resp.StatusCode), "server_error", "Upstream request failed",
+		); matched {
+			writeChatCompletionsError(c, ptStatus, ptErrType, ptErrMsg)
+			return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
+		}
+		errType := "server_error"
+		if resp.StatusCode == http.StatusBadRequest {
+			errType = "invalid_request_error"
+		} else if resp.StatusCode == http.StatusTooManyRequests {
+			errType = "rate_limit_error"
+		}
+		WriteProjectedOpenAIError(c, mapUpstreamStatusCode(resp.StatusCode), respBody, errType, getPassthroughOrDefault(upstreamMsg, "Upstream request failed"))
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 

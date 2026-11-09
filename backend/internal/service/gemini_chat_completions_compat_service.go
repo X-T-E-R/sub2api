@@ -200,13 +200,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	requestID := resp.Header.Get(requestIDHeader)
-	if requestID == "" {
-		requestID = resp.Header.Get("x-goog-request-id")
-	}
-	if requestID != "" {
-		c.Header("x-request-id", requestID)
-	}
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader))
 
 	reasoningEffort := extractCCReasoningEffortFromBody(originalChatBody, mappedModel)
 	// 国产模型默认 effort 补充（本路径上游是 Gemini，不会命中 passback-required）。
@@ -225,6 +219,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		}
 		evBody := unwrapIfNeeded(account.Type == AccountTypeOAuth, respBody)
+		requestID = PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, requestID, evBody)
 
 		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
 			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(evBody)))
@@ -240,6 +235,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           evBody,
+				ResponseHeaders:        resp.Header.Clone(),
 				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
@@ -832,6 +828,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 	upstreamRequestID string,
 	body []byte,
 ) error {
+	resolvedReqID := PropagateUpstreamRequestAndTraceHeaders(c, nil, upstreamRequestID, body)
 	upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 	setOpsUpstreamError(c, upstreamStatus, upstreamMsg, "")
 	if account != nil {
@@ -840,7 +837,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: upstreamStatus,
-			UpstreamRequestID:  upstreamRequestID,
+			UpstreamRequestID:  resolvedReqID,
 			Kind:               "http_error",
 			Message:            upstreamMsg,
 		})
@@ -860,7 +857,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 
 	statusCode := http.StatusBadGateway
 	errType := "upstream_error"
-	errMsg := "Upstream request failed"
+	errMsg := ""
 	if mapped := mapGeminiErrorBodyToClaudeError(body); mapped != nil {
 		if mapped.Type != "" {
 			errType = mapped.Type
@@ -872,6 +869,9 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			statusCode = mapped.StatusCode
 		}
 	}
+	if errMsg == "" && upstreamMsg != "" {
+		errMsg = upstreamMsg
+	}
 
 	switch upstreamStatus {
 	case http.StatusBadRequest:
@@ -881,20 +881,15 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "invalid_request_error"
 		}
-		// 400 是确定性的请求错误：回传上游 message（已脱敏），客户端据此定位非法字段。
-		if errMsg == "Upstream request failed" {
-			if upstreamMsg != "" {
-				errMsg = upstreamMsg
-			} else {
-				errMsg = "Invalid request"
-			}
+		if errMsg == "" {
+			errMsg = "Invalid request"
 		}
 	case http.StatusNotFound:
 		statusCode = http.StatusNotFound
 		if errType == "upstream_error" {
 			errType = "not_found_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Resource not found"
 		}
 	case http.StatusTooManyRequests:
@@ -902,7 +897,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "rate_limit_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Upstream rate limit exceeded, please retry later"
 		}
 	case 529:
@@ -910,15 +905,17 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "overloaded_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == "" {
 			errMsg = "Upstream service overloaded, please retry later"
+		}
+	default:
+		if errMsg == "" {
+			errMsg = "Upstream request failed"
 		}
 	}
 
-	if upstreamMsg != "" && errMsg == "Upstream request failed" {
-		errMsg = upstreamMsg
-	}
-	return s.writeChatCompletionsError(c, statusCode, errType, errMsg)
+	WriteProjectedOpenAIError(c, statusCode, body, errType, errMsg)
+	return fmt.Errorf("%s", errMsg)
 }
 
 func (s *GeminiMessagesCompatService) writeChatCompletionsError(c *gin.Context, status int, errType, message string) error {
