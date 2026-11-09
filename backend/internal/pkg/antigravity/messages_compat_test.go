@@ -453,3 +453,228 @@ func TestGeminiMessagesCompatibilityImageToolModelScope(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiMessagesCompatibilityCompactionHeadAndUserAnchoredToolBatches(t *testing.T) {
+	mediaResultBlock := func(id, textPrefix string) string {
+		return `{"type":"tool_result","tool_use_id":"` + id + `","content":[` +
+			`{"type":"text","text":"` + textPrefix + `-header"},` +
+			`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}},` +
+			`{"type":"text","text":"` + textPrefix + `-meta"},` +
+			`{"type":"text","text":"` + textPrefix + `-tail"}` +
+			`]}`
+	}
+
+	assertGoogleToolTurnInvariants := func(t *testing.T, contents []GeminiContent) {
+		t.Helper()
+		require.NotEmpty(t, contents)
+		require.Equal(t, "user", contents[0].Role, "first Gemini turn must be user")
+		require.Equal(t, "user", contents[len(contents)-1].Role, "last Gemini turn must be user")
+
+		pendingCallIDs := make(map[string]string)
+		for i, turn := range contents {
+			if i > 0 {
+				require.NotEqualf(t, contents[i-1].Role, turn.Role, "no adjacent same-role turns at contents[%d]", i)
+			}
+			hasFunctionCall := false
+			hasFunctionResponse := false
+			for _, part := range turn.Parts {
+				if part.FunctionCall != nil {
+					hasFunctionCall = true
+					pendingCallIDs[part.FunctionCall.ID] = part.FunctionCall.Name
+				}
+				if part.FunctionResponse != nil {
+					hasFunctionResponse = true
+					expectedName, ok := pendingCallIDs[part.FunctionResponse.ID]
+					require.Truef(t, ok, "functionResponse %q at contents[%d] must match an active preceding functionCall", part.FunctionResponse.ID, i)
+					require.Equalf(t, expectedName, part.FunctionResponse.Name, "functionResponse %q name mismatch at contents[%d]", part.FunctionResponse.ID, i)
+					delete(pendingCallIDs, part.FunctionResponse.ID)
+				}
+			}
+			if hasFunctionCall {
+				require.Equalf(t, "model", turn.Role, "functionCall turn at contents[%d] must have role=model", i)
+				require.Positivef(t, i, "functionCall turn at contents[0] has no preceding user or functionResponse turn")
+				require.Equalf(t, "user", contents[i-1].Role, "functionCall turn at contents[%d] must immediately follow a user/functionResponse turn", i)
+			}
+			if hasFunctionResponse {
+				require.Equalf(t, "user", turn.Role, "functionResponse turn at contents[%d] must have role=user", i)
+				require.Positivef(t, i, "functionResponse turn at contents[0] has no preceding model functionCall turn")
+				require.Equalf(t, "model", contents[i-1].Role, "functionResponse turn at contents[%d] must immediately follow a model functionCall turn", i)
+			}
+			if turn.Role == "user" {
+				require.Emptyf(t, pendingCallIDs, "all preceding functionCalls must be answered in contents[%d]", i)
+			}
+		}
+	}
+
+	// Pre-fix 0.29 / 1.1 shape: compaction_summary was placed after call68's tool_result,
+	// leaving messages[0] as assistant(ReadMediaFile x2) with no leading user turn.
+	unanchoredCompacted := func(trailingTexts []string) string {
+		tailBlocks := []string{
+			`{"type":"tool_result","tool_use_id":"call71","content":[{"type":"text","text":"out"},{"type":"text","text":"appendix"}]}`,
+		}
+		for _, txt := range trailingTexts {
+			tailBlocks = append(tailBlocks, `{"type":"text","text":"`+txt+`"}`)
+		}
+		return strings.Join([]string{
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call12","name":"ReadMediaFile","input":{"path":"a.png"},"signature":"sig-12"},{"type":"tool_use","id":"call13","name":"ReadMediaFile","input":{"path":"b.png"},"signature":"sig-13"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call12", "r12") + `,` + mediaResultBlock("call13", "r13") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call14","name":"ReadMediaFile","input":{"path":"c.png"},"signature":"sig-14"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call14", "r14") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call63","name":"ReadMediaFile","input":{"path":"d.png"},"signature":"sig-63"},{"type":"tool_use","id":"call64","name":"ReadMediaFile","input":{"path":"e.png"},"signature":"sig-64"},{"type":"tool_use","id":"call65","name":"ReadMediaFile","input":{"path":"f.png"},"signature":"sig-65"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call63", "r63") + `,` + mediaResultBlock("call64", "r64") + `,` + mediaResultBlock("call65", "r65") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call68","name":"ReadMediaFile","input":{"path":"g.png"},"signature":"sig-68"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call68", "r68") + `,{"type":"text","text":"[compaction_summary] summarized earlier context"}]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call71","name":"Bash","input":{"command":"ls"},"signature":"sig-71"}]}`,
+			`{"role":"user","content":[` + strings.Join(tailBlocks, ",") + `]}`,
+		}, ",")
+	}
+
+	// Post-fix 0.29 / 1.1 shape (b3): compaction_summary is hoisted to messages[0] as the
+	// leading user turn, and call68's user turn holds only its tool_result.
+	fixedCompacted := func(trailingTexts []string) string {
+		tailBlocks := []string{
+			`{"type":"tool_result","tool_use_id":"call71","content":[{"type":"text","text":"out"},{"type":"text","text":"appendix"}]}`,
+		}
+		for _, txt := range trailingTexts {
+			tailBlocks = append(tailBlocks, `{"type":"text","text":"`+txt+`"}`)
+		}
+		return strings.Join([]string{
+			`{"role":"user","content":[{"type":"text","text":"[compaction_summary] summarized earlier context"}]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call12","name":"ReadMediaFile","input":{"path":"a.png"},"signature":"sig-12"},{"type":"tool_use","id":"call13","name":"ReadMediaFile","input":{"path":"b.png"},"signature":"sig-13"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call12", "r12") + `,` + mediaResultBlock("call13", "r13") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call14","name":"ReadMediaFile","input":{"path":"c.png"},"signature":"sig-14"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call14", "r14") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call63","name":"ReadMediaFile","input":{"path":"d.png"},"signature":"sig-63"},{"type":"tool_use","id":"call64","name":"ReadMediaFile","input":{"path":"e.png"},"signature":"sig-64"},{"type":"tool_use","id":"call65","name":"ReadMediaFile","input":{"path":"f.png"},"signature":"sig-65"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call63", "r63") + `,` + mediaResultBlock("call64", "r64") + `,` + mediaResultBlock("call65", "r65") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call68","name":"ReadMediaFile","input":{"path":"g.png"},"signature":"sig-68"}]}`,
+			`{"role":"user","content":[` + mediaResultBlock("call68", "r68") + `]}`,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call71","name":"Bash","input":{"command":"ls"},"signature":"sig-71"}]}`,
+			`{"role":"user","content":[` + strings.Join(tailBlocks, ",") + `]}`,
+		}, ",")
+	}
+
+	t.Run("pre-fix 0.29 and 1.1 unanchored assistant head produces leading model functionCall at contents[0]", func(t *testing.T) {
+		for _, tc := range []struct {
+			name          string
+			trailingTexts []string
+		}{
+			{name: "step-0.29", trailingTexts: []string{"ssh_hosts", "model_steering"}},
+			{name: "step-1.1", trailingTexts: []string{"ssh_hosts", "model_steering", "runtime_snapshot", "system_trigger", "runtime_snapshot", "model_steering"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				input := `{"model":"gemini-4-argon","messages":[` + unanchoredCompacted(tc.trailingTexts) + `]}`
+				result, err := transformGeminiMessagesForTest(t, input, "gemini-4-argon", GeminiMessagesCompatibilityOptions{Enabled: true})
+				require.NoError(t, err)
+				require.Equal(t, []string{
+					"model", "user",
+					"model", "user",
+					"model", "user",
+					"model", "user",
+					"model", "user",
+				}, geminiRolesForTest(result.Request.Contents))
+				// First two Gemini turns in pre-fix shape:
+				// contents[0] is model(functionCall x2) with no preceding user turn -> triggers Google 400 INVALID_ARGUMENT.
+				require.Equal(t, "model", result.Request.Contents[0].Role)
+				require.Len(t, result.Request.Contents[0].Parts, 2)
+				require.Equal(t, "call12", result.Request.Contents[0].Parts[0].FunctionCall.ID)
+				require.Equal(t, "ReadMediaFile", result.Request.Contents[0].Parts[0].FunctionCall.Name)
+				require.Equal(t, "sig-12", result.Request.Contents[0].Parts[0].ThoughtSignature)
+				require.Equal(t, "call13", result.Request.Contents[0].Parts[1].FunctionCall.ID)
+				require.Equal(t, "ReadMediaFile", result.Request.Contents[0].Parts[1].FunctionCall.Name)
+				require.Equal(t, "sig-13", result.Request.Contents[0].Parts[1].ThoughtSignature)
+
+				require.Equal(t, "user", result.Request.Contents[1].Role)
+				require.Len(t, result.Request.Contents[1].Parts, 2)
+				require.Equal(t, "call12", result.Request.Contents[1].Parts[0].FunctionResponse.ID)
+				require.Equal(t, "call13", result.Request.Contents[1].Parts[1].FunctionResponse.ID)
+			})
+		}
+	})
+
+	t.Run("post-fix 0.29 and 1.1 hoisted compaction_summary starts with user and satisfies all Gemini turn adjacency invariants", func(t *testing.T) {
+		for _, tc := range []struct {
+			name          string
+			trailingTexts []string
+		}{
+			{name: "step-0.29", trailingTexts: []string{"ssh_hosts", "model_steering"}},
+			{name: "step-1.1", trailingTexts: []string{"ssh_hosts", "model_steering", "runtime_snapshot", "system_trigger", "runtime_snapshot", "model_steering"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				input := `{"model":"gemini-4-argon","messages":[` + fixedCompacted(tc.trailingTexts) + `]}`
+				result, err := transformGeminiMessagesForTest(t, input, "gemini-4-argon", GeminiMessagesCompatibilityOptions{Enabled: true})
+				require.NoError(t, err)
+				require.Equal(t, []string{
+					"user",
+					"model", "user",
+					"model", "user",
+					"model", "user",
+					"model", "user",
+					"model", "user",
+				}, geminiRolesForTest(result.Request.Contents))
+
+				// Verify full sequence satisfies strict Gemini role alternation and functionCall/functionResponse adjacency.
+				assertGoogleToolTurnInvariants(t, result.Request.Contents)
+
+				// First two Gemini turns in post-fix shape:
+				// contents[0] is user(text: compaction_summary), contents[1] is model(functionCall: call12, call13).
+				require.Equal(t, []GeminiPart{
+					{Text: "[compaction_summary] summarized earlier context"},
+				}, result.Request.Contents[0].Parts)
+				require.Len(t, result.Request.Contents[1].Parts, 2)
+				require.Equal(t, "call12", result.Request.Contents[1].Parts[0].FunctionCall.ID)
+				require.Equal(t, "ReadMediaFile", result.Request.Contents[1].Parts[0].FunctionCall.Name)
+				require.Equal(t, "sig-12", result.Request.Contents[1].Parts[0].ThoughtSignature)
+				require.Equal(t, "call13", result.Request.Contents[1].Parts[1].FunctionCall.ID)
+				require.Equal(t, "ReadMediaFile", result.Request.Contents[1].Parts[1].FunctionCall.Name)
+				require.Equal(t, "sig-13", result.Request.Contents[1].Parts[1].ThoughtSignature)
+
+				// Batch 1 responses (contents[2])
+				require.Len(t, result.Request.Contents[2].Parts, 2)
+				require.Equal(t, "call12", result.Request.Contents[2].Parts[0].FunctionResponse.ID)
+				require.Equal(t, "ReadMediaFile", result.Request.Contents[2].Parts[0].FunctionResponse.Name)
+				require.Equal(t, map[string]any{"result": "r12-header\nr12-meta\nr12-tail"}, result.Request.Contents[2].Parts[0].FunctionResponse.Response)
+				require.Len(t, result.Request.Contents[2].Parts[0].FunctionResponse.Parts, 1)
+				require.Equal(t, "aW1hZ2U=", result.Request.Contents[2].Parts[0].FunctionResponse.Parts[0].InlineData.Data)
+				require.Equal(t, "call13", result.Request.Contents[2].Parts[1].FunctionResponse.ID)
+
+				// Batch 2 (contents[3..4]): call14
+				require.Len(t, result.Request.Contents[3].Parts, 1)
+				require.Equal(t, "call14", result.Request.Contents[3].Parts[0].FunctionCall.ID)
+				require.Len(t, result.Request.Contents[4].Parts, 1)
+				require.Equal(t, "call14", result.Request.Contents[4].Parts[0].FunctionResponse.ID)
+
+				// Batch 3 (contents[5..6]): call63, call64, call65
+				require.Len(t, result.Request.Contents[5].Parts, 3)
+				require.Equal(t, []string{"call63", "call64", "call65"}, []string{
+					result.Request.Contents[5].Parts[0].FunctionCall.ID,
+					result.Request.Contents[5].Parts[1].FunctionCall.ID,
+					result.Request.Contents[5].Parts[2].FunctionCall.ID,
+				})
+				require.Len(t, result.Request.Contents[6].Parts, 3)
+				require.Equal(t, []string{"call63", "call64", "call65"}, []string{
+					result.Request.Contents[6].Parts[0].FunctionResponse.ID,
+					result.Request.Contents[6].Parts[1].FunctionResponse.ID,
+					result.Request.Contents[6].Parts[2].FunctionResponse.ID,
+				})
+
+				// Batch 4 (contents[7..8]): call68 only (compaction_summary was moved to contents[0])
+				require.Len(t, result.Request.Contents[7].Parts, 1)
+				require.Equal(t, "call68", result.Request.Contents[7].Parts[0].FunctionCall.ID)
+				require.Len(t, result.Request.Contents[8].Parts, 1)
+				require.Equal(t, "call68", result.Request.Contents[8].Parts[0].FunctionResponse.ID)
+
+				// Batch 5 (contents[9..10]): call71 + trailing injected user text blocks in same final user turn
+				require.Len(t, result.Request.Contents[9].Parts, 1)
+				require.Equal(t, "call71", result.Request.Contents[9].Parts[0].FunctionCall.ID)
+				require.Equal(t, "Bash", result.Request.Contents[9].Parts[0].FunctionCall.Name)
+				require.Len(t, result.Request.Contents[10].Parts, 1+len(tc.trailingTexts))
+				require.Equal(t, "call71", result.Request.Contents[10].Parts[0].FunctionResponse.ID)
+				require.Equal(t, "Bash", result.Request.Contents[10].Parts[0].FunctionResponse.Name)
+				require.Equal(t, map[string]any{"result": "out\nappendix"}, result.Request.Contents[10].Parts[0].FunctionResponse.Response)
+				for idx, txt := range tc.trailingTexts {
+					require.Equal(t, txt, result.Request.Contents[10].Parts[1+idx].Text)
+				}
+			})
+		}
+	})
+}
