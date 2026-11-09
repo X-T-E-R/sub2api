@@ -293,4 +293,3 @@ func isGeminiCaptureModelMatch(target, model string) bool {
 func isGeminiCaptureFinalModel(model string) bool {
 	return isGeminiCaptureModelMatch(GeminiCaptureTargetModel, model)
 }
-

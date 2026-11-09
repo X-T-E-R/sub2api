@@ -287,14 +287,13 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	mappedModel string,
 	effortResolvedByMapping bool,
 ) ([]byte, error) {
+	options := s.getClaudeTransformOptions(ctx)
 	if strings.HasPrefix(strings.ToLower(mappedModel), "gemini-") {
+		requestType := "agent"
 		targetModel := mappedModel
 		if claudeRequest != nil && antigravity.HasWebSearchTool(claudeRequest.Tools) {
-			configuredSearchModel := ""
-			if s != nil && s.settingService != nil {
-				configuredSearchModel = s.settingService.GetAntigravityWebSearchModel(ctx)
-			}
-			targetModel = antigravity.EffectiveWebSearchModel(configuredSearchModel)
+			requestType = "web_search"
+			targetModel = antigravity.EffectiveWebSearchModel(options.WebSearchModel)
 		}
 		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 		if err != nil {
@@ -312,10 +311,9 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 		if cleaned, cleanErr := cleanGeminiRequest(body); cleanErr == nil {
 			body = cleaned
 		}
-		return s.wrapV1InternalRequest(projectID, targetModel, body)
+		return s.wrapV1InternalRequestWithType(ctx, projectID, targetModel, requestType, body)
 	}
 
-	options := s.getClaudeTransformOptions(ctx)
 	options.EnableIdentityPatch = true
 	options.EffortResolvedByMapping = effortResolvedByMapping
 	return antigravity.TransformClaudeToGeminiWithOptions(claudeRequest, projectID, mappedModel, options)

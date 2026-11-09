@@ -635,7 +635,11 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 
 // wrapV1InternalRequest 包装请求为 v1internal 格式
 func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model string, originalBody []byte) ([]byte, error) {
-	originalBody = s.applyAntigravitySystemInstructionRewrite(context.Background(), originalBody)
+	return s.wrapV1InternalRequestWithType(context.Background(), projectID, model, "agent", originalBody)
+}
+
+func (s *AntigravityGatewayService) wrapV1InternalRequestWithType(ctx context.Context, projectID, model, requestType string, originalBody []byte) ([]byte, error) {
+	originalBody = s.applyAntigravitySystemInstructionRewrite(ctx, originalBody)
 	var request any
 	if err := json.Unmarshal(originalBody, &request); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
@@ -644,19 +648,8 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 	if projectID == "" {
 		return nil, errAntigravityProjectIDRequired
 	}
-
-	requestType := "agent"
-	targetModel := model
-	if hasGeminiGoogleSearchTool(request) {
-		requestType = "web_search"
-		configuredSearchModel := ""
-		if s != nil && s.settingService != nil {
-			configuredSearchModel = s.settingService.GetAntigravityWebSearchModel(context.Background())
-		}
-		searchModel := antigravity.EffectiveWebSearchModel(configuredSearchModel)
-		if configuredSearchModel != "" || targetModel == "" {
-			targetModel = searchModel
-		}
+	if strings.TrimSpace(requestType) == "" {
+		requestType = "agent"
 	}
 
 	wrapped := map[string]any{
@@ -664,35 +657,11 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 		"requestId":   "agent-" + uuid.New().String(),
 		"userAgent":   "antigravity", // 固定值，与官方客户端一致
 		"requestType": requestType,
-		"model":       targetModel,
+		"model":       model,
 		"request":     request,
 	}
 
 	return json.Marshal(wrapped)
-}
-
-func hasGeminiGoogleSearchTool(request any) bool {
-	reqMap, ok := request.(map[string]any)
-	if !ok {
-		return false
-	}
-	tools, ok := reqMap["tools"].([]any)
-	if !ok {
-		return false
-	}
-	for _, rawTool := range tools {
-		toolMap, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, has := toolMap["googleSearch"]; has {
-			return true
-		}
-		if _, has := toolMap["google_search"]; has {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *AntigravityGatewayService) applyAntigravitySystemInstructionRewrite(ctx context.Context, body []byte) []byte {

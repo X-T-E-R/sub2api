@@ -72,9 +72,11 @@ func TestGeminiCapture_GeneralizedLeaseAndWebSearchModelWiring(t *testing.T) {
 		},
 	}
 
-	// 1. Wrong API key ID is ignored even when model matches.
+	// 1. Wrong API key ID is ignored even when model matches; unrelated model without web_search on matching shared API key is also ignored at Begin without copying/parsing body.
 	unrelatedInbound := []byte(`{"model":"gemini-4-argon-high","messages":[{"role":"user","content":"hi"}]}`)
 	require.Nil(t, controller.Begin(newCaptureTestContext(), "/v1/messages", unrelatedInbound, "", "gemini-4-argon-high", false, 7, 999))
+	unrelatedModelOnSharedKey := []byte("{invalid-json-that-would-fail-parse-if-copied")
+	require.Nil(t, controller.Begin(newCaptureTestContext(), "/v1/messages", unrelatedModelOnSharedKey, "", "claude-haiku-4-5", false, 7, 501))
 
 	// 2. Normal Argon request with business fields named "token"/"api_key"/"secret" inside messages/tools:
 	//    - Must NOT switch model to gemini-3.1-flash-lite (stays gemini-4-argon-high, requestType="agent").
@@ -280,3 +282,36 @@ func TestGeminiCapture_CaptureOffDoesNotAffectSearchOrNormalForwarding(t *testin
 	require.Contains(t, string(upstream.requestBodies[0]), `"requestType":"web_search"`)
 }
 
+func TestAntigravityNativeWrapV1InternalRequest_PreservesGoogleSearchContract(t *testing.T) {
+	nativeBodyWithGoogleSearch := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"googleSearch":{}}]}`)
+
+	t.Run("unconfigured search model leaves native wrapper requestType=agent and explicit model intact", func(t *testing.T) {
+		cfg := &config.Config{}
+		settingSvc := NewSettingService(&antigravitySettingRepoStub{values: map[string]string{}}, cfg)
+		settingSvc.LoadAntigravityWebSearchModelSettings(context.Background())
+		svc := &AntigravityGatewayService{settingService: settingSvc}
+
+		wrapped, err := svc.wrapV1InternalRequest("proj-native", "gemini-4-argon-high", nativeBodyWithGoogleSearch)
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(wrapped, &payload))
+		require.Equal(t, "agent", payload["requestType"])
+		require.Equal(t, "gemini-4-argon-high", payload["model"])
+	})
+
+	t.Run("configured search model still leaves native wrapper requestType=agent and explicit model intact", func(t *testing.T) {
+		cfg := &config.Config{}
+		settingSvc := NewSettingService(&antigravitySettingRepoStub{values: map[string]string{
+			SettingKeyAntigravityWebSearchModel: "gemini-3.1-flash-lite",
+		}}, cfg)
+		settingSvc.LoadAntigravityWebSearchModelSettings(context.Background())
+		svc := &AntigravityGatewayService{settingService: settingSvc}
+
+		wrapped, err := svc.wrapV1InternalRequest("proj-native", "gemini-4-argon-high", nativeBodyWithGoogleSearch)
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(wrapped, &payload))
+		require.Equal(t, "agent", payload["requestType"])
+		require.Equal(t, "gemini-4-argon-high", payload["model"])
+	})
+}

@@ -697,8 +697,7 @@ func (g *GeminiCapture) Begin(ctx context.Context, requestPath string, inboundBo
 		return nil
 	}
 	requestMatched := leaseMatchesModel(lease, requestModel)
-	identityScoped := (len(lease.APIKeyIDs) > 0 && apiKeyID > 0) || (len(lease.UserIDs) > 0 && userID > 0) || (len(lease.MetadataUserIDs) > 0 && len(lease.Models) > 1)
-	deferredCandidate := !requestMatched && (inboundHasWebSearchTool(inboundBody) || identityScoped)
+	deferredCandidate := !requestMatched && inboundHasWebSearchTool(inboundBody)
 	if !requestMatched && !deferredCandidate {
 		return nil
 	}

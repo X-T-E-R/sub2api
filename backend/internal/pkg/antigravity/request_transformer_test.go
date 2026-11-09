@@ -738,4 +738,3 @@ func TestNormalizeWebSearchModel(t *testing.T) {
 	_, err = NormalizeWebSearchModel("bad model name")
 	require.Error(t, err)
 }
-
