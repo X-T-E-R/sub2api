@@ -212,7 +212,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 
-	cont := s.newAntigravityThoughtContinuation(ctx, account, call.request.originalModel, call.prefix, call.proxyURL, call.accessToken, "streamGenerateContent", call.geminiBody)
+	cont := s.newAntigravityThoughtContinuation(ctx, account, call.request.originalModel, call.prefix, call.proxyURL, call.accessToken, "streamGenerateContent", result.body)
 	protocol := "responses"
 	if call.request.protocol == antigravityCompatChatCompletions {
 		protocol = "chat_completions"
@@ -611,8 +611,8 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 			return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to encode upstream response")
 		}
 		status := http.StatusOK
-		if antigravityThoughtContinuationFromGin(c).responseFailure() != nil {
-			failure := antigravityThoughtContinuationFromGin(c).responseFailure()
+		if antigravityThoughtContinuationFromGin(c).collectedResponseFailure() != nil {
+			failure := antigravityThoughtContinuationFromGin(c).collectedResponseFailure()
 			status = failure.status()
 			encoded, encodeErr = sjson.SetBytes(encoded, "error", failure.protocolError("chat"))
 			if encodeErr != nil {
@@ -651,8 +651,8 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 		responsesResponse.IncompleteDetails = nil
 	}
 	status := http.StatusOK
-	if antigravityThoughtContinuationFromGin(c).responseFailure() != nil {
-		failure := antigravityThoughtContinuationFromGin(c).responseFailure()
+	if antigravityThoughtContinuationFromGin(c).collectedResponseFailure() != nil {
+		failure := antigravityThoughtContinuationFromGin(c).collectedResponseFailure()
 		status = failure.status()
 		responsesResponse.Status = "failed"
 		responsesResponse.IncompleteDetails = nil

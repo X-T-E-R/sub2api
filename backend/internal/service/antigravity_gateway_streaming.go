@@ -508,7 +508,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				}
 
 				if cont != nil {
-					cont.observePayload(inner)
+					cont.observeLine(line)
 					if holdTerminal && !cont.withholdSuccessfulTerminal() {
 						// 这一代不再是只有思考的正常完成：暂存帧原样放行，不误伤正文/工具。
 						flushHeld(false)
@@ -545,6 +545,12 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity)")
 			if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
 				capture.MarkTimeout()
+			}
+			if cont != nil && cont.hasExtraGeneration() {
+				cont.recordFailure(c, "gemini_stream_timeout", errors.New("stream data interval timeout"))
+				flushHeld(true)
+				sendErrorEvent("thought_continuation_error")
+				return result(false), cont.failureError()
 			}
 			sendErrorEvent("stream_timeout")
 			return result(false), fmt.Errorf("stream data interval timeout")
@@ -677,6 +683,9 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 					} else if nextResp != nil {
 						// 新的一代开始：第一代的响应体放入快照并清空当前代的收集状态，
 						// 避免只有第一代有内容时它的响应体与用量被累计两次。
+						if cont.missingTerminalReplayUsed() {
+							collectedParts = nil // Discard the abandoned generation's empty carriers.
+						}
 						firstLast, firstLastWithParts = last, lastWithParts
 						last, lastWithParts, usage = nil, nil, nil
 						extraResp = nextResp
@@ -721,7 +730,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			}
 
 			var parsed map[string]any
-			if err := json.Unmarshal(inner, &parsed); err != nil {
+			if err := json.Unmarshal(inner, &parsed); err != nil || parsed == nil {
 				continue
 			}
 
@@ -762,7 +771,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			}
 
 			if cont != nil {
-				cont.observePayload(inner)
+				cont.observeLine(line)
 			}
 
 		case <-intervalCh:
@@ -771,6 +780,10 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 				continue
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity non-stream)")
+			if cont != nil && cont.hasExtraGeneration() {
+				cont.recordFailure(c, "gemini_collect_timeout", errors.New("stream data interval timeout"))
+				goto returnResponse
+			}
 			return nil, fmt.Errorf("stream data interval timeout")
 		}
 	}
@@ -831,9 +844,10 @@ returnResponse:
 	}
 
 	status := http.StatusOK
-	if cont.completeNoUsableAnswer(c, "gemini_collect") {
-		status = cont.responseFailure().status()
-		finalResponse["error"] = antigravityNoUsableAnswerGoogleError(cont.responseFailure())
+	cont.completeNoUsableAnswer(c, "gemini_collect")
+	if failure := cont.collectedResponseFailure(); failure != nil {
+		status = failure.status()
+		finalResponse["error"] = antigravityNoUsableAnswerGoogleError(failure)
 	}
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
@@ -1173,6 +1187,9 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 					} else if nextResp != nil {
 						// 新的一代开始：第一代的响应体放入快照并清空当前代的收集状态，
 						// 避免只有第一代有内容时它的响应体被累计两次。
+						if cont.missingTerminalReplayUsed() {
+							collectedParts = nil // Discard the abandoned generation's empty carriers.
+						}
 						firstLast, firstLastWithParts = last, lastWithParts
 						last, lastWithParts = nil, nil
 						extraResp = nextResp
@@ -1216,11 +1233,11 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 			}
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(inner)
 			if cont != nil {
-				cont.observePayload(inner)
+				cont.observeLine(line)
 			}
 
 			var parsed map[string]any
-			if err := json.Unmarshal(inner, &parsed); err != nil {
+			if err := json.Unmarshal(inner, &parsed); err != nil || parsed == nil {
 				continue
 			}
 
@@ -1250,6 +1267,10 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				continue
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity claude non-stream)")
+			if cont != nil && cont.hasExtraGeneration() {
+				cont.recordFailure(c, "claude_collect_timeout", errors.New("stream data interval timeout"))
+				goto returnResponse
+			}
 			return nil, nil, fmt.Errorf("stream data interval timeout")
 		}
 	}
@@ -1262,7 +1283,7 @@ returnResponse:
 	}
 
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
-	if !meaningfulResponse && !cont.completeNoUsableAnswer(c, "claude_collect") {
+	if !meaningfulResponse && !cont.completeNoUsableAnswer(c, "claude_collect") && cont.failureError() == nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (claude non-stream), triggering failover")
 		return nil, nil, &UpstreamFailoverError{
 			StatusCode:             http.StatusBadGateway,
@@ -1309,7 +1330,7 @@ returnResponse:
 
 	// Finalize before suppressing the adapter's synthesized success, including a
 	// second zero-output generation whose terminal is missing while A is off.
-	noAnswer := cont.completeNoUsableAnswer(c, "claude_collect")
+	cont.completeNoUsableAnswer(c, "claude_collect")
 	if cont != nil && cont.suppressFinalTerminal() {
 		claudeResp, err = withClaudeSuccessfulTerminalSuppressed(claudeResp)
 		if err != nil {
@@ -1317,10 +1338,10 @@ returnResponse:
 		}
 	}
 
-	if noAnswer {
+	if failure := cont.collectedResponseFailure(); failure != nil {
 		claudeResp, err = sjson.SetBytes(claudeResp, "type", "error")
 		if err == nil {
-			claudeResp, err = sjson.SetBytes(claudeResp, "error", cont.responseFailure().protocolError("messages"))
+			claudeResp, err = sjson.SetBytes(claudeResp, "error", failure.protocolError("messages"))
 		}
 		if err != nil {
 			return nil, nil, err
@@ -1359,8 +1380,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 			// The protocol failure is already encoded; preserve partial content and billable usage.
 			if claudeResp != nil {
 				status := http.StatusOK
-				if antigravityThoughtContinuationFromGin(c).responseFailure() != nil {
-					status = antigravityThoughtContinuationFromGin(c).responseFailure().status()
+				if failure := antigravityThoughtContinuationFromGin(c).collectedResponseFailure(); failure != nil {
+					status = failure.status()
 				}
 				writeClaudeResponse(c, claudeResp, status)
 			}
@@ -1607,6 +1628,9 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 						return finalizeFailure(continueErr)
 					}
 					if nextResp != nil {
+						if cont.missingTerminalReplayUsed() {
+							processor.DiscardEmptyGenerationCarriers()
+						}
 						processor.AddUsageBaseline(toAntigravityUsage(finishedUsage))
 						processor.ResetGenerationUsage()
 						extraResp = nextResp
@@ -1683,6 +1707,11 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity)")
 			if capture := GeminiCaptureFromContext(c.Request.Context()); capture != nil {
 				capture.MarkTimeout()
+			}
+			if cont != nil && cont.hasExtraGeneration() {
+				err := errors.New("stream data interval timeout")
+				cont.recordFailure(c, "claude_stream_timeout", err)
+				return finalizeFailure(err)
 			}
 			sendErrorEvent("stream_timeout")
 			return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")

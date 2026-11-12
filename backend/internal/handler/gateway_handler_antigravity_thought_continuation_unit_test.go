@@ -75,6 +75,26 @@ func enableAntigravityContinueZeroOutput(t *testing.T) {
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{ContinueZeroOutput: true}))
 }
 
+func TestGatewayMessagesAntigravityMissingTerminalReplayKeepsBillingAndSlots(t *testing.T) {
+	for _, geminiGroup := range []bool{false, true} {
+		runGatewayThoughtPartialCase(t, gatewayThoughtCase{
+			noAnswer: true, empty: true, messages: true, missingReplay: true, geminiGroup: geminiGroup,
+			generation:       `data: {"response":{"candidates":[{"content":{"parts":[]}}],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":2}}}`,
+			secondGeneration: `data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"sig-empty"}]},"finishReason":"FINISH_REASON_UNSPECIFIED"}],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":2}}}`,
+			wantCode:         "antigravity_missing_terminal", wantStatus: http.StatusBadGateway,
+			wantInput: 16, wantCache: 4,
+		})
+	}
+}
+
+func TestGatewayChatCompletionsAntigravityMissingTerminalReplayTransportFailureKeepsBillingAndSlots(t *testing.T) {
+	runGatewayThoughtPartialCase(t, gatewayThoughtCase{
+		noAnswer: true, empty: true, missingReplay: true,
+		generation: `data: {"response":{"candidates":[{"content":{"parts":[]}}],"usageMetadata":{"promptTokenCount":8}}}`,
+		wantCode:   "thought_continuation_error", wantStatus: http.StatusBadGateway,
+	})
+}
+
 func TestGatewayChatCompletionsAntigravityNoUsableAnswerKeepsBillingAndSlots(t *testing.T) {
 	runGatewayThoughtPartialCase(t, gatewayThoughtCase{noAnswer: true})
 }
@@ -107,6 +127,8 @@ type gatewayThoughtCase struct {
 	noAnswer         bool
 	empty            bool
 	zeroOutput       bool
+	missingReplay    bool
+	geminiGroup      bool
 	messages         bool
 	expectFailure    bool
 	generation       string
@@ -128,7 +150,13 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	group := &service.Group{
 		ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive,
 	}
+	if tc.geminiGroup {
+		group.Platform = service.PlatformGemini
+	}
 	account := handlerThoughtAccount()
+	if tc.geminiGroup {
+		account.Extra["mixed_scheduling"] = true
+	}
 	if tc.zeroOutput {
 		account.Extra[service.AntigravityContinueThoughtOnlyExtraKey] = false
 	}
@@ -170,7 +198,7 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 		service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil),
 		nil,
 		upstream,
-		service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20}}),
+		service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20, AntigravityRetryMissingTerminal: tc.missingReplay}}),
 		nil,
 	)
 
@@ -253,6 +281,9 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	if noAnswer {
 		wantStatus = http.StatusBadGateway
 		wantCalls = 1
+		if tc.missingReplay {
+			wantCalls = 2
+		}
 	}
 	if tc.wantStatus != 0 {
 		wantStatus = tc.wantStatus
@@ -268,7 +299,10 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 	} else {
 		require.NotContains(t, wire, "reasoning_content", "do not invent thinking in a truly empty result")
 	}
-	if tc.messages {
+	if tc.geminiGroup {
+		require.Equal(t, "FINISH_REASON_UNSPECIFIED", gjson.Get(wire, "candidates.0.finishReason").String(), "Gemini group must retain a non-success terminal")
+		require.NotContains(t, wire, `"finishReason":"STOP"`)
+	} else if tc.messages {
 		require.Contains(t, wire, `"stop_reason":null`, "非流式 Messages 终态必须保持非成功")
 		require.NotContains(t, wire, `"stop_reason":"end_turn"`)
 	} else {
@@ -284,26 +318,38 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 				code = "antigravity_empty_response"
 			}
 		}
-		require.Contains(t, wire, `"code":"`+code+`"`)
-		if tc.messages {
-			require.True(t, json.Valid(recorder.Body.Bytes()), "Messages error response must be one valid JSON document")
-			require.Equal(t, "error", gjson.Get(wire, "type").String())
-			require.Equal(t, int64(tc.wantInput), gjson.Get(wire, "usage.input_tokens").Int())
-			require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.output_tokens").Int())
-			require.Equal(t, int64(tc.wantCache), gjson.Get(wire, "usage.cache_read_input_tokens").Int())
+		if tc.geminiGroup {
+			require.True(t, json.Valid(recorder.Body.Bytes()), "Gemini error response must be one valid JSON document")
+			require.Equal(t, code, gjson.Get(wire, "error.details.0.reason").String())
+			require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error":`)), "one protocol error, no generic duplicate")
+			require.Equal(t, int64(http.StatusBadGateway), gjson.Get(wire, "error.code").Int())
+			require.Equal(t, "UNAVAILABLE", gjson.Get(wire, "error.status").String())
+			require.Equal(t, int64(tc.wantInput+tc.wantCache), gjson.Get(wire, "usageMetadata.promptTokenCount").Int())
+			require.Equal(t, int64(tc.wantCache), gjson.Get(wire, "usageMetadata.cachedContentTokenCount").Int())
+			require.Equal(t, int64(wantOutput), gjson.Get(wire, "usageMetadata.candidatesTokenCount").Int())
 		} else {
-			require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error"`)), "one protocol error, no generic duplicate")
-			require.Contains(t, wire, `"prompt_tokens":8`)
-			require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.completion_tokens").Int())
+			require.Contains(t, wire, `"code":"`+code+`"`)
+			if tc.messages {
+				require.True(t, json.Valid(recorder.Body.Bytes()), "Messages error response must be one valid JSON document")
+				require.Equal(t, "error", gjson.Get(wire, "type").String())
+				require.Equal(t, int64(tc.wantInput), gjson.Get(wire, "usage.input_tokens").Int())
+				require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.output_tokens").Int())
+				require.Equal(t, int64(tc.wantCache), gjson.Get(wire, "usage.cache_read_input_tokens").Int())
+			} else {
+				require.Equal(t, 1, bytes.Count(recorder.Body.Bytes(), []byte(`"error"`)), "one protocol error, no generic duplicate")
+				require.Contains(t, wire, `"prompt_tokens":8`)
+				require.Equal(t, int64(wantOutput), gjson.Get(wire, "usage.completion_tokens").Int())
+			}
 		}
 	} else {
 		require.NotContains(t, wire, "answer")
 		require.NotContains(t, wire, `"error"`, "Task24 终态错误已被视为已告知，不再补写错误响应")
 	}
 
-	// 请求/slot：第一代 + 一次追加生成，用户与账号槽位各获取一次、各释放一次（无泄漏、无第二次
+	// 请求/slot：首代 + 至多一次 replay，用户与账号槽位各获取一次、各释放一次（无泄漏、无第二次
 	// 账号请求）。若错误分支被当成可 failover 错误，这里会出现第二轮槽位获取与第三次上游请求。
-	require.Equal(t, wantCalls, upstream.calls, "no gateway retry/failover; B off makes no appended request")
+	require.LessOrEqual(t, upstream.calls, 2, "at most one replay beyond the initial upstream request")
+	require.Equal(t, wantCalls, upstream.calls, "replay/failure path must not trigger handler retry or account failover")
 	require.Equal(t, int64(1), concurrencyCache.userAcquires.Load(), "用户槽位只获取一次")
 	require.Equal(t, int64(1), concurrencyCache.userReleases.Load(), "用户槽位必须释放一次")
 	require.Equal(t, int64(1), concurrencyCache.accountAcquires.Load(), "账号槽位只获取一次")

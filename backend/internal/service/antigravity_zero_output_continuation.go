@@ -19,7 +19,7 @@ func (g *antigravityThoughtGeneration) zeroOutputSuccessful() bool {
 }
 
 func (c *antigravityThoughtContinuation) zeroOutputContinuationUsed() bool {
-	return c != nil && c.extraUsed && c.finishedGeneration.zeroOutputSuccessful()
+	return c != nil && c.extraUsed && !c.missingTerminalReplayed && c.finishedGeneration.zeroOutputSuccessful()
 }
 
 // Thinking flags and signatures alone are protocol carriers, not actual output.

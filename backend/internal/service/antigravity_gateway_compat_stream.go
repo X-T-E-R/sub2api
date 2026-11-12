@@ -446,7 +446,17 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 	deadlineTimer := time.NewTimer(deadlineDelay)
 	defer deadlineTimer.Stop()
+	finalizeContinuationTimeout := func() (*antigravityStreamResult, error) {
+		cont := session.continuation
+		cont.recordFailure(c, "compat_stream_timeout", errors.New("stream data interval timeout"))
+		result, err := session.finish()
+		writeAntigravityCompatStreamError(c, adapter, writer, "thought_continuation_error")
+		return result, err
+	}
 	preContentTimeout := func() (*antigravityStreamResult, error) {
+		if session.continuation != nil && session.continuation.hasExtraGeneration() {
+			return finalizeContinuationTimeout()
+		}
 		if session.preContentKeepaliveSent {
 			writeAntigravityCompatStreamError(c, adapter, writer, "stream_timeout")
 			return session.collectResult(false), fmt.Errorf("pre-content stream timeout")
@@ -489,6 +499,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 						return finishResult, finishErr
 					}
 					if nextResp != nil {
+						if cont.missingTerminalReplayUsed() {
+							session.processor.DiscardEmptyGenerationCarriers()
+						}
 						session.processor.AddUsageBaseline(toAntigravityUsage(finishedUsage))
 						session.processor.ResetGenerationUsage()
 						extraResp = nextResp
@@ -538,6 +551,9 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				return preContentTimeout()
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (%s)", prefix)
+			if session.continuation != nil && session.continuation.hasExtraGeneration() {
+				return finalizeContinuationTimeout()
+			}
 			writeAntigravityCompatStreamError(c, adapter, writer, "stream_timeout")
 			return session.collectResult(false), fmt.Errorf("stream data interval timeout")
 

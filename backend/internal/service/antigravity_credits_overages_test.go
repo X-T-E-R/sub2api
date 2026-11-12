@@ -266,6 +266,57 @@ func TestAntigravityRetryLoop_ModelRateLimited_InjectsCredits(t *testing.T) {
 	require.NotNil(t, result)
 	require.Len(t, upstream.requestBodies, 1)
 	require.Contains(t, string(upstream.requestBodies[0]), "enabledCreditTypes")
+	require.Equal(t, upstream.requestBodies[0], result.body, "result must retain the exact precheck-injected request bytes")
+}
+
+func TestAntigravityRetryLoop_QuotaCreditsReturnsExactAcceptedBody(t *testing.T) {
+	oldBaseURLs := append([]string(nil), antigravity.BaseURLs...)
+	oldAvailability := antigravity.DefaultURLAvailability
+	defer func() {
+		antigravity.BaseURLs = oldBaseURLs
+		antigravity.DefaultURLAvailability = oldAvailability
+	}()
+
+	antigravity.BaseURLs = []string{"https://ag-1.test"}
+	antigravity.DefaultURLAvailability = antigravity.NewURLAvailability(time.Minute)
+
+	quotaBody := `{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`
+	upstream := &queuedHTTPUpstreamStub{
+		responses: []*http.Response{
+			{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(quotaBody))},
+			{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))},
+		},
+	}
+	account := &Account{
+		ID:       106,
+		Name:     "acc-106",
+		Type:     AccountTypeOAuth,
+		Platform: PlatformAntigravity,
+		Extra:    map[string]any{"allow_overages": true},
+	}
+	requestBody := []byte(`{"model":"claude-sonnet-4-5","request":{}}`)
+
+	result, err := (&AntigravityGatewayService{}).antigravityRetryLoop(antigravityRetryLoopParams{
+		ctx:            context.Background(),
+		prefix:         "[test]",
+		account:        account,
+		accessToken:    "token",
+		action:         "generateContent",
+		body:           requestBody,
+		httpUpstream:   upstream,
+		requestedModel: "claude-sonnet-4-5",
+		handleError: func(ctx context.Context, prefix string, account *Account, statusCode int, headers http.Header, body []byte, requestedModel string, groupID int64, sessionHash string, isStickySession bool) *handleModelRateLimitResult {
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, result.resp.StatusCode)
+	require.Len(t, upstream.requestBodies, 2)
+	require.NotEqual(t, upstream.requestBodies[0], upstream.requestBodies[1], "the quota retry must dispatch the credits-injected envelope")
+	require.Contains(t, string(upstream.requestBodies[1]), "enabledCreditTypes")
+	require.Equal(t, upstream.requestBodies[1], result.body, "result must retain the exact accepted quota-retry bytes")
 }
 
 func TestAntigravityRetryLoop_CreditsExhausted_DoesNotInject(t *testing.T) {

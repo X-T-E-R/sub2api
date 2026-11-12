@@ -189,6 +189,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, s.writeGoogleError(c, http.StatusBadGateway, "Upstream request failed after retries")
 	}
 	resp := result.resp
+	finalBody = result.body
 	defer func() {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -286,7 +287,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 					retryResp := retryResult.resp
 					if retryResp.StatusCode < 400 {
 						resp = retryResp
-						finalBody = retryWrappedBody
+						finalBody = retryResult.body
 					} else {
 						retryRespBody := s.readUpstreamErrorBody(retryResp)
 						_ = retryResp.Body.Close()

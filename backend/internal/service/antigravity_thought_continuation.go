@@ -191,6 +191,7 @@ type antigravityThoughtGeneration struct {
 	hasVisibleText       bool
 	hasToolCall          bool
 	hasGrounding         bool
+	hasGroundingCarrier  bool // Any substantive raw metadata excludes verbatim replay, even if not rendered.
 	hasRenderedGrounding bool
 	nativeGemini         bool
 	hasRefusal           bool
@@ -226,6 +227,7 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 		return
 	}
 	parsed := gjson.ParseBytes(payload)
+	g.hasUpstreamError = g.hasUpstreamError || parsed.Get("error").Exists()
 	if inner := parsed.Get("response"); inner.Exists() && inner.IsObject() {
 		parsed = inner
 	}
@@ -251,7 +253,10 @@ func (g *antigravityThoughtGeneration) observePayload(payload []byte) {
 		}
 	}
 	if reason := candidate.Get("finishReason"); reason.Type == gjson.String && reason.String() != "" {
-		g.finishReason = reason.String()
+		// An unspecified trailing frame cannot erase an authoritative terminal.
+		if reason.String() != "FINISH_REASON_UNSPECIFIED" || g.finishReason == "" {
+			g.finishReason = reason.String()
+		}
 	}
 	for _, part := range candidate.Get("content.parts").Array() {
 		g.observePart(part)
@@ -310,6 +315,7 @@ func (g *antigravityThoughtGeneration) observeGrounding(grounding gjson.Result) 
 	if !grounding.IsObject() {
 		return
 	}
+	g.hasGroundingCarrier = g.hasGroundingCarrier || antigravityPartHasContentCarrier(grounding)
 	var typed antigravity.GeminiGroundingMetadata
 	if json.Unmarshal([]byte(grounding.Raw), &typed) == nil && antigravity.HasRenderableGrounding(&typed) {
 		g.hasRenderedGrounding = true
@@ -393,6 +399,10 @@ type antigravityThoughtContinuation struct {
 	prefix   string
 	delivery antigravityDeliverySummary
 
+	// Gateway config and effective A are pinned with the policy for this request.
+	retryMissingTerminal    bool
+	missingTerminalReplayed bool
+
 	proxyURL    string
 	accessToken string
 	action      string
@@ -462,9 +472,11 @@ func (s *AntigravityGatewayService) newAntigravityThoughtContinuation(
 	}
 	policy := ResolveAntigravityThoughtPolicy(ctx, account)
 	return &antigravityThoughtContinuation{
-		service:        s,
-		account:        account,
-		policy:         policy,
+		service: s,
+		account: account,
+		policy:  policy,
+		retryMissingTerminal: policy.SuppressThoughtOnlyStop && s.settingService != nil &&
+			s.settingService.cfg != nil && s.settingService.cfg.Gateway.AntigravityRetryMissingTerminal,
 		requestedModel: requestedModel,
 		prefix:         prefix,
 		proxyURL:       proxyURL,
@@ -523,18 +535,9 @@ func (c *antigravityThoughtContinuation) observeLine(line string) {
 		return
 	}
 	c.generation.observeLine(line)
-	if !c.extraUsed {
-		return
+	if c.extraUsed && c.generation.sawPayload {
+		c.extraPayload = true
 	}
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "data:") {
-		return
-	}
-	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-	if payload == "" || payload == "[DONE]" {
-		return
-	}
-	c.extraPayload = true
 }
 
 // observePayload feeds one already unwrapped upstream response object.
@@ -543,7 +546,7 @@ func (c *antigravityThoughtContinuation) observePayload(payload []byte) {
 		return
 	}
 	c.generation.observePayload(payload)
-	if c.extraUsed && strings.TrimSpace(string(payload)) != "" {
+	if c.extraUsed && c.generation.sawPayload {
 		c.extraPayload = true
 	}
 }
@@ -595,7 +598,7 @@ func (c *antigravityThoughtContinuation) canContinue() bool {
 	if c == nil || c.extraUsed || c.generation == nil {
 		return false
 	}
-	return (c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful()) ||
+	return c.canReplayMissingTerminal() || (c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful()) ||
 		(c.policy.ContinueThoughtOnly && c.generation.thoughtOnlySuccessful())
 }
 
@@ -608,15 +611,10 @@ func (c *antigravityThoughtContinuation) cumulativeUsage(last ClaudeUsage) Claud
 	return addClaudeUsage(c.baseUsage, last)
 }
 
-// continueOnce issues the one allowed appended generation and returns its response.
-//
-// The appended request reuses the exact original upstream request envelope (same project,
-// requestId, model, session, system instruction, tools, generation config and headers) and
-// adds one user Continue. instruction for zero output (coalescing a final user
-// turn), or appends B's received thinking model tail. It is sent through the normal
-// HTTPUpstream with the same account,
-// proxy and concurrency slot; the retry
-// loop, scheduler, sticky identity and capture range are deliberately not re-entered.
+// continueOnce uses the shared one-extra-generation budget. Missing-terminal
+// recovery resends the prepared bytes verbatim; otherwise C adds user Continue.
+// or B appends the received thinking tail. All three reuse the account, proxy,
+// headers, session and concurrency slot without re-entering retry or scheduling.
 func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previous *http.Response, streaming ...*gin.Context) (*http.Response, ClaudeUsage, error) {
 	var stream *gin.Context
 	if len(streaming) > 0 {
@@ -633,7 +631,11 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	}
 	var body []byte
 	var err error
-	if c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful() {
+	replayMissingTerminal := c.canReplayMissingTerminal()
+	if replayMissingTerminal {
+		// No model tail or invented Continue.: repeat the prepared bytes exactly.
+		body = c.body
+	} else if c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful() {
 		body, err = appendAntigravityUserContinue(c.body)
 	} else {
 		body, err = appendAntigravityThinkingTail(c.body, c.generation.replayableTail())
@@ -648,6 +650,7 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	c.baseUsage = addClaudeUsage(c.baseUsage, finished)
 	c.mergeBaseRawUsage(c.generation.rawUsageMetadata)
 	c.extraUsed = true
+	c.missingTerminalReplayed = replayMissingTerminal
 	c.finishedGeneration = c.generation
 	c.generation = newAntigravityThoughtGeneration()
 	c.generation.nativeGemini = c.delivery.Protocol == "gemini"

@@ -120,6 +120,15 @@ func (p *StreamingProcessor) ResetGenerationUsage() {
 	p.terminalFailureSent = false
 }
 
+// DiscardEmptyGenerationCarriers abandons signatures from a zero-output replay.
+// Keep the already-open empty thinking block and message_start: the next generation
+// can fill it or close it normally, without attaching a dead generation's signature.
+// The caller has established that this generation produced no substantive content.
+func (p *StreamingProcessor) DiscardEmptyGenerationCarriers() {
+	p.pendingSignature = ""
+	p.trailingSignature = ""
+}
+
 // CurrentUsage reports the usage accumulated for the generation in flight plus any
 // baseline, without emitting anything.
 func (p *StreamingProcessor) CurrentUsage() ClaudeUsage {
@@ -229,7 +238,7 @@ func (p *StreamingProcessor) ProcessLine(line string) []byte {
 	if finishReason == "MALFORMED_FUNCTION_CALL" {
 		log.Printf("[Antigravity] MALFORMED_FUNCTION_CALL detected in stream for model %s", p.originalModel)
 	}
-	if finishReason != "" {
+	if finishReason != "" && finishReason != "FINISH_REASON_UNSPECIFIED" {
 		// Gemini can send usage-only frames after finishReason. Keep streaming
 		// content, but emit the Anthropic terminal only when Finish drains EOF,
 		// otherwise clients stop before receiving the final cache accounting.

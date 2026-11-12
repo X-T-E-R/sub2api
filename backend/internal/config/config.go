@@ -1059,6 +1059,9 @@ type GatewayConfig struct {
 	// Opt in to SSE before upstream headers for admitted streaming HTTP requests.
 	// After the first heartbeat, final failures use the inbound protocol's SSE error.
 	StreamPreheaderKeepaliveEnabled bool `mapstructure:"stream_preheader_keepalive_enabled"`
+	// With effective suppress_thought_only_stop, replay a clean zero-output missing
+	// terminal once, verbatim on the same account. Loaded default true; false disables.
+	AntigravityRetryMissingTerminal bool `mapstructure:"antigravity_retry_missing_terminal"`
 	// ImageStreamDataIntervalTimeout: 图片流数据间隔超时（秒），0表示禁用
 	ImageStreamDataIntervalTimeout int `mapstructure:"image_stream_data_interval_timeout"`
 	// ImageStreamKeepaliveInterval: 图片流式 keepalive 间隔（秒），0表示禁用
@@ -2520,6 +2523,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.stream_preheader_keepalive_enabled", false)
+	viper.SetDefault("gateway.antigravity_retry_missing_terminal", true)
 	viper.SetDefault("gateway.image_stream_data_interval_timeout", 900)
 	viper.SetDefault("gateway.image_stream_keepalive_interval", 10)
 	viper.SetDefault("gateway.image_nonstream_keepalive_interval", 0)

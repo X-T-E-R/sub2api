@@ -166,6 +166,7 @@ func shouldMarkCreditsExhausted(resp *http.Response, respBody []byte, reqErr err
 type creditsOveragesRetryResult struct {
 	handled bool
 	resp    *http.Response
+	body    []byte
 	err     error
 }
 
@@ -203,7 +204,7 @@ func (s *AntigravityGatewayService) attemptCreditsOveragesRetry(
 		s.clearCreditsExhausted(p.ctx, p.account)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d credit_overages_success model=%s account=%d",
 			p.prefix, creditsResp.StatusCode, modelKey, p.account.ID)
-		return &creditsOveragesRetryResult{handled: true, resp: creditsResp}
+		return &creditsOveragesRetryResult{handled: true, resp: creditsResp, body: creditsBody}
 	}
 
 	s.handleCreditsRetryFailure(p.ctx, p.prefix, modelKey, p.account, creditsResp, err)

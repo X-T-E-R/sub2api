@@ -45,6 +45,8 @@ type antigravityRetryLoopParams struct {
 // antigravityRetryLoopResult 重试循环的结果
 type antigravityRetryLoopResult struct {
 	resp *http.Response
+	// Exact bytes of the accepted attempt, including any credits injection.
+	body []byte
 }
 
 // resolveAntigravityForwardBaseURL 解析转发用 base URL。
@@ -78,6 +80,7 @@ const (
 type smartRetryResult struct {
 	action      smartRetryAction
 	resp        *http.Response
+	body        []byte
 	err         error
 	switchError *AntigravityAccountSwitchError // 模型限流时返回账号切换信号
 }
@@ -113,6 +116,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 			return &smartRetryResult{
 				action: smartRetryActionBreakWithResp,
 				resp:   result.resp,
+				body:   result.body,
 			}
 		}
 	}
@@ -626,6 +630,9 @@ urlFallbackLoop:
 						if smartResult.switchError != nil {
 							return nil, smartResult.switchError
 						}
+						if smartResult.body != nil {
+							p.body = smartResult.body
+						}
 						resp = smartResult.resp
 						break urlFallbackLoop
 					}
@@ -722,7 +729,7 @@ urlFallbackLoop:
 		s.resetInternal500Counter(p.ctx, p.prefix, p.account.ID)
 	}
 
-	return &antigravityRetryLoopResult{resp: resp}, nil
+	return &antigravityRetryLoopResult{resp: resp, body: p.body}, nil
 }
 
 // shouldRetryAntigravityError 判断是否应该重试

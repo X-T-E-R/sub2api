@@ -24,6 +24,9 @@ import (
 //
 // Only A/B have Account.Extra overrides: missing/null inherits; explicit false
 // overrides global true. All switches are pinned together for each request.
+// gateway.antigravity_retry_missing_terminal (loaded default true) can recover A's
+// clean zero-output missing-terminal case with one verbatim same-account replay.
+// It shares the extra-generation budget and leaves this persisted JSON unchanged.
 
 // SettingKeyAntigravityThoughtPolicy stores the global switches as one JSON object.
 const SettingKeyAntigravityThoughtPolicy = "antigravity_thought_policy"

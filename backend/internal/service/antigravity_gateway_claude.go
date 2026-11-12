@@ -169,6 +169,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries")
 	}
 	resp := result.resp
+	finalBody = result.body
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
@@ -261,7 +262,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					_ = resp.Body.Close()
 					resp = retryResp
 					respBody = nil
-					finalBody = retryGeminiBody
+					finalBody = retryResult.body
 					break
 				}
 
@@ -376,7 +377,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 								_ = resp.Body.Close()
 								resp = retryResp
 								respBody = nil
-								finalBody = retryGeminiBody
+								finalBody = retryResult.body
 							} else {
 								retryBody := s.readUpstreamErrorBody(retryResp)
 								_ = retryResp.Body.Close()

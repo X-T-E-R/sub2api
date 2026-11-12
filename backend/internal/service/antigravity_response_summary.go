@@ -223,6 +223,7 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 		"downstream_thinking_events": c.delivery.ThinkingEvents, "downstream_text_events": c.delivery.TextEvents, "downstream_tool_events": c.delivery.ToolEvents,
 		"effective_a": c.policy.SuppressThoughtOnlyStop, "effective_b": c.policy.ContinueThoughtOnly,
 		"effective_continue_zero_output": c.policy.ContinueZeroOutput, "zero_output_continuation_used": c.zeroOutputContinuationUsed(),
+		"effective_retry_missing_terminal": c.retryMissingTerminal, "missing_terminal_replay_used": c.missingTerminalReplayUsed(),
 		"a_decision": decision, "a_reason": reason, "outcome": reason, "terminal_authority": authority,
 	}
 	if c.extraUsed {

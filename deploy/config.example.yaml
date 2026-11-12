@@ -498,6 +498,12 @@ gateway:
   # Non-streaming, Images, compact's existing policy and native WebSockets are unchanged.
   # Environment: GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED
   stream_preheader_keepalive_enabled: false
+  # With effective suppress_thought_only_stop, retry clean EOF with zero substantive
+  # output and no finish reason (or FINISH_REASON_UNSPECIFIED) once, on the same
+  # account/slot with the exact prepared request bytes. STOP is never replayed here;
+  # continue_zero_output remains a separate policy that appends a user Continue.
+  # Environment: GATEWAY_ANTIGRAVITY_RETRY_MISSING_TERMINAL=false disables this recovery.
+  antigravity_retry_missing_terminal: true
   # Image stream data interval timeout (seconds), 0=disable; independent from ordinary text streams
   # 图片流数据间隔超时（秒），0=禁用；独立于普通文本流式
   image_stream_data_interval_timeout: 900

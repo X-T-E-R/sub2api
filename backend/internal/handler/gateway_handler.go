@@ -543,8 +543,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					forwardFailedFields = append(forwardFailedFields, zap.Int64p("proxy_id", account.ProxyID))
 				}
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
-				terminalReported := service.StreamPreheaderFinalized(c) ||
-					(service.StreamPreheaderConfigured(c) && service.IsAntigravityPartialResponseError(err))
+				terminalReported := service.StreamPreheaderFinalized(c) || service.IsAntigravityPartialResponseError(err)
 				if !terminalReported || result == nil || (result.Usage == (service.ClaudeUsage{}) && result.ImageCount == 0) {
 					return
 				}

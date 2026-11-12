@@ -2620,6 +2620,19 @@ func TestLoad_DefaultGatewayUsageRecordConfig(t *testing.T) {
 	}
 }
 
+func TestLoadAntigravityMissingTerminalReplayDefaultAndOptOut(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_ANTIGRAVITY_RETRY_MISSING_TERMINAL", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.Gateway.AntigravityRetryMissingTerminal)
+
+	t.Setenv("GATEWAY_ANTIGRAVITY_RETRY_MISSING_TERMINAL", "false")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.False(t, cfg.Gateway.AntigravityRetryMissingTerminal)
+}
+
 func TestLoadStreamPreheaderKeepaliveExplicitOptIn(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_STREAM_PREHEADER_KEEPALIVE_ENABLED", "")
