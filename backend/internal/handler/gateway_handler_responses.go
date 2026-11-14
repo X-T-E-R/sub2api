@@ -253,6 +253,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
 
 		// 5. Forward request
+		forwardCtx := requestCtx
+		if fs.SwitchCount > 0 {
+			forwardCtx = service.WithAccountSwitchCount(forwardCtx, fs.SwitchCount, h.metadataBridgeEnabled())
+			forwardCtx = service.WithAntigravityAccountSwitched(forwardCtx, true)
+		}
 		writerSizeBeforeForward := c.Writer.Size()
 		forwardBody := body
 		if channelMapping.Mapped {
@@ -269,9 +274,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				return
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
-			result, err = h.antigravityGatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
+			result, err = h.antigravityGatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		} else {
-			result, err = h.gatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
+			result, err = h.gatewayService.ForwardAsResponses(forwardCtx, c, account, forwardBody, parsedReq)
 		}
 
 		if accountReleaseFunc != nil {
@@ -294,7 +299,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
-			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+			h.submitUsageRecordTask(forwardCtx, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					QuotaPlatform:      quotaPlatform,

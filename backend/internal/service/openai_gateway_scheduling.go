@@ -1774,7 +1774,7 @@ func (s *OpenAIGatewayService) schedulingConfig() config.GatewaySchedulingConfig
 		return s.cfg.Gateway.Scheduling
 	}
 	return config.GatewaySchedulingConfig{
-		StickySessionMaxWaiting:  3,
+		StickySessionMaxWaiting:  8,
 		StickySessionWaitTimeout: 45 * time.Second,
 		FallbackWaitTimeout:      30 * time.Second,
 		FallbackMaxWaiting:       100,

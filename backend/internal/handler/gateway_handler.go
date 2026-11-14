@@ -582,7 +582,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			forceCacheBilling := fs.ForceCacheBilling
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
-			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+			h.submitUsageRecordTask(requestCtx, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					QuotaPlatform:      quotaPlatform,
@@ -880,6 +880,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				geminiCapture.MarkAntigravitySelected(account.ID, account.Type)
 			}
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+				if (sessionBoundAccountID > 0 && sessionBoundAccountID != account.ID) || fs.SwitchCount > 0 {
+					requestCtx = service.WithAntigravityAccountSwitched(requestCtx, true)
+				}
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
@@ -925,7 +928,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				forceCacheBilling := fs.ForceCacheBilling
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), currentAPIKey)
 				sessionID := service.ExtractClientSessionID(c)
-				h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+				h.submitUsageRecordTask(requestCtx, func(ctx context.Context) {
 					if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 						Result:             result,
 						QuotaPlatform:      quotaPlatform,
@@ -1075,10 +1078,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 绑定粘性会话（成功转发后绑定/刷新）
 			// - 无现有绑定（首次请求）：创建绑定
 			// - 选中账号与粘性账号一致：刷新 TTL
-			// - 粘性账号因负载/RPM 被跳过、选中了其他账号：不覆盖原绑定，
-			//   下次请求粘性账号恢复后仍可命中
-			if sessionKey != "" && (sessionBoundAccountID == 0 || sessionBoundAccountID == account.ID) {
-				if err := h.gatewayService.BindStickySession(c.Request.Context(), currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
+			// - 请求内 failover 成功且无利润门：绑定已经预热的获胜账号
+			// - 仅因负载/RPM 跳过原账号：保留原绑定，等待它恢复
+			if sessionKey != "" && (sessionBoundAccountID == 0 || sessionBoundAccountID == account.ID || (fs.SwitchCount > 0 && !selection.ProfitGateActive())) {
+				stickyCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+				defer cancel()
+				if err := h.gatewayService.BindStickySession(stickyCtx, currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
 					reqLog.Warn("gateway.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				}
 			}

@@ -1267,6 +1267,9 @@ func (s *GatewayService) buildRecordUsageLog(
 		SubscriptionID:           optionalSubscriptionID(subscription),
 		CreatedAt:                time.Now(),
 	}
+	if switchCount, ok := AccountSwitchCountFromContext(ctx); ok {
+		usageLog.AccountSwitchCount = intPtr(switchCount)
+	}
 	if result.ImageCount > 0 && (cost == nil || cost.BillingMode != string(BillingModeToken)) {
 		usageLog.RateMultiplier = imageMultiplier
 	}

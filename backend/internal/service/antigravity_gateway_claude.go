@@ -17,6 +17,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type antigravityAccountSwitchedKey struct{}
+
+// WithAntigravityAccountSwitched marks history that may carry another account's signatures.
+func WithAntigravityAccountSwitched(ctx context.Context, switched bool) context.Context {
+	return context.WithValue(ctx, antigravityAccountSwitchedKey{}, switched)
+}
+
 // Forward 转发 Claude 协议请求（Claude → Gemini 转换）
 //
 // 限流处理流程:
@@ -93,7 +100,23 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	transformOpts := s.getClaudeMessagesTransformOptions(ctx, account)
 	transformOpts.EnableIdentityPatch = true // 强制启用，Antigravity 上游必需
 	transformOpts.EffortResolvedByMapping = antigravityEffortDecisionForRequest(ctx, account, originalModel).effortApplied
-	if strings.HasPrefix(mappedModel, "gemini-") {
+	// Built-in search can override the mapped model inside the transformer.
+	// Match that effective target when deciding whether dummy signatures are supported.
+	targetModel := mappedModel
+	if antigravity.HasWebSearchTool(claudeReq.Tools) {
+		targetModel = antigravity.EffectiveWebSearchModel(transformOpts.WebSearchModel)
+	}
+	isGeminiTarget := strings.HasPrefix(targetModel, "gemini-")
+	if isGeminiTarget {
+		if switched, _ := ctx.Value(antigravityAccountSwitchedKey{}).(bool); switched {
+			stripped, err := stripThoughtSignaturesFromClaudeRequest(&claudeReq)
+			if err != nil {
+				return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
+			}
+			if stripped {
+				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: proactively stripped cross-account thought signatures model=%s", account.ID, targetModel)
+			}
+		}
 		transformOpts.SessionID = antigravityWireSessionID(c, account, &claudeReq)
 	}
 
@@ -179,9 +202,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
 
-		// 优先检测 thinking block 的 signature 相关错误（400）并重试一次：
-		// Antigravity /v1internal 链路在部分场景会对 thought/thinking signature 做严格校验，
-		// 当历史消息携带的 signature 不合法时会直接 400；去除 thinking 后可继续完成请求。
+		// Gemini can replace foreign signatures without disabling thinking or tools.
+		// Only escalate to destructive degradation if signature-only recovery fails.
 		if resp.StatusCode == http.StatusBadRequest && isSignatureRelatedError(respBody) && s.settingService.IsSignatureRectifierEnabled(ctx) {
 			upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
@@ -198,17 +220,18 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 				Detail:             upstreamDetail,
 			})
 
-			// Conservative two-stage fallback:
-			// 1) Disable top-level thinking + thinking->text
-			// 2) Only if still signature-related 400: also downgrade tool_use/tool_result to text.
-
-			retryStages := []struct {
+			type signatureRetryStage struct {
 				name  string
 				strip func(*antigravity.ClaudeRequest) (bool, error)
-			}{
-				{name: "thinking-only", strip: stripThinkingFromClaudeRequest},
-				{name: "thinking+tools", strip: stripSignatureSensitiveBlocksFromClaudeRequest},
 			}
+			var retryStages []signatureRetryStage
+			if isGeminiTarget {
+				retryStages = append(retryStages, signatureRetryStage{name: "signatures-only", strip: stripThoughtSignaturesFromClaudeRequest})
+			}
+			retryStages = append(retryStages,
+				signatureRetryStage{name: "thinking-only", strip: stripThinkingFromClaudeRequest},
+				signatureRetryStage{name: "thinking+tools", strip: stripSignatureSensitiveBlocksFromClaudeRequest},
+			)
 
 			for _, stage := range retryStages {
 				retryClaudeReq := claudeReq
@@ -610,6 +633,57 @@ func getPassthroughOrDefault(upstreamMsg, defaultMsg string) string {
 
 func extractAntigravityErrorMessage(body []byte) string {
 	return extractUpstreamErrorMessage(body)
+}
+
+// stripThoughtSignaturesFromClaudeRequest preserves thinking mode and historical
+// content while allowing the Gemini transformer to supply dummy signatures.
+func stripThoughtSignaturesFromClaudeRequest(req *antigravity.ClaudeRequest) (bool, error) {
+	if req == nil {
+		return false, nil
+	}
+	changed := false
+	for i := range req.Messages {
+		var blocks []map[string]json.RawMessage
+		if err := json.Unmarshal(req.Messages[i].Content, &blocks); err != nil {
+			continue // String content has no signature carriers.
+		}
+		filtered := make([]map[string]json.RawMessage, 0, len(blocks))
+		modified := false
+		for _, block := range blocks {
+			var kind string
+			_ = json.Unmarshal(block["type"], &kind)
+			switch kind {
+			case "thinking", "tool_use", "text":
+				if _, signed := block["signature"]; signed {
+					delete(block, "signature")
+					modified = true
+					if kind == "thinking" {
+						var thinking string
+						_ = json.Unmarshal(block["thinking"], &thinking)
+						if strings.TrimSpace(thinking) == "" {
+							continue // Empty signature-only carrier, not historical thought text.
+						}
+					}
+				}
+			}
+			filtered = append(filtered, block)
+		}
+		if !modified {
+			continue
+		}
+		if len(filtered) == 0 {
+			// Keep a nonempty envelope without inventing visible text. This also
+			// preserves terminal thinking-tail classification and empty-tail rejection.
+			filtered = append(filtered, map[string]json.RawMessage{"type": json.RawMessage(`"thinking"`), "thinking": json.RawMessage(`""`)})
+		}
+		raw, err := json.Marshal(filtered)
+		if err != nil {
+			return changed, err
+		}
+		req.Messages[i].Content = raw
+		changed = true
+	}
+	return changed, nil
 }
 
 // stripThinkingFromClaudeRequest converts thinking blocks to text blocks in a Claude Messages request.

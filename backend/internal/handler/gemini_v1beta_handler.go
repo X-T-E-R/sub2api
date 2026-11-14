@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
@@ -546,7 +547,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 			userAgent := c.GetHeader("User-Agent")
 			clientIP := ip.GetClientIP(c)
-			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+			h.submitUsageRecordTask(requestCtx, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsageWithLongContext(ctx, &service.RecordUsageLongContextInput{
 					Result:                result,
 					QuotaPlatform:         quotaPlatform,
@@ -609,8 +610,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 
 		// 保存 Gemini 内容摘要会话（用于 Fallback 匹配）
 		if useDigestFallback && geminiDigestChain != "" && geminiPrefixHash != "" {
+			stickyCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+			defer cancel()
 			if err := h.gatewayService.SaveGeminiSession(
-				c.Request.Context(),
+				stickyCtx,
 				derefGroupID(apiKey.GroupID),
 				geminiPrefixHash,
 				geminiDigestChain,

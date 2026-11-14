@@ -257,6 +257,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 
 		// 5. Forward request
+		forwardCtx := c.Request.Context()
+		if fs.SwitchCount > 0 {
+			forwardCtx = service.WithAccountSwitchCount(forwardCtx, fs.SwitchCount, h.metadataBridgeEnabled())
+			forwardCtx = service.WithAntigravityAccountSwitched(forwardCtx, true)
+		}
 		writerSizeBeforeForward := c.Writer.Size()
 		forwardBody := body
 		if channelMapping.Mapped {
@@ -272,7 +277,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				}
 				return
 			}
-			result, err = h.geminiCompatService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
+			result, err = h.geminiCompatService.ForwardAsChatCompletions(forwardCtx, c, account, forwardBody)
 		} else if shouldUseAntigravityCompat(account) {
 			if h.antigravityGatewayService == nil {
 				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Antigravity compatibility service is not configured")
@@ -282,9 +287,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
-			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(forwardCtx, c, account, forwardBody, parsedReq)
 		} else {
-			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+			result, err = h.gatewayService.ForwardAsChatCompletions(forwardCtx, c, account, forwardBody, parsedReq)
 		}
 
 		if accountReleaseFunc != nil {
@@ -307,7 +312,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
-			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+			h.submitUsageRecordTask(forwardCtx, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 					Result:             result,
 					QuotaPlatform:      quotaPlatform,
