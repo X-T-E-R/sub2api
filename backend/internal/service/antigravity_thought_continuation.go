@@ -816,15 +816,32 @@ func antigravityPayloadHasSuccessfulFinishReason(payload []byte) bool {
 	return gjson.GetBytes(payload, "candidates.0.finishReason").String() == antigravitySuccessfulFinishReason
 }
 
-// antigravityStripSuccessfulFinishReason removes only the successful finish reason from an
-// upstream payload. Every other finish reason, promptFeedback, safety result and usage
-// value stays exactly as the upstream sent it.
-func antigravityStripSuccessfulFinishReason(payload []byte) ([]byte, bool) {
+// antigravityPayloadHasReplayableMalformedFinish reports whether this upstream
+// payload carries an explicit MALFORMED_FUNCTION_CALL terminal. Used by the
+// native Gemini streaming route to hold the terminal frame until clean EOF so a
+// zero-output malformed function call can replay once without leaking a dead
+// MALFORMED_FUNCTION_CALL frame before the replayed generation.
+func antigravityPayloadHasReplayableMalformedFinish(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	return gjson.GetBytes(payload, "candidates.0.finishReason").String() == "MALFORMED_FUNCTION_CALL"
+}
+
+// antigravityStripReplayableTerminalFinishReason removes a held STOP or
+// MALFORMED_FUNCTION_CALL finish reason when a generation is superseded by an
+// in-gateway continuation/replay or suppressed at finalization. When a replay
+// was NOT taken, suppressFinalTerminal still strips only STOP so explicit
+// provider terminals remain visible on native Gemini frames unless superseded.
+func antigravityStripReplayableTerminalFinishReason(payload []byte, stripMalformed bool) ([]byte, bool) {
 	if len(payload) == 0 {
 		return payload, false
 	}
 	reason := gjson.GetBytes(payload, "candidates.0.finishReason")
-	if reason.Type != gjson.String || reason.String() != antigravitySuccessfulFinishReason {
+	if reason.Type != gjson.String {
+		return payload, false
+	}
+	if reason.String() != antigravitySuccessfulFinishReason && (!stripMalformed || reason.String() != "MALFORMED_FUNCTION_CALL") {
 		return payload, false
 	}
 	updated, err := sjson.DeleteBytes(payload, "candidates.0.finishReason")

@@ -162,6 +162,15 @@ func TestAntigravityMissingTerminalReplayEligibilityAndGates(t *testing.T) {
 		g.observeLine(missingTerminalFixture(`[]`, reason))
 		require.False(t, g.missingTerminalZeroOutput(), reason)
 	}
+	gMalformedZero := newAntigravityThoughtGeneration()
+	gMalformedZero.observeLine(missingTerminalFixture(`[]`, "MALFORMED_FUNCTION_CALL"))
+	require.True(t, gMalformedZero.malformedFunctionZeroOutput())
+
+	for _, part := range []string{`{"text":"answer"}`, `{"thought":true,"text":"plan"}`, `{"thought":true,"text":" "}`, `{"functionCall":{"name":"lookup","args":{}}}`, `{"inlineData":{"data":"AA=="}}`, `{"fileData":{"fileUri":"gs://fixture"}}`, `{"thought":true,"thoughtSignature":"sig-dead"}`, `{"text":"","thoughtSignature":"sig-dead"}`} {
+		g := newAntigravityThoughtGeneration()
+		g.observeLine(missingTerminalFixture("["+part+"]", "MALFORMED_FUNCTION_CALL"))
+		require.False(t, g.malformedFunctionZeroOutput(), part)
+	}
 	for _, part := range []string{`{"text":"answer"}`, `{"thought":true,"text":"plan"}`, `{"thought":true,"text":" "}`, `{"functionCall":{"name":"lookup","args":{}}}`, `{"inlineData":{"data":"AA=="}}`, `{"fileData":{"fileUri":"gs://fixture"}}`} {
 		g := newAntigravityThoughtGeneration()
 		g.observeLine(missingTerminalFixture("["+part+"]", ""))
@@ -192,4 +201,46 @@ func TestAntigravityMissingTerminalReplayEligibilityAndGates(t *testing.T) {
 	cont.retryMissingTerminal = true
 	cont.generation.readFailed = true
 	require.False(t, cont.canContinue(), "read errors are never clean EOF")
+}
+
+func TestAntigravityZeroOutputMalformedFunctionReplayProtocols(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, protocol := range []string{"messages", "chat", "responses", "gemini"} {
+		for _, stream := range []bool{false, true} {
+			for _, recovered := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t/recovered=%t", protocol, stream, recovered), func(t *testing.T) {
+					first := missingTerminalFixture(`[]`, "MALFORMED_FUNCTION_CALL")
+					second := missingTerminalFixture(`[]`, "MALFORMED_FUNCTION_CALL")
+					if recovered {
+						second = antigravityThoughtGenerationTwoLine
+					}
+					upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityThoughtStreamResponse(first), antigravityThoughtStreamResponse(second)}}
+					svc := newMissingTerminalReplayService(t, upstream)
+					body := preheaderAGBody(protocol, stream)
+					c, rec := newAntigravityCompatContext("POST", "/fixture", body)
+					result, err := preheaderAGForward(svc, c, protocol, stream, body)
+					require.Equal(t, 2, upstream.callCount)
+					require.Equal(t, upstream.requestBodies[0], upstream.requestBodies[1])
+					require.NotNil(t, result)
+					wire := rec.Body.String()
+					cont := antigravityThoughtContinuationFromGin(c)
+					require.True(t, cont.missingTerminalReplayUsed())
+					if recovered {
+						require.NoError(t, err)
+						require.Contains(t, wire, "answer")
+						require.NotContains(t, wire, "MALFORMED_FUNCTION_CALL")
+						require.NotContains(t, wire, "antigravity_malformed_function_call")
+					} else {
+						var failure *AntigravityNoUsableAnswerError
+						require.ErrorAs(t, err, &failure)
+						require.Equal(t, "antigravity_malformed_function_call", failure.Code)
+						require.Contains(t, wire, "antigravity_malformed_function_call")
+						if protocol == "messages" || protocol == "chat" {
+							require.Contains(t, wire, `"retryable":true`)
+						}
+					}
+				})
+			}
+		}
+	}
 }

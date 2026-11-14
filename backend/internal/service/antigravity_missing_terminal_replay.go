@@ -8,6 +8,21 @@ func (g *antigravityThoughtGeneration) missingTerminalZeroOutput() bool {
 	return g != nil && (g.sawResponse || g.rawUsageMetadata != nil) && g.replayPrefixEligible()
 }
 
+// malformedFunctionZeroOutput covers an upstream MALFORMED_FUNCTION_CALL that
+// completed before emitting any thinking, visible text, tool call, grounding,
+// refusal, content carrier, or signature carrier. If a signature carrier was
+// already present in the terminal frame, ProcessLine has already closed and
+// flushed it onto the SSE wire when finishReason arrived, so only a truly empty
+// generation (len(g.tail) == 0) may replay verbatim inside the gateway.
+func (g *antigravityThoughtGeneration) malformedFunctionZeroOutput() bool {
+	return g != nil && (g.sawResponse || g.rawUsageMetadata != nil) &&
+		!g.readFailed && !g.hasUpstreamError &&
+		g.finishReason == "MALFORMED_FUNCTION_CALL" &&
+		len(g.tail) == 0 &&
+		!g.hasContentCarrier && !g.hasThinking && !g.hasVisibleText &&
+		!g.hasToolCall && !g.hasGrounding && !g.hasGroundingCarrier && !g.hasRefusal
+}
+
 func (g *antigravityThoughtGeneration) replayPrefixEligible() bool {
 	return !g.readFailed && !g.hasUpstreamError &&
 		(g.finishReason == "" || g.finishReason == "FINISH_REASON_UNSPECIFIED") &&
@@ -16,7 +31,8 @@ func (g *antigravityThoughtGeneration) replayPrefixEligible() bool {
 }
 
 func (c *antigravityThoughtContinuation) canReplayMissingTerminal() bool {
-	return c != nil && c.retryMissingTerminal && !c.extraUsed && c.generation.missingTerminalZeroOutput()
+	return c != nil && c.retryMissingTerminal && !c.extraUsed &&
+		(c.generation.missingTerminalZeroOutput() || c.generation.malformedFunctionZeroOutput())
 }
 
 func (c *antigravityThoughtContinuation) missingTerminalReplayUsed() bool {

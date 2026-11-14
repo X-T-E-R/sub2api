@@ -322,15 +322,16 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	}
 	var heldFrames []heldFrame
 	holdTerminal := false
-	flushHeld := func(suppressSuccessfulTerminal bool) {
+	flushHeld := func(suppressSuccessfulTerminal bool, stripMalformed ...bool) {
 		if len(heldFrames) == 0 {
 			holdTerminal = false
 			return
 		}
+		alsoStripMalformed := len(stripMalformed) > 0 && stripMalformed[0]
 		for _, held := range heldFrames {
 			frame := held.frame
 			if suppressSuccessfulTerminal && held.payload != "" {
-				if stripped, changed := antigravityStripSuccessfulFinishReason([]byte(held.payload)); changed {
+				if stripped, changed := antigravityStripReplayableTerminalFinishReason([]byte(held.payload), alsoStripMalformed); changed {
 					frame = "data: " + string(stripped) + "\n\n"
 				}
 			}
@@ -393,7 +394,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						// 追加生成失败：第一代的成功完成信号一律不发，改为协议错误；已收到
 						// 的内容与累计 usage 照常下发。
 						cont.recordFailure(c, "gemini_stream", continueErr)
-						flushHeld(true)
+						flushHeld(true, cont.missingTerminalReplayUsed())
 						if !errors.Is(continueErr, context.Canceled) && !errors.Is(continueErr, context.DeadlineExceeded) &&
 							!finishStreamPreheaderContinuationError(c, cw, continueErr) {
 							sendErrorEvent("thought_continuation_error")
@@ -401,8 +402,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						return result(cw.Disconnected()), cont.failureError()
 					}
 					if nextResp != nil {
-						// 整条响应只出现一次终态：第一代的成功完成信号让位给追加生成。
-						flushHeld(true)
+						// 整条响应只出现一次终态：第一代的完成信号（或被透明重放取代的零输出畸形终态）让位给追加生成。
+						flushHeld(true, cont.missingTerminalReplayUsed())
 						usage = &ClaudeUsage{} // The first generation is now in cont.baseUsage.
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
@@ -514,7 +515,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						flushHeld(false)
 					}
 					if !holdTerminal && cont.withholdSuccessfulTerminal() &&
-						antigravityPayloadHasSuccessfulFinishReason(inner) {
+						(antigravityPayloadHasSuccessfulFinishReason(inner) ||
+							(cont.canReplayMissingTerminal() && antigravityPayloadHasReplayableMalformedFinish(inner))) {
 						holdTerminal = true
 					}
 					if cont.hasExtraGeneration() {
