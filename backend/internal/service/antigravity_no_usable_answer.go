@@ -46,7 +46,9 @@ func (e *AntigravityNoUsableAnswerError) protocolError(protocol string) map[stri
 	if e.Code == "antigravity_safety" {
 		typ = "invalid_request_error"
 	}
-	retryable := e != nil && e.Code == "antigravity_malformed_function_call"
+	retryable := e != nil && (e.Code == "antigravity_malformed_function_call" ||
+		e.Code == "antigravity_missing_terminal" ||
+		e.Code == "antigravity_empty_response")
 	return map[string]any{"type": typ, "code": e.Code, "message": e.message(), "retryable": retryable}
 }
 func IsAntigravityNoUsableAnswerError(err error) bool {

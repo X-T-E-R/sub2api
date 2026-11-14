@@ -70,11 +70,14 @@ func TestAntigravityTerminalOutcomeForward(t *testing.T) {
 						}
 						if tc.name == "partial_malformed" {
 							require.Contains(t, wire, "partial answer", "content already produced must survive the failure")
-							if protocol == "messages" || protocol == "chat" {
-								require.Contains(t, wire, `"retryable":true`, "malformed_function_call must allow client discard-and-retry")
+						}
+						if protocol == "messages" || protocol == "chat" {
+							switch tc.code {
+							case "antigravity_malformed_function_call", "antigravity_missing_terminal", "antigravity_empty_response":
+								require.Contains(t, wire, `"retryable":true`)
+							default:
+								require.Contains(t, wire, `"retryable":false`)
 							}
-						} else if protocol == "messages" || protocol == "chat" {
-							require.Contains(t, wire, `"retryable":false`)
 						}
 						if !stream {
 							if tc.code == "antigravity_safety" {

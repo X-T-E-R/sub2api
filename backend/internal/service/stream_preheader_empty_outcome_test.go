@@ -88,7 +88,7 @@ func TestStreamPreheaderEmptyOutcomeKeepsAClassification(t *testing.T) {
 			require.Equal(t, "antigravity_missing_terminal", failure.Code)
 			require.Equal(t, 1, strings.Count(string(wire), "event: error\n"))
 			require.Contains(t, string(wire), `"code":"antigravity_missing_terminal"`)
-			require.Contains(t, string(wire), `"retryable":false`)
+			require.Contains(t, string(wire), `"retryable":true`)
 			require.NotContains(t, string(wire), streamPreheaderTerminalCode)
 			entries := logs.FilterMessage("antigravity.response_summary").All()
 			require.Len(t, entries, 1)
