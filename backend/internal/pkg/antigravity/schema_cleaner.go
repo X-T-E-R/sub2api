@@ -134,7 +134,25 @@ func CleanJSONSchema(schema map[string]any) map[string]any {
 	if !ok {
 		return nil
 	}
+	stripAdditionalProperties(result)
 	return result
+}
+
+// Keep additionalProperties through union/allOf normalization so a cleaned
+// free-form map remains open when an enclosing branch walks it again. Remove
+// this unsupported keyword only at the final wire-schema boundary.
+func stripAdditionalProperties(m map[string]any) {
+	delete(m, "additionalProperties")
+	if props, ok := m["properties"].(map[string]any); ok {
+		for _, value := range props {
+			if child, ok := value.(map[string]any); ok {
+				stripAdditionalProperties(child)
+			}
+		}
+	}
+	if items, ok := m["items"].(map[string]any); ok {
+		stripAdditionalProperties(items)
+	}
 }
 
 type schemaCleanContext struct {
@@ -196,7 +214,7 @@ func ownShape(x map[string]any) bool {
 	return false
 }
 
-// foldUnion 在节点具备自身形态（ownShape）时将 anyOf/oneOf 分支折叠进当前节点：
+// foldUnion 将 anyOf/oneOf 对象分支折叠进当前节点：
 // 保留节点自身属性，合并分支新增的 properties，仅当所有非 null 分支都要求某字段时才将其加入 required。
 func foldUnion(x map[string]any, resolve func(any) map[string]any) map[string]any {
 	out := make(map[string]any, len(x))
@@ -220,6 +238,7 @@ func foldUnion(x map[string]any, resolve func(any) map[string]any) map[string]an
 		}
 	}
 	var common []string
+	openObject := freeFormObject(x)
 	branches := 0
 	for _, k := range []string{"anyOf", "oneOf"} {
 		alts, _ := x[k].([]any)
@@ -232,9 +251,13 @@ func foldUnion(x map[string]any, resolve func(any) map[string]any) map[string]an
 				out["nullable"] = true
 				continue
 			}
+			if m["nullable"] == true {
+				out["nullable"] = true
+			}
 			if !object {
 				continue
 			}
+			openObject = openObject || freeFormObject(m)
 			bp, _ := m["properties"].(map[string]any)
 			for _, pk := range slices.Sorted(maps.Keys(bp)) {
 				if _, has := props[pk]; !has {
@@ -253,6 +276,8 @@ func foldUnion(x map[string]any, resolve func(any) map[string]any) map[string]an
 	if object {
 		if len(props) > 0 {
 			out["properties"] = props
+		} else if openObject {
+			out["additionalProperties"] = true
 		}
 		ownReq := requiredStringNames(x["required"])
 		if len(ownReq)+len(common) > 0 {
@@ -274,6 +299,57 @@ func foldUnion(x map[string]any, resolve func(any) map[string]any) map[string]an
 		}
 	}
 	return out
+}
+
+// objectUnion requires at least two object alternatives. Scalar unions and a
+// single nullable alternative keep the existing best-branch conversion.
+func objectUnion(branches []any) bool {
+	if len(branches) < 2 {
+		return false
+	}
+	for _, branch := range branches {
+		m := branch.(map[string]any)
+		if types, ok := m["type"].([]any); ok {
+			for _, typ := range types {
+				name, ok := typ.(string)
+				if !ok || (!strings.EqualFold(name, "object") && !strings.EqualFold(name, "null")) {
+					return false
+				}
+			}
+		} else if schemaTypeOf(m) != "object" {
+			return false
+		}
+	}
+	return true
+}
+
+func freeFormObject(m map[string]any) bool {
+	object := false
+	switch typ := m["type"].(type) {
+	case string:
+		object = strings.EqualFold(typ, "object")
+	case []any:
+		for _, value := range typ {
+			name, _ := value.(string)
+			if strings.EqualFold(name, "object") {
+				object = true
+			} else if !strings.EqualFold(name, "null") {
+				return false
+			}
+		}
+	}
+	props, _ := m["properties"].(map[string]any)
+	if !object || len(props) > 0 {
+		return false
+	}
+	switch additional := m["additionalProperties"].(type) {
+	case bool:
+		return additional
+	case map[string]any:
+		return true
+	default:
+		return false
+	}
 }
 
 func requiredStringNames(v any) []string {
@@ -435,9 +511,20 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 			if nullable {
 				schemaMap["nullable"] = true
 			}
+			if objectUnion(resolvedBranches) {
+				walked := make([]any, 0, len(resolvedBranches))
+				for _, branch := range resolvedBranches {
+					walked = append(walked, c.cleanMap(deepCopy(branch).(map[string]any), depth+1, path+"/"+unionKey))
+				}
+				if objectUnion(walked) {
+					schemaMap["type"] = "object"
+					schemaMap[unionKey] = walked
+					return c.cleanMap(foldUnion(schemaMap, c.resolve), depth+1, path+"/"+unionKey)
+				}
+			}
 			if bestBranch := extractBestSchemaFromUnion(resolvedBranches); bestBranch != nil {
 				if bestMap, ok := bestBranch.(map[string]any); ok {
-					walked := c.cleanMap(deepCopy(bestMap).(map[string]any), depth+1, path+"/"+unionKey)
+					walked := deepCopy(bestMap).(map[string]any)
 					for k, v := range walked {
 						if k == "properties" {
 							targetProps, _ := schemaMap["properties"].(map[string]any)
@@ -466,6 +553,7 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 							schemaMap[k] = deepCopy(v)
 						}
 					}
+					return c.cleanMap(schemaMap, depth+1, path+"/"+unionKey)
 				}
 			}
 			if _, hasType := schemaMap["type"]; !hasType && schemaMap["properties"] == nil && schemaMap["items"] == nil {
@@ -556,15 +644,20 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 
 		isEffectivelyNullable, _ := schemaMap["nullable"].(bool)
 
+		// Preserve explicit free-form maps before removing unsupported additionalProperties.
+		openObject := freeFormObject(schemaMap)
+
 		// 6. 白名单过滤
 		allowedFields := map[string]bool{
-			"type":        true,
-			"description": true,
-			"properties":  true,
-			"required":    true,
-			"items":       true,
-			"enum":        true,
-			"title":       true,
+			"type":                 true,
+			"description":          true,
+			"properties":           true,
+			"required":             true,
+			"items":                true,
+			"enum":                 true,
+			"title":                true,
+			"nullable":             true,
+			"additionalProperties": true, // stripped after recursive normalization
 		}
 		for k := range schemaMap {
 			if !allowedFields[k] {
@@ -649,7 +742,10 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 			if props, ok := schemaMap["properties"].(map[string]any); ok && len(props) > 0 {
 				hasProps = true
 			}
-			if !hasProps {
+			if !hasProps && openObject {
+				delete(schemaMap, "properties")
+				delete(schemaMap, "required")
+			} else if !hasProps {
 				schemaMap["properties"] = map[string]any{
 					"reason": map[string]any{
 						"type":        "string",
@@ -680,6 +776,7 @@ func (c *schemaCleanContext) cleanMap(schemaMap map[string]any, depth int, path 
 		}
 
 		if isEffectivelyNullable {
+			schemaMap["nullable"] = true
 			desc, _ := schemaMap["description"].(string)
 			if !strings.Contains(desc, "nullable") {
 				if desc != "" {

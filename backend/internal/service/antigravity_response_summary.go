@@ -13,12 +13,13 @@ import (
 // Counts content-bearing downstream events (not tokens or bytes). No payload
 // value or signature is retained. Collect responses count their content items.
 type antigravityDeliverySummary struct {
-	Protocol       string
-	Stream         bool
-	ThinkingEvents int
-	TextEvents     int
-	ToolEvents     int
-	ProtocolError  bool
+	Protocol           string
+	Stream             bool
+	ThinkingEvents     int
+	TextEvents         int
+	ToolEvents         int
+	ProtocolError      bool
+	ContentBlockEvents int
 }
 
 // Observe only successfully written complete response frames. Gemini SSE and
@@ -45,6 +46,10 @@ func (s *antigravityDeliverySummary) observeJSON(root gjson.Result) {
 				s.observeAnthropicItem(item)
 			}
 		} else {
+			switch root.Get("type").String() {
+			case "content_block_start", "content_block_delta", "content_block_stop":
+				s.ContentBlockEvents++
+			}
 			switch root.Get("type").String() {
 			case "content_block_delta":
 				switch root.Get("delta.type").String() {
@@ -225,6 +230,10 @@ func (c *antigravityThoughtContinuation) summaryFields(ginCtx *gin.Context) map[
 		"effective_continue_zero_output": c.policy.ContinueZeroOutput, "zero_output_continuation_used": c.zeroOutputContinuationUsed(),
 		"effective_retry_missing_terminal": c.retryMissingTerminal, "missing_terminal_replay_used": c.missingTerminalReplayUsed(),
 		"a_decision": decision, "a_reason": reason, "outcome": reason, "terminal_authority": authority,
+	}
+	if c.malformedRecovery != nil {
+		fields["function_calling_mode"] = gjson.GetBytes(c.body, antigravityFunctionModePath).String()
+		fields["function_calling_auto_reason"] = c.malformedRecovery.autoReason
 	}
 	if c.extraUsed {
 		fields["continuation_response_received"] = c.extraObserved

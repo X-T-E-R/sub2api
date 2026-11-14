@@ -106,6 +106,10 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		}
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
 	}
+	geminiBody, malformedRecovery, err := s.prepareMalformedFunctionRecovery(c, &claudeReq, geminiBody)
+	if err != nil {
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
+	}
 	if capture := GeminiCaptureFromContext(ctx); capture != nil {
 		capture.Activate(account, mappedModel, geminiBody)
 	}
@@ -219,6 +223,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				retryOpts := transformOpts
 				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, retryOpts)
+				if txErr == nil && malformedRecovery != nil && malformedRecovery.autoReason != "" {
+					retryGeminiBody, txErr = antigravityAutoFunctionMode(retryGeminiBody)
+				}
 				if txErr != nil {
 					continue
 				}
@@ -348,6 +355,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected budget_tokens constraint error, retrying with rectified budget (budget_tokens=%d, max_tokens=%d)", account.ID, BudgetRectifyBudgetTokens, BudgetRectifyMaxTokens)
 
 					retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, transformOpts)
+					if txErr == nil && malformedRecovery != nil && malformedRecovery.autoReason != "" {
+						retryGeminiBody, txErr = antigravityAutoFunctionMode(retryGeminiBody)
+					}
 					if txErr == nil {
 						retryResult, retryErr := s.antigravityRetryLoop(antigravityRetryLoopParams{
 							ctx:             ctx,
@@ -474,7 +484,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)
 	cacheContinuation = cont
+	cont.malformedRecovery = malformedRecovery
 	defer cont.startResponse(c, "messages", claudeReq.Stream)()
+	defer func() {
+		malformedRecovery.finish(cont.effectiveGeneration(), forwardErr == nil && forwardResult != nil &&
+			!forwardResult.ClientDisconnect && c.Request.Context().Err() == nil)
+	}()
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int

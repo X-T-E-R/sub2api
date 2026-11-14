@@ -402,6 +402,7 @@ type antigravityThoughtContinuation struct {
 	// Gateway config and effective A are pinned with the policy for this request.
 	retryMissingTerminal    bool
 	missingTerminalReplayed bool
+	malformedRecovery       *antigravityMalformedRecovery
 
 	proxyURL    string
 	accessToken string
@@ -633,8 +634,14 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	var err error
 	replayMissingTerminal := c.canReplayMissingTerminal()
 	if replayMissingTerminal {
-		// No model tail or invented Continue.: repeat the prepared bytes exactly.
+		// No model tail or invented Continue. For a malformed default VALIDATED
+		// decoder, relax only mode; missing-terminal recovery stays byte-identical.
 		body = c.body
+		if c.generation.malformedFunctionZeroOutput() && c.malformedRecovery != nil &&
+			gjson.GetBytes(body, antigravityFunctionModePath).String() == "VALIDATED" {
+			body, err = antigravityAutoFunctionMode(body)
+			c.malformedRecovery.autoReason = "zero_output_malformed_function_call"
+		}
 	} else if c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful() {
 		body, err = appendAntigravityUserContinue(c.body)
 	} else {

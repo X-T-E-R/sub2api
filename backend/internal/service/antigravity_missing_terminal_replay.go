@@ -32,7 +32,8 @@ func (g *antigravityThoughtGeneration) replayPrefixEligible() bool {
 
 func (c *antigravityThoughtContinuation) canReplayMissingTerminal() bool {
 	return c != nil && c.retryMissingTerminal && !c.extraUsed &&
-		(c.generation.missingTerminalZeroOutput() || c.generation.malformedFunctionZeroOutput())
+		(c.generation.missingTerminalZeroOutput() ||
+			(c.generation.malformedFunctionZeroOutput() && c.delivery.ContentBlockEvents == 0))
 }
 
 func (c *antigravityThoughtContinuation) missingTerminalReplayUsed() bool {

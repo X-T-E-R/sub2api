@@ -220,7 +220,13 @@ func TestAntigravityZeroOutputMalformedFunctionReplayProtocols(t *testing.T) {
 					c, rec := newAntigravityCompatContext("POST", "/fixture", body)
 					result, err := preheaderAGForward(svc, c, protocol, stream, body)
 					require.Equal(t, 2, upstream.callCount)
-					require.Equal(t, upstream.requestBodies[0], upstream.requestBodies[1])
+					if protocol == "messages" {
+						expected, modeErr := antigravityAutoFunctionMode(upstream.requestBodies[0])
+						require.NoError(t, modeErr)
+						require.Equal(t, expected, upstream.requestBodies[1], "malformed default decoder relaxes only mode")
+					} else {
+						require.Equal(t, upstream.requestBodies[0], upstream.requestBodies[1])
+					}
 					require.NotNil(t, result)
 					wire := rec.Body.String()
 					cont := antigravityThoughtContinuationFromGin(c)

@@ -310,3 +310,94 @@ func TestCleanJSONSchema_NestedAllOfWithRefAndRequiredOnlyBranches(t *testing.T)
 	require.NotContains(t, cProps, "reason")
 	require.Equal(t, []any{"kept", "x", "y", "z"}, complexAllOf["required"])
 }
+
+func TestCleanJSONSchema_PureObjectUnionsKeepAllAlternatives(t *testing.T) {
+	for _, union := range []string{"anyOf", "oneOf"} {
+		t.Run(union, func(t *testing.T) {
+			cleaned := cleanRawJSONSchema(t, `{
+				"title":"Resource", "description":"Select resource", "`+union+`": [
+					{"type":"object", "properties":{"path":{"type":"string"}, "common":{"const":"yes"}, "options":{"type":"object","additionalProperties":{}}}, "required":["path","common"]},
+					{"properties":{"file_id":{"type":"integer"}, "common":{"type":"string"}}, "required":["common","file_id"]},
+					{"type":"null"}
+				]}`)
+			require.Equal(t, "object", cleaned["type"])
+			require.Equal(t, "Resource", cleaned["title"])
+			require.Contains(t, cleaned["description"], "Select resource")
+			require.Equal(t, true, cleaned["nullable"])
+			props := cleaned["properties"].(map[string]any)
+			require.Len(t, props, 4)
+			require.Equal(t, "string", props["path"].(map[string]any)["type"])
+			require.Equal(t, "integer", props["file_id"].(map[string]any)["type"])
+			require.Equal(t, []any{"yes"}, props["common"].(map[string]any)["enum"])
+			require.Equal(t, map[string]any{"type": "object"}, props["options"])
+			require.Equal(t, []any{"common"}, cleaned["required"])
+			require.NotContains(t, cleaned, union)
+		})
+	}
+	cleaned := cleanRawJSONSchema(t, `{"anyOf":[
+		{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},
+		{"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}
+	]}`)
+	require.Len(t, cleaned["properties"], 2)
+	require.NotContains(t, cleaned, "required")
+}
+
+func TestCleanJSONSchema_FreeFormMapsAndEmptyTools(t *testing.T) {
+	for _, additional := range []string{`true`, `{}`, `{"type":"string"}`} {
+		for _, properties := range []string{"", `,"properties":{}`} {
+			cleaned := cleanRawJSONSchema(t, `{"type":"object","properties":{"tts":{"type":"object","properties":{
+				"options":{"type":"object","additionalProperties":`+additional+properties+`}
+			}}}}`)
+			options := cleaned["properties"].(map[string]any)["tts"].(map[string]any)["properties"].(map[string]any)["options"]
+			require.Equal(t, map[string]any{"type": "object"}, options)
+		}
+	}
+	// Keep the established no-argument tool contract, including its reason field.
+	empty := cleanRawJSONSchema(t, `{"type":"object","properties":{}}`)
+	require.Contains(t, empty["properties"], "reason")
+	require.Equal(t, []any{"reason"}, empty["required"])
+	closed := cleanRawJSONSchema(t, `{"type":"object","additionalProperties":false}`)
+	require.Contains(t, closed["properties"], "reason")
+	nullable := cleanRawJSONSchema(t, `{"anyOf":[{"type":"object","additionalProperties":true},{"type":"null"}]}`)
+	require.NotContains(t, nullable, "properties")
+	require.NotContains(t, nullable, "required")
+	mixed := cleanRawJSONSchema(t, `{"oneOf":[{"type":"string"},{"type":"integer"}]}`)
+	require.Equal(t, "string", mixed["type"])
+}
+
+func TestCleanJSONSchema_ObjectUnionNormalizesAllOfAndRefsBeforeFolding(t *testing.T) {
+	cleaned := cleanRawJSONSchema(t, `{
+		"$defs":{"File":{"allOf":[
+			{"type":"object","properties":{"file_id":{"type":"string"},"options":{"type":"object","additionalProperties":true}}},
+			{"required":["file_id"]}
+		]}},
+		"anyOf":[
+			{"allOf":[{"type":"object","properties":{"path":{"type":"string"}}},{"required":["path"]}]},
+			{"$ref":"#/$defs/File"}
+		]
+	}`)
+	props := cleaned["properties"].(map[string]any)
+	require.Len(t, props, 3)
+	require.Contains(t, props, "path")
+	require.Contains(t, props, "file_id")
+	require.Equal(t, map[string]any{"type": "object"}, props["options"])
+	require.NotContains(t, cleaned, "required")
+}
+
+func TestCleanJSONSchema_NullableObjectMapAndUnionBranches(t *testing.T) {
+	open := cleanRawJSONSchema(t, `{"type":["object","null"],"additionalProperties":true}`)
+	require.Equal(t, "object", open["type"])
+	require.Equal(t, true, open["nullable"])
+	require.NotContains(t, open, "properties")
+	require.NotContains(t, open, "required")
+	require.NotContains(t, open, "additionalProperties")
+	for _, union := range []string{"anyOf", "oneOf"} {
+		cleaned := cleanRawJSONSchema(t, `{"description":"outer","`+union+`":[
+			{"type":["object","null"],"properties":{"a":{"type":"string"}}},
+			{"type":"object","properties":{"b":{"type":"string"}}}
+		]}`)
+		require.Len(t, cleaned["properties"], 2)
+		require.Equal(t, true, cleaned["nullable"])
+		require.Equal(t, "outer (nullable)", cleaned["description"])
+	}
+}
