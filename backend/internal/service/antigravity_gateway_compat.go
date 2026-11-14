@@ -74,7 +74,7 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 
 	preserveDeveloperRole := false
 	if s.settingService != nil {
-		preserveDeveloperRole, _ = s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
+		preserveDeveloperRole, _ = s.settingService.GetAntigravitySystemInstructionRewriter()
 	}
 	responsesRequest, err := apicompat.ChatCompletionsToResponsesWithOptions(&request, apicompat.ChatCompletionsToResponsesOptions{
 		PreserveDeveloperRole: preserveDeveloperRole,

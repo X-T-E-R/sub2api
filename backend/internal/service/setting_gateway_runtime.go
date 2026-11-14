@@ -105,8 +105,9 @@ const antigravityUserAgentVersionErrorTTL = 5 * time.Second
 const antigravityUserAgentVersionDBTimeout = 5 * time.Second
 
 type cachedAntigravitySystemInstructionRewrite struct {
-	enabled bool
-	phrases []string
+	enabled  bool
+	phrases  []string
+	rewriter *antigravity.CompiledSystemInstructionRewriter
 }
 
 type cachedAntigravityWebSearchModel struct {
@@ -325,6 +326,17 @@ func (s *SettingService) GetAntigravitySystemInstructionRewriteConfig(_ context.
 	return false, antigravity.DefaultSystemInstructionRewritePhrases()
 }
 
+// GetAntigravitySystemInstructionRewriter returns the precompiled runtime snapshot.
+// It performs no compilation or database reads on the request path.
+func (s *SettingService) GetAntigravitySystemInstructionRewriter() (bool, *antigravity.CompiledSystemInstructionRewriter) {
+	if s != nil {
+		if cached, ok := s.antigravitySystemRewriteCache.Load().(*cachedAntigravitySystemInstructionRewrite); ok && cached != nil {
+			return cached.enabled, cached.rewriter
+		}
+	}
+	return false, nil
+}
+
 // LoadAntigravitySystemInstructionRewriteSettings loads the persisted
 // Antigravity systemInstruction rewrite switch and phrase list into the
 // in-memory snapshot at startup. On read failure it publishes the safe
@@ -355,8 +367,9 @@ func (s *SettingService) publishAntigravitySystemInstructionRewrite(enabled bool
 	s.antigravitySystemRewriteMu.Lock()
 	defer s.antigravitySystemRewriteMu.Unlock()
 	s.antigravitySystemRewriteCache.Store(&cachedAntigravitySystemInstructionRewrite{
-		enabled: enabled,
-		phrases: append([]string(nil), normalized...),
+		enabled:  enabled,
+		phrases:  append([]string(nil), normalized...),
+		rewriter: antigravity.NewCompiledSystemInstructionRewriter(normalized),
 	})
 }
 

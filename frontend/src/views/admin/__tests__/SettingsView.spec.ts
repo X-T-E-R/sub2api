@@ -534,11 +534,7 @@ const baseSettingsResponse = {
   antigravity_user_agent_version: "",
   antigravity_system_instruction_rewrite_enabled: false,
   antigravity_system_instruction_rewrite_phrases: [
-    "x-anthropic-billing-header:",
-    "built on anthropic's claude agent sdk",
-    "you are codex, an agent based on gpt-5",
-    "you are codex, a coding agent based on gpt-5",
-    "hermes agent, an intelligent ai assistant created by nous research",
+    'x-anthropic-billing-header: => ""',
   ],
   openai_codex_user_agent: "",
   payment_enabled: true,
@@ -1763,17 +1759,7 @@ describe("admin SettingsView payment visible method controls", () => {
   });
 
   it("loads, edits, deduplicates, clears, and restores default Antigravity systemInstruction rewrite phrases", async () => {
-    getSettings.mockResolvedValueOnce({
-      ...baseSettingsResponse,
-      antigravity_system_instruction_rewrite_enabled: false,
-      antigravity_system_instruction_rewrite_phrases: [
-        "x-anthropic-billing-header:",
-        "built on anthropic's claude agent sdk",
-        "you are codex, an agent based on gpt-5",
-        "you are codex, a coding agent based on gpt-5",
-        "hermes agent, an intelligent ai assistant created by nous research",
-      ],
-    });
+    getSettings.mockResolvedValueOnce(baseSettingsResponse);
 
     const wrapper = mountView();
     await flushPromises();
@@ -1786,21 +1772,31 @@ describe("admin SettingsView payment visible method controls", () => {
       "#antigravity-system-instruction-rewrite-phrases",
     );
     expect(toggle.element.checked).toBe(false);
-    expect(textarea.element.value.split("\n")).toHaveLength(5);
+    expect(textarea.element.value).toBe('x-anthropic-billing-header: => ""');
 
-    // Enable toggle and set custom phrases with duplicates, blank lines, and Unicode
+    const customRules = [
+      '@user İstanbul ✓ custom phrase => Clear => wording',
+      String.raw`@user re:\D+ => same replacement`,
+      String.raw`@user re:\d+ => same replacement`,
+      "@user re:foo  bar => wording",
+      'Header: => ""',
+    ];
     await toggle.setValue(true);
-    await textarea.setValue(
-      "  x-anthropic-billing-header:  \n\nX-ANTHROPIC-BILLING-HEADER:\nİstanbul ✓ custom phrase\n",
-    );
+    await textarea.setValue([
+      '  @user İstanbul ✓ custom phrase=> Clear => wording  ',
+      '',
+      '# ignored',
+      '@user İstanbul ✓ CUSTOM PHRASE => Clear => wording',
+      String.raw`@USER re:\D+ => same replacement`,
+      String.raw`@USER re:\d+ => same replacement`,
+      "@USER re:foo  bar => wording",
+      'Header: =>',
+    ].join("\n"));
 
     updateSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
       antigravity_system_instruction_rewrite_enabled: true,
-      antigravity_system_instruction_rewrite_phrases: [
-        "x-anthropic-billing-header:",
-        "İstanbul ✓ custom phrase",
-      ],
+      antigravity_system_instruction_rewrite_phrases: customRules,
     });
 
     await wrapper.get("form").trigger("submit.prevent");
@@ -1809,15 +1805,10 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         antigravity_system_instruction_rewrite_enabled: true,
-        antigravity_system_instruction_rewrite_phrases: [
-          "x-anthropic-billing-header:",
-          "İstanbul ✓ custom phrase",
-        ],
+        antigravity_system_instruction_rewrite_phrases: customRules,
       }),
     );
-    expect(textarea.element.value).toBe(
-      "x-anthropic-billing-header:\nİstanbul ✓ custom phrase",
-    );
+    expect(textarea.element.value).toBe(customRules.join("\n"));
 
     // Clear list via button and verify empty status + empty array submission
     await wrapper.get("#antigravity-system-instruction-rewrite-clear").trigger("click");
@@ -1842,15 +1833,14 @@ describe("admin SettingsView payment visible method controls", () => {
       }),
     );
 
-    // Restore default 5 phrases via button
     await wrapper.get("#antigravity-system-instruction-rewrite-reset").trigger("click");
-    expect(textarea.element.value.split("\n")).toEqual([
-      "x-anthropic-billing-header:",
-      "built on anthropic's claude agent sdk",
-      "you are codex, an agent based on gpt-5",
-      "you are codex, a coding agent based on gpt-5",
-      "hermes agent, an intelligent ai assistant created by nous research",
-    ]);
+    const defaults = textarea.element.value.split("\n");
+    expect(defaults).toHaveLength(10);
+    expect(defaults.every((rule) => rule.includes(" => "))).toBe(true);
+    expect(defaults[0]).toBe('x-anthropic-billing-header: => ""');
+    expect(defaults[1]).toBe(String.raw`re:(?im)^[ \t]*x-[a-z0-9_-]*billing[a-z0-9_-]*:[^\r\n]*(?:\r?\n)? => ""`);
+    expect(defaults.filter((rule) => rule.startsWith("@user "))).toHaveLength(2);
+    expect(defaults[9]).toContain("=> When the user writes @ followed by a path");
     wrapper.unmount();
   });
 

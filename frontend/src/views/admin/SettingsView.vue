@@ -9876,6 +9876,19 @@ type SettingsForm = Omit<
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 
+const DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES: readonly string[] = [
+  'x-anthropic-billing-header: => ""',
+  String.raw`re:(?im)^[ \t]*x-[a-z0-9_-]*billing[a-z0-9_-]*:[^\r\n]*(?:\r?\n)? => ""`,
+  "built on Anthropic's Claude Agent SDK => built on the Claude Agent SDK by Anthropic",
+  "@user You are Codex, an agent based on GPT-5 => You are Codex, an agent built on GPT-5",
+  "@user You are Codex, a coding agent based on GPT-5 => You are Codex, a coding agent built on GPT-5",
+  "Hermes Agent, an intelligent AI assistant created by Nous Research => Hermes Agent, an intelligent AI assistant built by Nous Research",
+  "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+  "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+  "You are an AI agent running in OpenCode => You are an AI coding assistant",
+  'Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces. => When the user writes @ followed by a path, they are pointing at that file or folder. Relative paths start at the workspace root; absolute paths are host paths. A path ending in a slash is a folder, so list it if its contents matter; otherwise it is a file, so open it with the read tool before relying on it. Paths with spaces appear as @"...".',
+];
+
 const form = reactive<SettingsForm>({
   registration_enabled: true,
   email_verify_enabled: false,
@@ -10125,11 +10138,7 @@ const form = reactive<SettingsForm>({
   antigravity_user_agent_version: "",
   antigravity_system_instruction_rewrite_enabled: false,
   antigravity_system_instruction_rewrite_phrases: [
-    "x-anthropic-billing-header:",
-    "built on anthropic's claude agent sdk",
-    "you are codex, an agent based on gpt-5",
-    "you are codex, a coding agent based on gpt-5",
-    "hermes agent, an intelligent ai assistant created by nous research",
+    ...DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES,
   ],
   openai_codex_user_agent: "",
   openai_codex_client_version: "",
@@ -11370,14 +11379,6 @@ function findDuplicateDefaultSubscription(
   });
 }
 
-const DEFAULT_ANTIGRAVITY_SYSTEM_INSTRUCTION_REWRITE_PHRASES: readonly string[] = [
-  "x-anthropic-billing-header:",
-  "built on anthropic's claude agent sdk",
-  "you are codex, an agent based on gpt-5",
-  "you are codex, a coding agent based on gpt-5",
-  "hermes agent, an intelligent ai assistant created by nous research",
-];
-
 function asciiLowerForPhraseDedup(value: string): string {
   return value.replace(/[A-Z]/g, (ch) =>
     String.fromCharCode(ch.charCodeAt(0) + 32),
@@ -11400,9 +11401,29 @@ function normalizeAntigravitySystemInstructionRewritePhrases(
   const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of lines) {
-    const cleaned = raw.replace(/\u200b/g, "").trim();
-    if (!cleaned) continue;
-    const key = asciiLowerForPhraseDedup(cleaned);
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const delimiter = line.indexOf("=>");
+    const target = (delimiter < 0 ? line : line.slice(0, delimiter)).trim();
+    const scope = target.match(/^@(user|system)\s+/i);
+    const body = scope ? target.slice(scope[0].length) : target;
+    const regex = body.startsWith("re:");
+    const normalizedBody = regex
+      ? body
+      : body
+          .replace(/[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff\u034f]/g, "")
+          .trim()
+          .replace(/\s+/g, " ");
+    const prefix = scope ? `@${scope[1].toLowerCase()} ` : "";
+    const replacement = delimiter < 0 ? "" : line.slice(delimiter + 2).trim() || '""';
+    const cleaned = delimiter < 0
+      ? prefix + normalizedBody
+      : `${prefix}${normalizedBody} => ${replacement}`;
+    const key = JSON.stringify([
+      prefix,
+      regex ? normalizedBody : asciiLowerForPhraseDedup(normalizedBody),
+      replacement,
+    ]);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(cleaned);

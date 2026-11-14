@@ -24,7 +24,7 @@ func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 		return r
 	}
 
-	// 1. Default GET returns enabled=false and the default 5 Magpie phrases.
+	// Unconfigured lists read back the built-in semantic rules.
 	r := get()
 	require.Equal(t, http.StatusOK, r.Code)
 	require.False(t, gjson.Get(r.Body.String(), "data.antigravity_system_instruction_rewrite_enabled").Bool())
@@ -43,16 +43,16 @@ func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 			"  x-anthropic-billing-header:  ",
 			"",
 			"X-ANTHROPIC-BILLING-HEADER:",
-			"İstanbul ✓ custom phrase\n  Second Custom Phrase  ",
+			"@user İstanbul ✓ custom phrase => custom wording\n  re:Second [Cc]ustom Phrase => other wording  ",
 		},
 	}, nil)
 	require.Equal(t, http.StatusOK, r.Code, r.Body.String())
 	require.True(t, gjson.Get(r.Body.String(), "data.antigravity_system_instruction_rewrite_enabled").Bool())
 
 	expectedCustom := []string{
-		"x-anthropic-billing-header:",
-		"İstanbul ✓ custom phrase",
-		"Second Custom Phrase",
+		`x-anthropic-billing-header: => ""`,
+		"@user İstanbul ✓ custom phrase => custom wording",
+		"re:Second [Cc]ustom Phrase => other wording",
 	}
 	var updatedPhrases []string
 	gjson.Get(r.Body.String(), "data.antigravity_system_instruction_rewrite_phrases").ForEach(func(_, v gjson.Result) bool {
@@ -61,11 +61,21 @@ func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 	})
 	require.Equal(t, expectedCustom, updatedPhrases)
 	require.Equal(t, "true", repo.values[service.SettingKeyAntigravitySystemInstructionRewriteEnabled])
-	require.JSONEq(t, `["x-anthropic-billing-header:","İstanbul ✓ custom phrase","Second Custom Phrase"]`, repo.values[service.SettingKeyAntigravitySystemInstructionRewritePhrases])
+	require.JSONEq(t, antigravity.FormatStoredSystemInstructionRewritePhrases(expectedCustom), repo.values[service.SettingKeyAntigravitySystemInstructionRewritePhrases])
 
 	rtEnabled, rtPhrases := h.settingService.GetAntigravitySystemInstructionRewriteConfig(context.Background())
 	require.True(t, rtEnabled)
 	require.Equal(t, expectedCustom, rtPhrases)
+
+	// A malformed regex is rejected before the persisted or effective settings change.
+	r = doUpdateSettings(t, h, map[string]any{
+		"antigravity_system_instruction_rewrite_enabled": false,
+		"antigravity_system_instruction_rewrite_phrases": []string{"@user re:[ => invalid"},
+	}, nil)
+	require.Equal(t, http.StatusBadRequest, r.Code, r.Body.String())
+	require.Contains(t, r.Body.String(), "INVALID_ANTIGRAVITY_REWRITE_RULE")
+	require.Equal(t, "true", repo.values[service.SettingKeyAntigravitySystemInstructionRewriteEnabled])
+	require.JSONEq(t, antigravity.FormatStoredSystemInstructionRewritePhrases(expectedCustom), repo.values[service.SettingKeyAntigravitySystemInstructionRewritePhrases])
 
 	// 3. Partial PUT omitting rewrite fields preserves both enabled and phrase list.
 	r = doUpdateSettings(t, h, map[string]any{"antigravity_user_agent_version": "2.9.1"}, nil)
@@ -87,7 +97,7 @@ func TestAntigravitySystemInstructionRewriteSettingsAPI(t *testing.T) {
 	})
 	require.Equal(t, expectedCustom, preservedPhrases)
 
-	// 5. Explicitly clearing the phrase list ([]string{}) stores "[]" and reads back empty array [] (not default 5).
+	// 5. Explicitly clearing the phrase list ([]string{}) stores "[]" and reads back an empty array.
 	r = doUpdateSettings(t, h, map[string]any{
 		"antigravity_system_instruction_rewrite_enabled": true,
 		"antigravity_system_instruction_rewrite_phrases": []string{},

@@ -650,9 +650,9 @@ const (
 	SettingKeyAntigravityUserAgent = "antigravity_user_agent"
 	// SettingKeyAntigravityUserAgentVersion Antigravity 上游 User-Agent 版本号（空值使用环境变量/默认值）
 	SettingKeyAntigravityUserAgentVersion = "antigravity_user_agent_version"
-	// SettingKeyAntigravitySystemInstructionRewriteEnabled controls whether Antigravity outbound systemInstruction phrases are rewritten with U+200B (default false).
+	// SettingKeyAntigravitySystemInstructionRewriteEnabled enables semantic rules for Antigravity system instructions and opted-in user text (default false).
 	SettingKeyAntigravitySystemInstructionRewriteEnabled = "antigravity_system_instruction_rewrite_enabled"
-	// SettingKeyAntigravitySystemInstructionRewritePhrases stores the JSON array of Antigravity outbound systemInstruction rewrite phrases; unconfigured/empty raw falls back to the Magpie default five phrases, while "[]" means an explicitly cleared list.
+	// SettingKeyAntigravitySystemInstructionRewritePhrases stores semantic rules as a JSON string array; empty raw uses built-ins, while "[]" rewrites nothing.
 	SettingKeyAntigravitySystemInstructionRewritePhrases = "antigravity_system_instruction_rewrite_phrases"
 	// SettingKeyAntigravityWebSearchModel overrides the target model used when Antigravity requests carry built-in web_search/google_search tools (empty uses built-in default gemini-2.5-flash).
 	SettingKeyAntigravityWebSearchModel = "antigravity_web_search_model"

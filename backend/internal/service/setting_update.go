@@ -583,6 +583,9 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyAntigravitySystemInstructionRewriteEnabled] = strconv.FormatBool(settings.AntigravitySystemInstructionRewriteEnabled)
 	if settings.AntigravitySystemInstructionRewritePhrasesSet || settings.AntigravitySystemInstructionRewritePhrases != nil {
 		normalizedPhrases := antigravity.NormalizeSystemInstructionRewritePhrases(settings.AntigravitySystemInstructionRewritePhrases)
+		if err := antigravity.ValidateSystemInstructionRewritePhrases(normalizedPhrases); err != nil {
+			return nil, infraerrors.BadRequest("INVALID_ANTIGRAVITY_REWRITE_RULE", err.Error())
+		}
 		settings.AntigravitySystemInstructionRewritePhrases = normalizedPhrases
 		settings.AntigravitySystemInstructionRewritePhrasesSet = true
 		updates[SettingKeyAntigravitySystemInstructionRewritePhrases] = antigravity.FormatStoredSystemInstructionRewritePhrases(normalizedPhrases)

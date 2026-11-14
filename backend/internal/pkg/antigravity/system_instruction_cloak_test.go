@@ -2,176 +2,242 @@ package antigravity
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
-func TestDefaultSystemInstructionRewritePhrasesMatchMagpie627fd1a(t *testing.T) {
-	want := []string{
-		"x-anthropic-billing-header:",
-		"built on anthropic's claude agent sdk",
-		"you are codex, an agent based on gpt-5",
-		"you are codex, a coding agent based on gpt-5",
-		"hermes agent, an intelligent ai assistant created by nous research",
+func TestDefaultSystemInstructionRewritePhrases(t *testing.T) {
+	rules := DefaultSystemInstructionRewritePhrases()
+	require.Len(t, rules, 10)
+	require.NoError(t, ValidateSystemInstructionRewritePhrases(rules))
+	rewriter := NewCompiledSystemInstructionRewriter(rules)
+	for _, line := range rules {
+		target, replacement, user := splitRewriteRule(line)
+		if strings.HasPrefix(target, "re:") {
+			continue
+		}
+		input := target
+		if replacement == "" {
+			input += " cc_version=dynamic\r\n"
+		}
+		require.Equal(t, replacement, rewriter.Rewrite(input), line)
+		require.Equal(t, replacement, rewriter.Rewrite(rewriter.Rewrite(input)), line)
+		if user {
+			require.Equal(t, replacement, rewriter.RewriteUser(input))
+		} else {
+			require.Equal(t, input, rewriter.RewriteUser(input))
+		}
 	}
-	got := DefaultSystemInstructionRewritePhrases()
-	require.Equal(t, want, got)
-
-	// Mutating returned slice must not mutate internal default list.
-	got[0] = "mutated"
-	require.Equal(t, want, DefaultSystemInstructionRewritePhrases())
+	rules[0] = "mutated"
+	require.Equal(t, `x-anthropic-billing-header: => ""`, DefaultSystemInstructionRewritePhrases()[0])
 }
 
 func TestNormalizeAndParseSystemInstructionRewritePhrases(t *testing.T) {
-	// Unconfigured / empty raw string falls back to default 5 phrases.
-	require.Equal(t, DefaultSystemInstructionRewritePhrases(), ParseStoredSystemInstructionRewritePhrases(""))
-	require.Equal(t, DefaultSystemInstructionRewritePhrases(), ParseStoredSystemInstructionRewritePhrases("   "))
-
-	// Explicitly cleared JSON array "[]" stays empty (0 phrases).
-	require.Empty(t, ParseStoredSystemInstructionRewritePhrases("[]"))
-	require.Equal(t, "[]", FormatStoredSystemInstructionRewritePhrases([]string{}))
-
-	// Normalization trims whitespace, splits newlines, strips embedded U+200B,
-	// ignores blank lines, and deduplicates ASCII case-insensitively while preserving order.
-	normalized := NormalizeSystemInstructionRewritePhrases([]string{
-		"  X-Anthropic-Billing-Header:  \n\n  x-\u200banthropic-billing-header: ",
-		"Built on Anthropic's Claude Agent SDK",
-		"   ",
+	for _, raw := range []string{"", "   ", "not json"} {
+		require.Equal(t, DefaultSystemInstructionRewritePhrases(), ParseStoredSystemInstructionRewritePhrases(raw))
+	}
+	require.Equal(t, []string{}, ParseStoredSystemInstructionRewritePhrases("[]"))
+	require.Equal(t, "[]", FormatStoredSystemInstructionRewritePhrases(nil))
+	rules := NormalizeSystemInstructionRewritePhrases([]string{
+		"  X-Anthropic-Billing-Header:  \n\n x-\u200banthropic-billing-header:",
 		"BUILT ON ANTHROPIC'S CLAUDE AGENT SDK",
-		"İstanbul ✓ custom phrase",
+		"You are Codex, an agent based on GPT-5",
+		"You are Codex, a coding agent based on GPT-5",
+		"Hermes Agent, an intelligent AI assistant created by Nous Research",
+		"RFC 2119 keywords", "RFC 2119 keywords:",
+		"İstanbul ✓ custom phrase", "Unknown Header:",
+		"# ignored", "@system A\u2060gent\tidentity => clean identity",
+		`@user re:\D+ => $literal`, `@user re:\d+ => number`,
 	})
 	require.Equal(t, []string{
-		"X-Anthropic-Billing-Header:",
-		"Built on Anthropic's Claude Agent SDK",
-		"İstanbul ✓ custom phrase",
-	}, normalized)
+		DefaultSystemInstructionRewritePhrases()[0],
+		DefaultSystemInstructionRewritePhrases()[2],
+		DefaultSystemInstructionRewritePhrases()[3],
+		DefaultSystemInstructionRewritePhrases()[4],
+		DefaultSystemInstructionRewritePhrases()[5],
+		"RFC 2119 keywords: => RFC 2119 key words:",
+		`İstanbul ✓ custom phrase => ""`, `Unknown Header: => ""`,
+		"Agent identity => clean identity",
+		`@user re:\D+ => $literal`, `@user re:\d+ => number`,
+	}, rules)
+	require.Equal(t, rules, NormalizeSystemInstructionRewritePhrases(rules))
+	require.Equal(t, rules, ParseStoredSystemInstructionRewritePhrases(FormatStoredSystemInstructionRewritePhrases(rules)))
+
+	for _, invalid := range []string{`re:[ => bad`, `=> missing`, `re: => missing`, `re:a* => empty match`, "@user => missing target", "@system => missing target"} {
+		require.Error(t, ValidateSystemInstructionRewritePhrases([]string{invalid}), invalid)
+	}
+	require.Equal(t, []string{"valid target => safe wording"}, ParseStoredSystemInstructionRewritePhrases(`["re:[ => bad","valid target => safe wording"]`))
+	require.NotPanics(t, func() { NewCompiledSystemInstructionRewriter([]string{`re:[ => bad`}).Rewrite("hello") })
 }
 
-func TestRewriteSystemInstructionText(t *testing.T) {
-	defaultPhrases := DefaultSystemInstructionRewritePhrases()
-
-	tests := []struct {
-		name    string
-		phrases []string
-		in      string
-		want    string
-	}{
-		{
-			name:    "default 5 phrases case-insensitive exact match",
-			phrases: defaultPhrases,
-			in: "x-anthropic-billing-header: cc_version=2.1.86\n" +
-				"You are a file search specialist, built on Anthropic's Claude Agent SDK.\n" +
-				"You are Codex, an agent based on GPT-5.\n" +
-				"You are Codex, a coding agent based on GPT-5.4.\n" +
-				"You are Hermes Agent, an intelligent AI assistant created by Nous Research.",
-			want: "x\u200b-anthropic-billing-header: cc_version=2.1.86\n" +
-				"You are a file search specialist, b\u200built on Anthropic's Claude Agent SDK.\n" +
-				"Y\u200bou are Codex, an agent based on GPT-5.\n" +
-				"Y\u200bou are Codex, a coding agent based on GPT-5.4.\n" +
-				"You are H\u200bermes Agent, an intelligent AI assistant created by Nous Research.",
-		},
-		{
-			name:    "ordinary mentions outside exact phrases remain untouched",
-			phrases: defaultPhrases,
-			in: "You are a general-purpose agent running within the Claude Agent SDK.\n" +
-				"You are Codex, based on GPT-5.\n" +
-				"You are Hermes Agent, built by Nous Research.",
-			want: "You are a general-purpose agent running within the Claude Agent SDK.\n" +
-				"You are Codex, based on GPT-5.\n" +
-				"You are Hermes Agent, built by Nous Research.",
-		},
-		{
-			name:    "preserves UTF-8 offsets when preceding text has multi-byte runes whose lowercase length differs",
-			phrases: defaultPhrases,
-			in:      "İstanbul ✓ You are Codex, an agent based on GPT-5.",
-			want:    "İstanbul ✓ Y\u200bou are Codex, an agent based on GPT-5.",
-		},
-		{
-			name:    "custom phrase starting with multi-byte Unicode rune inserts U+200B after full first rune",
-			phrases: []string{"智能助手 Hermes Agent", "İstanbul Agent"},
-			in:      "前缀：智能助手 hermes agent 与 İstanbul agent。",
-			want:    "前缀：智\u200b能助手 hermes agent 与 İ\u200bstanbul agent。",
-		},
-		{
-			name:    "overlapping single-byte phrase matches are all rewritten in one pass and strictly idempotent",
-			phrases: []string{"aaa"},
-			in:      "aaaa and AAAAA",
-			want:    "a\u200ba\u200baa and A\u200bA\u200bA\u200bAA",
-		},
-		{
-			name:    "overlapping multi-byte rune phrase matches are all rewritten in one pass and strictly idempotent",
-			phrases: []string{"智智智"},
-			in:      "智智智智",
-			want:    "智\u200b智\u200b智智",
-		},
-		{
-			name:    "empty phrase list leaves text unchanged",
-			phrases: []string{},
-			in:      "x-anthropic-billing-header: cc_version=2.1.86",
-			want:    "x-anthropic-billing-header: cc_version=2.1.86",
-		},
+func TestCompiledSystemInstructionSemanticRewrite(t *testing.T) {
+	r := NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())
+	cases := []struct{ in, want string }{
+		{"x-anthropic-billing-header: cc_version=2\r\nUseful instructions", "Useful instructions"},
+		{"  X-other-billing_header: cc_version=2\nUseful instructions", "Useful instructions"},
+		{"  x-anthropic-billing-header: cc_version=2\nUseful instructions", "Useful instructions"},
+		{"You are a helper built on ANTHROPIC'S Claude Agent SDK.", "You are a helper built on the Claude Agent SDK by Anthropic."},
+		{"İstanbul ✓ You are Codex, an agent based on GPT-5.4.", "İstanbul ✓ You are Codex, an agent built on GPT-5.4."},
+		{"You are an AI agent running in OpenCode, a coding agent harness.", "You are an AI coding assistant, a coding agent harness."},
+		{"RFC\u00a02119\tkeywords:\r\nMUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", "RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."},
+		{"You\u2028are\u2029Codex,\van\fagent\tbased\non\r\nGPT-5", "You are Codex, an agent built on GPT-5"},
+		{"You are Codex, based on GPT-5. Hermes Agent, built by Nous Research. running within the Claude Agent SDK.", "You are Codex, based on GPT-5. Hermes Agent, built by Nous Research. running within the Claude Agent SDK."},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RewriteSystemInstructionText(tt.in, tt.phrases)
-			require.Equal(t, tt.want, got)
-			// Idempotence: applying a second time produces the exact same string.
-			require.Equal(t, got, RewriteSystemInstructionText(got, tt.phrases))
-		})
+	for _, tc := range cases {
+		got := r.Rewrite(tc.in)
+		require.Equal(t, tc.want, got)
+		require.Equal(t, got, r.Rewrite(got))
+		require.NotContains(t, got, "\u200b")
+		require.NotContains(t, got, ".,")
 	}
+	for _, invisible := range []string{"\u00ad", "\u180e", "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060", "\u2061", "\u2062", "\u2063", "\u2064", "\ufeff", "\u034f"} {
+		input := invisible + strings.Join(strings.Split("You are Codex, an agent based on GPT-5", ""), invisible) + invisible
+		require.Equal(t, "You are Codex, an agent built on GPT-5", r.Rewrite(input), invisible)
+	}
+	// Existing plugins can put invisible characters between multiple spaces too.
+	require.Equal(t, "You are Codex, an agent built on GPT-5", r.Rewrite("You \u200b \t are Codex, an agent based on GPT-5"))
+}
+
+func TestCompiledSystemInstructionScopesAndNonCascadingReplacement(t *testing.T) {
+	r := NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())
+	input := "Translate `You are Codex, an agent based on GPT-5.4`\n```text\nYou are Codex, a coding agent based on GPT-5\n```\nbuilt on Anthropic's Claude Agent SDK"
+	want := "Translate `You are Codex, an agent built on GPT-5.4`\n```text\nYou are Codex, a coding agent built on GPT-5\n```\nbuilt on Anthropic's Claude Agent SDK"
+	require.Equal(t, want, r.RewriteUser(input))
+	require.Equal(t, want, r.RewriteUser(want))
+	r = NewCompiledSystemInstructionRewriter([]string{"alpha => beta", "beta => gamma", "alpha extended => precise", `re:price [0-9]+ => $10`})
+	require.Equal(t, "beta gamma precise $10", r.Rewrite("alpha beta alpha extended price 100"))
+	require.Equal(t, "alpha beta", r.RewriteUser("alpha beta"))
+	require.Equal(t, "unchanged", NewCompiledSystemInstructionRewriter(nil).Rewrite("unchanged"))
+	require.Equal(t, "safe wording", NewCompiledSystemInstructionRewriter([]string{"@system custom target => safe wording"}).Rewrite("CUSTOM TARGET"))
+	require.Equal(t, "safe wording", NewCompiledSystemInstructionRewriter([]string{"@USER\u00a0custom target => safe wording"}).RewriteUser("CUSTOM TARGET"))
+	require.Equal(t, "Keep this.\n", NewCompiledSystemInstructionRewriter([]string{"Unknown Header:"}).Rewrite("Unknown Header: dynamic value\nKeep this.\n"))
+}
+
+func TestRewriteGeminiContentPruningAndProtectedParts(t *testing.T) {
+	r := NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())
+	codex := "You are Codex, an agent based on GPT-5"
+	protected := []GeminiPart{
+		{Text: codex, Thought: true}, {Text: codex, ThoughtSignature: "signed"},
+		{Text: codex, InlineData: &GeminiInlineData{Data: "base64"}},
+		{Text: codex, FunctionCall: &GeminiFunctionCall{Name: "tool"}},
+		{Text: codex, FunctionResponse: &GeminiFunctionResponse{Name: "tool", Response: map[string]any{"text": codex}}},
+	}
+	content := &GeminiContent{Parts: append([]GeminiPart{{Text: "x-anthropic-billing-header: cc_version=1"}, {Text: codex}}, protected...)}
+	RewriteGeminiSystemInstructionContent(&content, true, r)
+	require.Len(t, content.Parts, 6)
+	require.Equal(t, r.Rewrite(codex), content.Parts[0].Text)
+	require.Equal(t, protected, content.Parts[1:])
+	contents := []GeminiContent{
+		{Role: "user", Parts: append([]GeminiPart{{Text: codex}}, protected...)},
+		{Role: "model", Parts: []GeminiPart{{Text: codex}}},
+		{Parts: []GeminiPart{{Text: codex}}},
+	}
+	RewriteGeminiUserContents(contents, true, r)
+	require.Equal(t, r.Rewrite(codex), contents[0].Parts[0].Text)
+	require.Equal(t, protected, contents[0].Parts[1:])
+	require.Equal(t, codex, contents[1].Parts[0].Text)
+	require.Equal(t, r.Rewrite(codex), contents[2].Parts[0].Text)
+	content = &GeminiContent{Parts: []GeminiPart{{Text: "x-anthropic-billing-header: cc_version=1"}}}
+	RewriteGeminiSystemInstructionContent(&content, true, r)
+	require.Nil(t, content)
+}
+
+func TestRewriteV1InternalWirePruningScopesAndProtectedBytes(t *testing.T) {
+	r := NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())
+	for _, root := range []string{"", "request"} {
+		for _, key := range []string{"systemInstruction", "system_instruction"} {
+			input := `{"` + key + `":{"parts":[{"text":"x-anthropic-billing-header: cc_version=1"},{"text":" \t "}]},"contents":[` +
+				`{"role":"user","parts":[{"text":"You are Codex, an agent based on GPT-5"},` +
+				`{"text":"You are Codex, an agent based on GPT-5","thoughtSignature":"signed"},` +
+				`{"text":"You are Codex, an agent based on GPT-5","thought":true},` +
+				`{"functionResponse":{"name":"tool","response":{"text":"You are Codex, an agent based on GPT-5"}}}]},` +
+				`{"role":"model","parts":[{"text":"You are Codex, an agent based on GPT-5"}]},` +
+				`{"parts":[{"text":"You are Codex, a coding agent based on GPT-5"}]}]}`
+			prefix := ""
+			if root != "" {
+				input = `{"request":` + input + `}`
+				prefix = root + "."
+			}
+			wire := []byte(input)
+			out := RewriteV1InternalSystemInstructionWire(wire, true, r)
+			require.False(t, gjson.GetBytes(out, prefix+key).Exists())
+			require.Equal(t, "You are Codex, an agent built on GPT-5", gjson.GetBytes(out, prefix+"contents.0.parts.0.text").String())
+			require.Equal(t, "You are Codex, a coding agent built on GPT-5", gjson.GetBytes(out, prefix+"contents.2.parts.0.text").String())
+			for _, path := range []string{"contents.0.parts.1", "contents.0.parts.2", "contents.0.parts.3", "contents.1"} {
+				require.Equal(t, gjson.GetBytes(wire, prefix+path).Raw, gjson.GetBytes(out, prefix+path).Raw)
+			}
+			require.Equal(t, out, RewriteV1InternalSystemInstructionWire(out, true, r))
+			require.Equal(t, wire, RewriteV1InternalSystemInstructionWire(wire, false, r))
+			require.Equal(t, wire, RewriteV1InternalSystemInstructionWire(wire, true, NewCompiledSystemInstructionRewriter(nil)))
+		}
+	}
+	unchanged := []byte(`{ "contents": [ {"role":"user","parts":[{"text":"ordinary Anthropic mention"}]} ] }`)
+	require.Same(t, &unchanged[0], &RewriteV1InternalSystemInstructionWire(unchanged, true, r)[0])
+}
+
+func TestUserRewriteDeletionAndRawTypedParity(t *testing.T) {
+	r := NewCompiledSystemInstructionRewriter([]string{`@user discard => ""`, `@user old identity => new wording`})
+	contents := []GeminiContent{
+		{Role: "user", Parts: []GeminiPart{{Text: "discard"}}},
+		{Role: "user", Parts: []GeminiPart{{Text: "discard"}, {Text: "old identity"}}},
+	}
+	RewriteGeminiUserContents(contents, true, r)
+	require.Equal(t, []GeminiPart{{Text: geminiEmptyUserMessage}}, contents[0].Parts)
+	require.Equal(t, []GeminiPart{{Text: "new wording"}}, contents[1].Parts)
+	wire := []byte(`{"systemInstruction":{"parts":[{"text":"discard","thought":false}]},"contents":[{"role":"user","parts":[{"text":"discard","thought":false}]},{"role":"user","parts":[{"text":"discard"},{"text":"old identity","thought":false}]}]}`)
+	out := RewriteV1InternalSystemInstructionWire(wire, true, r)
+	require.False(t, gjson.GetBytes(out, "systemInstruction").Exists())
+	require.Equal(t, geminiEmptyUserMessage, gjson.GetBytes(out, "contents.0.parts.0.text").String())
+	require.Len(t, gjson.GetBytes(out, "contents.1.parts").Array(), 1)
+	require.Equal(t, "new wording", gjson.GetBytes(out, "contents.1.parts.0.text").String())
+	require.False(t, gjson.GetBytes(out, "contents.1.parts.0.thought").Bool())
+	require.Equal(t, out, RewriteV1InternalSystemInstructionWire(out, true, r))
 }
 
 func TestTransformClaudeToGeminiSystemInstructionRewrite(t *testing.T) {
-	claudeReq := &ClaudeRequest{
-		Model:     "claude-sonnet-4-5",
-		System:    json.RawMessage(`"x-anthropic-billing-header: cc_version=2.1.86\nYou are a helper built on Anthropic's Claude Agent SDK."`),
-		MaxTokens: 1024,
+	req := &ClaudeRequest{Model: "claude-sonnet-4-5", MaxTokens: 1024,
+		System: json.RawMessage(`[{"type":"text","text":"x-anthropic-billing-header: cc_version=2"},{"type":"text","text":"built on Anthropic's Claude Agent SDK"}]`),
 		Messages: []ClaudeMessage{
-			{
-				Role:    "system",
-				Content: json.RawMessage(`"You are Codex, an agent based on GPT-5."`),
-			},
-			{
-				Role:    "user",
-				Content: json.RawMessage(`"Please explain x-anthropic-billing-header: and built on Anthropic's Claude Agent SDK"`),
-			},
+			{Role: "system", Content: json.RawMessage(`"You are Codex, an agent based on GPT-5"`)},
+			{Role: "user", Content: json.RawMessage(`"You are Codex, an agent based on GPT-5.4; built on Anthropic's Claude Agent SDK"`)},
 		},
 	}
-
-	// Default disabled: systemInstruction and user message remain unmodified.
-	wireOff, err := TransformClaudeToGemini(claudeReq, "proj-1", "claude-sonnet-4-5")
+	opts := TransformOptions{SystemInstructionRewriteEnabled: true, SystemInstructionRewriter: NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())}
+	wire, err := TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
 	require.NoError(t, err)
-	require.Contains(t, string(wireOff), "x-anthropic-billing-header: cc_version=2.1.86")
-	require.NotContains(t, string(wireOff), "\u200b")
-	require.NotContains(t, string(wireOff), `\u200b`)
-
-	// Enabled via TransformOptions with default 5 phrases: only systemInstruction (including hoisted system message) is rewritten;
-	// user message content stays untouched.
-	opts := DefaultTransformOptions()
-	opts.SystemInstructionRewriteEnabled = true
-	opts.SystemInstructionRewritePhrases = DefaultSystemInstructionRewritePhrases()
-	wireOn, err := TransformClaudeToGeminiWithOptions(claudeReq, "proj-1", "claude-sonnet-4-5", opts)
+	require.Len(t, gjson.GetBytes(wire, "request.systemInstruction.parts").Array(), 2)
+	require.Equal(t, "built on the Claude Agent SDK by Anthropic", gjson.GetBytes(wire, "request.systemInstruction.parts.0.text").String())
+	require.Equal(t, "You are Codex, an agent built on GPT-5", gjson.GetBytes(wire, "request.systemInstruction.parts.1.text").String())
+	require.Equal(t, "You are Codex, an agent built on GPT-5.4; built on Anthropic's Claude Agent SDK", gjson.GetBytes(wire, "request.contents.0.parts.0.text").String())
+	// Billing-only standalone system blocks must disappear when identity injection is off.
+	req.System = json.RawMessage(`[{"type":"text","text":"x-anthropic-billing-header: cc_version=2"}]`)
+	req.Messages = req.Messages[1:]
+	wire, err = TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
 	require.NoError(t, err)
+	require.False(t, gjson.GetBytes(wire, "request.systemInstruction").Exists())
+	opts.SystemInstructionRewriteEnabled = false
+	wire, err = TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
+	require.NoError(t, err)
+	require.Contains(t, gjson.GetBytes(wire, "request.systemInstruction.parts.0.text").String(), "cc_version=2")
+}
 
-	var v1 V1InternalRequest
-	require.NoError(t, json.Unmarshal(wireOn, &v1))
-	require.NotNil(t, v1.Request.SystemInstruction)
-
-	var sysTexts []string
-	for _, p := range v1.Request.SystemInstruction.Parts {
-		sysTexts = append(sysTexts, p.Text)
+func TestUserRewritePreservesOriginalFallbackSessionID(t *testing.T) {
+	opts := TransformOptions{SystemInstructionRewriteEnabled: true,
+		SystemInstructionRewriter: NewCompiledSystemInstructionRewriter([]string{`@user re:discard [0-9]+ => ""`})}
+	var ids []string
+	for _, text := range []string{"discard 1", "discard 2"} {
+		body, _ := json.Marshal(text)
+		req := &ClaudeRequest{Model: "claude-sonnet-4-5", MaxTokens: 64,
+			Messages: []ClaudeMessage{{Role: "user", Content: body}}}
+		wire, err := TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
+		require.NoError(t, err)
+		id := gjson.GetBytes(wire, "request.sessionId").String()
+		require.Equal(t, generateStableSessionID([]GeminiContent{{Role: "user", Parts: []GeminiPart{{Text: text}}}}), id)
+		require.Equal(t, geminiEmptyUserMessage, gjson.GetBytes(wire, "request.contents.0.parts.0.text").String())
+		ids = append(ids, id)
 	}
-	joinedSys := ""
-	for _, s := range sysTexts {
-		joinedSys += s + "\n"
-	}
-	require.Contains(t, joinedSys, "x\u200b-anthropic-billing-header: cc_version=2.1.86")
-	require.Contains(t, joinedSys, "b\u200built on Anthropic's Claude Agent SDK.")
-	require.Contains(t, joinedSys, "Y\u200bou are Codex, an agent based on GPT-5.")
-
-	// User turn must remain untouched.
-	require.Len(t, v1.Request.Contents, 1)
-	require.Equal(t, "Please explain x-anthropic-billing-header: and built on Anthropic's Claude Agent SDK", v1.Request.Contents[0].Parts[0].Text)
+	require.NotEqual(t, ids[0], ids[1])
 }

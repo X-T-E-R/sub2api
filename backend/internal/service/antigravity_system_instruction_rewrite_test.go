@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestAntigravitySystemInstructionRewriteAcrossAllFourProtocolsAndHotReload(t
 	settingSvc := NewSettingService(repo, &config.Config{})
 	require.NoError(t, settingSvc.LoadAntigravitySystemInstructionRewriteSettings(context.Background()))
 
-	// 1. Default state: disabled=false, default 5 phrases returned by GetAntigravitySystemInstructionRewriteConfig.
+	// 1. Default state: disabled=false, built-in semantic rules returned by GetAntigravitySystemInstructionRewriteConfig.
 	enabled, phrases := settingSvc.GetAntigravitySystemInstructionRewriteConfig(context.Background())
 	require.False(t, enabled)
 	require.Equal(t, antigravity.DefaultSystemInstructionRewritePhrases(), phrases)
@@ -38,7 +39,8 @@ func TestAntigravitySystemInstructionRewriteAcrossAllFourProtocolsAndHotReload(t
 		"You are Codex, a coding agent based on GPT-5.4.\n" +
 		"You are Hermes Agent, an intelligent AI assistant created by Nous Research.\n" +
 		"Ordinary mentions: running within the Claude Agent SDK; You are Codex, based on GPT-5; Hermes Agent, built by Nous Research."
-	userPrompt := "User message mentioning x-anthropic-billing-header: and built on Anthropic's Claude Agent SDK and You are Codex, an agent based on GPT-5"
+	userPrompt := "User message mentioning x-anthropic-billing-header: and built on Anthropic's Claude Agent SDK\n`You are Codex, an agent based on GPT-5.4`\n```text\nY\u200bou are Codex, a coding agent based on GPT-5\n```"
+	wantUser := "User message mentioning x-anthropic-billing-header: and built on Anthropic's Claude Agent SDK\n`You are Codex, an agent built on GPT-5.4`\n```text\nYou are Codex, a coding agent built on GPT-5\n```"
 
 	buildProtocolBody := func(protocol string, model string) []byte {
 		switch protocol {
@@ -160,14 +162,13 @@ func TestAntigravitySystemInstructionRewriteAcrossAllFourProtocolsAndHotReload(t
 		require.Contains(t, sysText, "x-anthropic-billing-header: cc_version=2.1.86", "protocol=%s", protocol)
 		require.NotContains(t, sysText, "\u200b", "protocol=%s should not insert U+200B when disabled", protocol)
 		require.Contains(t, userText, userPrompt, "protocol=%s user prompt must remain intact", protocol)
-		require.NotContains(t, userText, "\u200b", "protocol=%s user prompt must not contain U+200B", protocol)
 		if protocol == "chat_completions" {
 			require.NotContains(t, sysText, "Hoisted developer: You are Codex, a coding agent based on GPT-5.", "when AGY rewrite is OFF, ChatCompletions preserves default non-hoisted developer projection")
 			require.Contains(t, userText, "Hoisted developer: You are Codex, a coding agent based on GPT-5.")
 		}
 	}
 
-	// 3. Enable switch with default 5 phrases via UpdateSettingsOmitting -> takes effect on very next request across all 4 protocols (both claude-* and gemini-* models).
+	// 3. Enable switch with built-in semantic rules via UpdateSettingsOmitting -> takes effect on very next request across all 4 protocols (both claude-* and gemini-* models).
 	require.NoError(t, settingSvc.UpdateSettingsOmitting(context.Background(), &SystemSettings{
 		AntigravitySystemInstructionRewriteEnabled: true,
 	}, OmittedSettingKeys{
@@ -178,20 +179,22 @@ func TestAntigravitySystemInstructionRewriteAcrossAllFourProtocolsAndHotReload(t
 		onBodies := runFourProtocols(model)
 		for protocol, wire := range onBodies {
 			sysText, userText := extractSystemAndUserText(wire)
-			require.Contains(t, sysText, "x\u200b-anthropic-billing-header: cc_version=2.1.86", "protocol=%s model=%s", protocol, model)
-			require.Contains(t, sysText, "İstanbul ✓ You are a file search specialist, b\u200built on Anthropic's Claude Agent SDK.", "protocol=%s model=%s", protocol, model)
-			require.Contains(t, sysText, "Y\u200bou are Codex, an agent based on GPT-5.", "protocol=%s model=%s", protocol, model)
-			require.Contains(t, sysText, "Y\u200bou are Codex, a coding agent based on GPT-5.4.", "protocol=%s model=%s", protocol, model)
-			require.Contains(t, sysText, "You are H\u200bermes Agent, an intelligent AI assistant created by Nous Research.", "protocol=%s model=%s", protocol, model)
+			require.NotContains(t, sysText, "cc_version=", "protocol=%s model=%s", protocol, model)
+			require.NotContains(t, sysText, "\u200b")
+			require.Contains(t, sysText, "İstanbul ✓ You are a file search specialist, built on the Claude Agent SDK by Anthropic.", "protocol=%s model=%s", protocol, model)
+			require.Contains(t, sysText, "You are Codex, an agent built on GPT-5.", "protocol=%s model=%s", protocol, model)
+			require.Contains(t, sysText, "You are Codex, a coding agent built on GPT-5.4.", "protocol=%s model=%s", protocol, model)
+			require.Contains(t, sysText, "You are Hermes Agent, an intelligent AI assistant built by Nous Research.", "protocol=%s model=%s", protocol, model)
 			if protocol == "chat_completions" {
-				require.Contains(t, sysText, "Hoisted developer: Y\u200bou are Codex, a coding agent based on GPT-5.", "when AGY rewrite is ON, ChatCompletions developer message is hoisted into systemInstruction and rewritten")
+				require.Contains(t, sysText, "Hoisted developer: You are Codex, a coding agent built on GPT-5.", "when AGY rewrite is ON, ChatCompletions developer message is hoisted into systemInstruction and rewritten")
 				require.NotContains(t, userText, "Hoisted developer:")
 			}
 			// Ordinary mentions must stay untouched.
 			require.Contains(t, sysText, "Ordinary mentions: running within the Claude Agent SDK; You are Codex, based on GPT-5; Hermes Agent, built by Nous Research.", "protocol=%s model=%s", protocol, model)
-			// User message content must stay untouched.
-			require.Contains(t, userText, userPrompt, "protocol=%s model=%s", protocol, model)
-			require.NotContains(t, userText, "\u200b", "protocol=%s model=%s user content must never be rewritten", protocol, model)
+			// Only @user sentences change, even inside backticks and fences.
+			require.Contains(t, userText, wantUser, "protocol=%s model=%s", protocol, model)
+			require.NotContains(t, userText, "\u200b", "protocol=%s model=%s", protocol, model)
+			require.Equal(t, wire, (&AntigravityGatewayService{settingService: settingSvc}).applyAntigravitySystemInstructionRewrite(context.Background(), wire))
 			// Raw JSON must not contain double-escaped \\u200b literal text.
 			require.NotContains(t, sysText, `\u200b`, "protocol=%s model=%s", protocol, model)
 		}
@@ -209,8 +212,10 @@ func TestAntigravitySystemInstructionRewriteAcrossAllFourProtocolsAndHotReload(t
 
 	clearedBodies := runFourProtocols("claude-sonnet-4-5")
 	for protocol, wire := range clearedBodies {
-		sysText, _ := extractSystemAndUserText(wire)
-		require.NotContains(t, sysText, "\u200b", "protocol=%s with empty phrase list must not rewrite anything", protocol)
+		sysText, userText := extractSystemAndUserText(wire)
+		require.Contains(t, sysText, "x-anthropic-billing-header: cc_version=2.1.86", "protocol=%s", protocol)
+		require.Contains(t, sysText, "based on GPT-5", "protocol=%s", protocol)
+		require.Contains(t, userText, userPrompt, "protocol=%s", protocol)
 	}
 }
 
@@ -256,7 +261,7 @@ func TestAntigravitySystemInstructionRewriteRequestPathNeverTouchesSlowOrFailing
 	require.NoError(t, settingSvc.LoadAntigravitySystemInstructionRewriteSettings(context.Background()))
 	enabled, phrases = settingSvc.GetAntigravitySystemInstructionRewriteConfig(context.Background())
 	require.True(t, enabled)
-	require.Equal(t, []string{"x-anthropic-billing-header:"}, phrases)
+	require.Equal(t, []string{`x-anthropic-billing-header: => ""`}, phrases)
 
 	// 3. Simulate a database outage during live traffic: request-path reads and AGY forwards
 	// must read only the in-memory atomic snapshot with ZERO repository GetValue calls for the rewrite settings.
@@ -299,7 +304,13 @@ func TestAntigravitySystemInstructionRewriteRequestPathNeverTouchesSlowOrFailing
 		sysParts = append(sysParts, part.Get("text").String())
 		return true
 	})
-	require.Contains(t, joinWithNewline(sysParts), "x\u200b-anthropic-billing-header: cc_version=2.1.86")
+	require.NotContains(t, joinWithNewline(sysParts), "cc_version=2.1.86")
+	for _, part := range sysParts {
+		require.NotEmpty(t, strings.TrimSpace(part))
+	}
+	_, compiled := settingSvc.GetAntigravitySystemInstructionRewriter()
+	require.Same(t, compiled, svc.getClaudeTransformOptions(context.Background()).SystemInstructionRewriter)
+	require.Same(t, compiled, svc.getClaudeTransformOptions(context.Background()).SystemInstructionRewriter)
 }
 
 func jsonQuote(s string) string {

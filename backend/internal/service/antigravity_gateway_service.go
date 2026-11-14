@@ -495,9 +495,9 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	}
 	opts.EnableIdentityPatch = s.settingService.IsIdentityPatchEnabled(ctx)
 	opts.IdentityPatch = s.settingService.GetIdentityPatchPrompt(ctx)
-	rewriteEnabled, rewritePhrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
+	rewriteEnabled, rewriter := s.settingService.GetAntigravitySystemInstructionRewriter()
 	opts.SystemInstructionRewriteEnabled = rewriteEnabled
-	opts.SystemInstructionRewritePhrases = rewritePhrases
+	opts.SystemInstructionRewriter = rewriter
 	opts.WebSearchModel = s.settingService.GetAntigravityWebSearchModel(ctx)
 	return opts
 }
@@ -668,11 +668,8 @@ func (s *AntigravityGatewayService) applyAntigravitySystemInstructionRewrite(ctx
 	if s == nil || s.settingService == nil {
 		return body
 	}
-	enabled, phrases := s.settingService.GetAntigravitySystemInstructionRewriteConfig(ctx)
-	if !enabled || len(phrases) == 0 {
-		return body
-	}
-	return antigravity.RewriteV1InternalSystemInstructionWire(body, true, phrases)
+	enabled, rewriter := s.settingService.GetAntigravitySystemInstructionRewriter()
+	return antigravity.RewriteV1InternalSystemInstructionWire(body, enabled, rewriter)
 }
 
 // unwrapV1InternalResponse 解包 v1internal 响应

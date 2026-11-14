@@ -55,10 +55,9 @@ type TransformOptions struct {
 	// SessionID is the authenticated, explicitly session-scoped gateway identity.
 	// Empty retains the existing metadata/content fallback for direct callers.
 	SessionID string
-	// SystemInstructionRewriteEnabled and SystemInstructionRewritePhrases are
-	// explicitly populated by AntigravityGatewayService when forwarding.
+	// The gateway supplies an immutable, precompiled settings snapshot.
 	SystemInstructionRewriteEnabled bool
-	SystemInstructionRewritePhrases []string
+	SystemInstructionRewriter       *CompiledSystemInstructionRewriter
 	// WebSearchModel overrides the default target model used when built-in
 	// web_search / google_search tools are present on the request. Empty uses
 	// webSearchFallbackModel ("gemini-2.5-flash").
@@ -213,9 +212,11 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		}
 		systemInstruction.Parts = append(systemInstruction.Parts, messageSystemParts...)
 	}
-	if opts.SystemInstructionRewriteEnabled && len(opts.SystemInstructionRewritePhrases) > 0 {
-		RewriteGeminiSystemInstructionContent(systemInstruction, true, opts.SystemInstructionRewritePhrases)
-	}
+	RewriteGeminiSystemInstructionContent(&systemInstruction, opts.SystemInstructionRewriteEnabled, opts.SystemInstructionRewriter)
+	// Derive the fallback session ID from the original user content so rule
+	// edits and equivalent rewordings do not merge or move sessions.
+	sessionID := generateStableSessionID(contents)
+	RewriteGeminiUserContents(contents, opts.SystemInstructionRewriteEnabled, opts.SystemInstructionRewriter)
 
 	// 3. 构建 generationConfig
 	reqForConfig := claudeReq
@@ -238,9 +239,8 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 
 	// 5. 构建内部请求
 	innerRequest := GeminiRequest{
-		Contents: contents,
-		// 总是生成 sessionId，基于用户消息内容
-		SessionID: generateStableSessionID(contents),
+		Contents:  contents,
+		SessionID: sessionID,
 	}
 
 	// toolConfig must always be present: upstream rejects requests without it,
@@ -459,8 +459,8 @@ func buildSystemInstruction(system json.RawMessage, modelName string, opts Trans
 		parts = append(parts, GeminiPart{Text: mcpXMLProtocol})
 	}
 
-	// 如果用户没有提供 Antigravity 身份，添加结束标记
-	if !userHasAntigravityIdentity {
+	// The end marker closes the injected identity patch, not the client prompt.
+	if opts.EnableIdentityPatch && !userHasAntigravityIdentity {
 		parts = append(parts, GeminiPart{Text: "\n--- [SYSTEM_PROMPT_END] ---"})
 	}
 

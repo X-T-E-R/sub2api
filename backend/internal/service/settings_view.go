@@ -240,8 +240,8 @@ type SystemSettings struct {
 	AntigravityUserAgent                          string   // 完整 UA 覆盖；空值使用 Hub profile 和版本设置
 	AntigravityUserAgentVersion                   string   // Antigravity 上游 User-Agent 版本号；空值使用配置/默认值
 	AntigravitySystemInstructionRewriteEnabled    bool     // 是否启用 Antigravity 出站 systemInstruction 短句改写（默认 false）
-	AntigravitySystemInstructionRewritePhrases    []string // Antigravity 出站 systemInstruction 改写短句列表（未配置时默认 5 条，可显式清空为 []）
-	AntigravitySystemInstructionRewritePhrasesSet bool     // 当为 true 时，即使 Phrases 为空切片也按显式配置保存（不回退默认 5 条）
+	AntigravitySystemInstructionRewritePhrases    []string // Antigravity 语义改写规则（未配置时使用内置规则，可显式清空为 []）
+	AntigravitySystemInstructionRewritePhrasesSet bool     // 当为 true 时，即使 Phrases 为空切片也按显式配置保存（不回退内置规则）
 	AntigravityWebSearchModel                     string   // Antigravity 内建 web_search 工具请求的目标模型；空值使用默认 gemini-2.5-flash
 	OpenAICodexUserAgent                   string // OpenAI Codex 上游完整 User-Agent；空值由 Codex 客户端版本号拼出标准 TUI UA
 	OpenAICodexClientVersion               string // 出站声明的 Codex 客户端版本号（管理员覆写）；空值跟随自动同步值
