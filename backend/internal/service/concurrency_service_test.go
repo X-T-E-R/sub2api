@@ -181,6 +181,13 @@ func (c *trackingConcurrencyCache) CleanupStaleProcessSlots(_ context.Context, p
 	return c.cleanupErr
 }
 
+func TestProvideConcurrencyServicePreservesLivePeerSlots(t *testing.T) {
+	cache := &trackingConcurrencyCache{}
+	svc := ProvideConcurrencyService(cache, nil, nil)
+	require.NotNil(t, svc)
+	require.Empty(t, cache.cleanupPrefix, "starting a standby must not prune the serving slot's requests")
+}
+
 func TestCleanupStaleProcessSlots_NilCache(t *testing.T) {
 	svc := &ConcurrencyService{cache: nil}
 	require.NoError(t, svc.CleanupStaleProcessSlots(context.Background()))
