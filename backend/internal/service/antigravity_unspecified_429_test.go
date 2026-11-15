@@ -113,3 +113,27 @@ func TestAntigravityStructured429PreservesLongHeader(t *testing.T) {
 	require.Len(t, repo.modelRateLimitCalls, 1)
 	require.InDelta(t, 180, time.Until(repo.modelRateLimitCalls[0].resetAt).Seconds(), 1)
 }
+
+func TestAntigravitySmartRetryFinal429PreservesExplicitDelay(t *testing.T) {
+	shortBody := `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED","metadata":{"model":"gemini-4-carbon"}},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.1s"}]}}`
+	for _, signal := range []string{"header", "body"} {
+		t.Run(signal, func(t *testing.T) {
+			lastBody := shortBody
+			headers := http.Header{}
+			if signal == "header" {
+				headers.Set("Retry-After", "180")
+			} else {
+				lastBody = strings.Replace(lastBody, `"retryDelay":"0.1s"`, `"retryDelay":"180s"`, 1)
+			}
+			u := &mockSmartRetryUpstream{responses: []*http.Response{{StatusCode: 429, Header: headers, Body: io.NopCloser(strings.NewReader(lastBody))}}, errors: []error{nil}}
+			repo := &stubAntigravityAccountRepo{}
+			svc := &AntigravityGatewayService{accountRepo: repo}
+			account := &Account{ID: 77, Platform: PlatformAntigravity, Type: AccountTypeOAuth}
+			p := antigravityRetryLoopParams{ctx: context.Background(), account: account, accessToken: "test", action: "generateContent", body: []byte(`{"model":"gemini-4-carbon"}`), httpUpstream: u, accountRepo: repo, handleError: svc.handleUpstreamError, requestedModel: "gemini-4-carbon"}
+			result := svc.handleSmartRetry(p, &http.Response{StatusCode: 429, Header: http.Header{}}, []byte(shortBody), "https://retry.invalid", 0, []string{"https://retry.invalid"})
+			require.NotNil(t, result.switchError)
+			require.Len(t, repo.modelRateLimitCalls, 1)
+			require.GreaterOrEqual(t, time.Until(repo.modelRateLimitCalls[0].resetAt).Seconds(), 179.0)
+		})
+	}
+}
