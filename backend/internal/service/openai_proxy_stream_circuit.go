@@ -1,12 +1,23 @@
 package service
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +54,7 @@ type openAIProxyStreamCircuitEntry struct {
 	lastTouched   time.Time
 }
 
-// openAIProxyStreamCircuit is an in-process, proxy-ID keyed circuit. It is
+// openAIProxyStreamCircuit is shared by all platforms and keyed only by proxy ID. It is
 // intentionally bounded and ephemeral: a restart clears observations, while a
 // tripped entry expires automatically after its TTL.
 type openAIProxyStreamCircuit struct {
@@ -52,7 +63,7 @@ type openAIProxyStreamCircuit struct {
 	entries  map[int64]openAIProxyStreamCircuitEntry
 }
 
-func resolveOpenAIProxyStreamCircuitSettings(s *OpenAIGatewayService) openAIProxyStreamCircuitSettings {
+func resolveProxyStreamCircuitSettings(cfg *config.Config) openAIProxyStreamCircuitSettings {
 	settings := openAIProxyStreamCircuitSettings{
 		failureThreshold: defaultOpenAIProxyStreamFailureThreshold,
 		failureWindow:    defaultOpenAIProxyStreamFailureWindow,
@@ -60,19 +71,19 @@ func resolveOpenAIProxyStreamCircuitSettings(s *OpenAIGatewayService) openAIProx
 		collapseInterval: defaultOpenAIProxyStreamFailureCollapse,
 		maxEntries:       defaultOpenAIProxyStreamCircuitMaxEntries,
 	}
-	if s == nil || s.cfg == nil {
+	if cfg == nil {
 		return settings
 	}
-	cfg := s.cfg.Gateway.OpenAIProxyStreamCircuit
-	settings.disabled = cfg.Disabled
-	if cfg.FailureThreshold > 0 {
-		settings.failureThreshold = cfg.FailureThreshold
+	c := cfg.Gateway.OpenAIProxyStreamCircuit
+	settings.disabled = c.Disabled
+	if c.FailureThreshold > 0 {
+		settings.failureThreshold = c.FailureThreshold
 	}
-	if cfg.WindowSeconds > 0 {
-		settings.failureWindow = time.Duration(cfg.WindowSeconds) * time.Second
+	if c.WindowSeconds > 0 {
+		settings.failureWindow = time.Duration(c.WindowSeconds) * time.Second
 	}
-	if cfg.TTLSeconds > 0 {
-		settings.quarantineTTL = time.Duration(cfg.TTLSeconds) * time.Second
+	if c.TTLSeconds > 0 {
+		settings.quarantineTTL = time.Duration(c.TTLSeconds) * time.Second
 	}
 	return settings
 }
@@ -105,7 +116,7 @@ func (s *OpenAIGatewayService) getOpenAIProxyStreamCircuit() *openAIProxyStreamC
 	}
 	s.openaiProxyStreamCircuitOnce.Do(func() {
 		if s.openaiProxyStreamCircuit == nil {
-			s.openaiProxyStreamCircuit = newOpenAIProxyStreamCircuit(resolveOpenAIProxyStreamCircuitSettings(s))
+			s.openaiProxyStreamCircuit = newOpenAIProxyStreamCircuit(resolveProxyStreamCircuitSettings(s.cfg))
 		}
 	})
 	return s.openaiProxyStreamCircuit
@@ -229,7 +240,7 @@ func (c *openAIProxyStreamCircuit) ensureCapacityLocked(now time.Time) {
 }
 
 func openAIProxyStreamCircuitProxyID(account *Account) (int64, bool) {
-	if account == nil || account.Platform != PlatformOpenAI || account.ProxyID == nil || *account.ProxyID <= 0 {
+	if account == nil || account.ProxyID == nil || *account.ProxyID <= 0 {
 		return 0, false
 	}
 	return *account.ProxyID, true
@@ -237,7 +248,7 @@ func openAIProxyStreamCircuitProxyID(account *Account) (int64, bool) {
 
 func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Account, streamErr error, upstreamRequestID string) {
 	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
-	if !ok || streamErr == nil || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+	if !ok || streamErr == nil || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) || errors.Is(streamErr, bufio.ErrTooLong) {
 		return
 	}
 	circuit := s.getOpenAIProxyStreamCircuit()
@@ -309,4 +320,156 @@ func (s *OpenAIGatewayService) logOpenAIProxyStreamQuarantineFailOpen(requestedM
 		zap.Int("blocked_proxies", blockedProxies),
 		zap.String("model", requestedModel),
 	)
+}
+
+// NewProxyStreamCircuit owns one runtime circuit for all gateway instances.
+// The existing gateway.openai_proxy_stream_circuit settings apply to all platforms.
+func NewProxyStreamCircuit(cfg *config.Config) *openAIProxyStreamCircuit {
+	return newOpenAIProxyStreamCircuit(resolveProxyStreamCircuitSettings(cfg))
+}
+
+func (c *openAIProxyStreamCircuit) recordDisconnect(ctx context.Context, account *Account, err error) {
+	id, ok := openAIProxyStreamCircuitProxyID(account)
+	if !ok || err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	tripped, until := c.recordFailure(id, time.Now())
+	if tripped {
+		logger.L().Warn("gateway.proxy_quarantined_transport_disconnect", zap.Int64("proxy_id", id), zap.Int64("account_id", account.ID), zap.String("platform", account.Platform), zap.Time("until", until))
+	}
+}
+
+func (c *openAIProxyStreamCircuit) recordCompleted(ctx context.Context, account *Account) {
+	if ctx.Err() != nil {
+		return
+	}
+	if id, ok := openAIProxyStreamCircuitProxyID(account); ok {
+		c.recordSuccess(id)
+	}
+}
+
+func (c *openAIProxyStreamCircuit) quarantined(ctx context.Context, account *Account) bool {
+	id, ok := openAIProxyStreamCircuitProxyID(account)
+	return ok && !openAIProxyStreamQuarantineBypassed(ctx) && c.isBlocked(id, time.Now())
+}
+
+// observeTransport is called at the actual Do boundary, never for HTTP errors
+// or caller cancellation. Body failures retain their original error identity.
+func (c *openAIProxyStreamCircuit) observeTransport(ctx context.Context, account *Account, resp *http.Response, err error) {
+	if err != nil {
+		if proxyTransportFailure(err) {
+			c.recordDisconnect(ctx, account, err)
+		}
+		return
+	}
+	if resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.Body != nil {
+		observation := &proxyStreamObservation{circuit: c, ctx: ctx, account: account}
+		if resp.Request == nil {
+			resp.Request = &http.Request{}
+		}
+		resp.Request = resp.Request.WithContext(context.WithValue(resp.Request.Context(), proxyStreamObservationKey{}, observation))
+		resp.Body = &proxyObservedBody{ReadCloser: resp.Body, observation: observation, stream: strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")}
+	}
+}
+
+type proxyStreamObservationKey struct{}
+type proxyStreamObservation struct {
+	circuit   *openAIProxyStreamCircuit
+	ctx       context.Context
+	account   *Account
+	failed    atomic.Bool
+	closed    atomic.Bool
+	completed atomic.Bool
+}
+
+type proxyObservedBody struct {
+	io.ReadCloser
+	observation *proxyStreamObservation
+	stream      bool
+}
+
+func (b *proxyObservedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && !b.observation.closed.Load() && !b.observation.completed.Load() && !b.observation.failed.Swap(true) {
+		b.observation.circuit.recordDisconnect(b.observation.ctx, b.observation.account, err)
+	}
+	if err == io.EOF && !b.stream && !b.observation.failed.Load() {
+		b.observation.circuit.recordCompleted(b.observation.ctx, b.observation.account)
+	}
+	return n, err
+}
+
+func (b *proxyObservedBody) Close() error {
+	b.observation.closed.Store(true)
+	return b.ReadCloser.Close()
+}
+
+// Call only at protocol EOF: a semantic provider error is not a disconnect.
+func observeProxyStreamCompletion(resp *http.Response, terminal bool) {
+	if resp == nil || resp.Request == nil {
+		return
+	}
+	observation, _ := resp.Request.Context().Value(proxyStreamObservationKey{}).(*proxyStreamObservation)
+	if observation == nil {
+		return
+	}
+	if terminal {
+		observation.completed.Store(true)
+		observation.circuit.recordCompleted(observation.ctx, observation.account)
+	} else if !observation.completed.Load() && !observation.failed.Swap(true) {
+		observation.circuit.recordDisconnect(observation.ctx, observation.account, io.ErrUnexpectedEOF)
+	}
+}
+
+// proxyGeminiGeneration observes only wire termination, including v1internal
+// envelopes. A provider error frame is a protocol outcome, not a disconnect.
+type proxyGeminiGeneration struct {
+	terminal, providerError bool
+}
+
+func (g *proxyGeminiGeneration) observeLine(line string) {
+	payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
+	if !ok {
+		return
+	}
+	payload = strings.TrimSpace(payload)
+	if payload == "[DONE]" {
+		g.terminal = true
+		return
+	}
+	frame := gjson.Parse(payload)
+	g.providerError = g.providerError || frame.Get("error").Exists()
+	if inner := frame.Get("response"); inner.IsObject() {
+		frame = inner
+	}
+	g.providerError = g.providerError || frame.Get("error").Exists()
+	switch reason := frame.Get("candidates.0.finishReason").String(); reason {
+	case "", "FINISH_REASON_UNSPECIFIED":
+	default:
+		g.terminal = true
+	}
+	if reason := frame.Get("promptFeedback.blockReason").String(); reason != "" && reason != "BLOCK_REASON_UNSPECIFIED" {
+		g.terminal = true
+	}
+	for _, rating := range frame.Get("candidates.0.safetyRatings").Array() {
+		g.terminal = g.terminal || rating.Get("blocked").Bool()
+	}
+}
+
+func (g *proxyGeminiGeneration) complete(resp *http.Response) {
+	if !g.providerError {
+		observeProxyStreamCompletion(resp, g.terminal)
+	}
+}
+
+func proxyTransportFailure(err error) bool {
+	if wrapped, ok := err.(*url.Error); ok {
+		return proxyTransportFailure(wrapped.Err)
+	}
+	var network net.Error
+	var cert *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var invalidCertificate x509.CertificateInvalidError
+	var record tls.RecordHeaderError
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.As(err, &network) || errors.As(err, &cert) || errors.As(err, &unknownAuthority) || errors.As(err, &invalidCertificate) || errors.As(err, &record)
 }

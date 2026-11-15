@@ -163,7 +163,7 @@ func TestOpenAIHTTPLocalCyberBlockPrecedesSecurityAudit(t *testing.T) {
 		nil, nil, nil, nil, nil, nil, cache, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, nil, &service.DeferredService{},
 		nil, nil, nil, nil, nil, settingSvc, nil,
-	)
+		nil)
 	engine := &turnCountingEngine{mode: securityaudit.ModeBlocking}
 	h := &OpenAIGatewayHandler{
 		gatewayService: gatewaySvc, billingCacheService: billingCache,

@@ -12,6 +12,7 @@ import (
 func (s *AntigravityGatewayService) doAntigravityInference(p antigravityRetryLoopParams, req *http.Request, capture *GeminiCaptureAttempt, observe ...func(*http.Response, []byte)) (*http.Response, error, bool) {
 	send := func(request *http.Request) (*http.Response, error) {
 		resp, err := p.httpUpstream.Do(request, p.proxyURL, p.account.ID, p.account.Concurrency)
+		s.proxyStreamCircuit.observeTransport(p.ctx, p.account, resp, err)
 		if capture != nil {
 			if resp != nil {
 				resp = capture.AttachResponse(resp)

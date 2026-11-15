@@ -405,6 +405,8 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 	}
 	session := newAntigravityCompatStreamSession(originalModel, startTime, adapter, writer)
 	session.preContentKeepaliveInterval = interval
+	proxyGeneration := &proxyGeminiGeneration{}
+	proxyResponse := resp
 	var terminalGeneration *antigravityThoughtGeneration
 	if StreamPreheaderConfigured(c) {
 		terminalGeneration = newAntigravityThoughtGeneration()
@@ -471,6 +473,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				return preContentTimeout()
 			}
 			if !open {
+				proxyGeneration.complete(proxyResponse)
 				cont := session.continuation
 				if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !writer.Disconnected() {
 					writeAntigravityCompatStreamError(c, adapter, writer, "Upstream stream ended before a terminal event")
@@ -510,6 +513,8 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 						if terminalGeneration != nil {
 							terminalGeneration = newAntigravityThoughtGeneration()
 						}
+						proxyGeneration = &proxyGeminiGeneration{}
+						proxyResponse = nextResp
 						continue
 					}
 				}
@@ -534,6 +539,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			}
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
+			proxyGeneration.observeLine(event.line)
 			if terminalGeneration != nil {
 				terminalGeneration.observeLine(event.line)
 				if payload, failed := streamPreheaderSSEErrorPayload(event.line); failed {

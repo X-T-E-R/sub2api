@@ -93,7 +93,7 @@ func newIdentityFixture(t *testing.T) *identityFixture {
 	concurrency := service.NewConcurrencyService(f.slots)
 	f.digest = service.NewDigestSessionStore()
 	gw := service.NewGatewayService(nil, &fakeGroupRepo{group: group}, nil, nil, nil, nil, nil, f.cache, cfg,
-		snapshot, concurrency, nil, nil, nil, nil, nil, nil, nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil)
+		snapshot, concurrency, nil, nil, nil, nil, nil, nil, nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil, nil)
 	billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billing.Stop)
 	f.h = &GatewayHandler{gatewayService: gw, billingCacheService: billing,
@@ -274,7 +274,7 @@ func TestGatewayCompatibleIngressSharesAuthenticatedSession(t *testing.T) {
 func TestGatewayNativeGeminiExplicitSessionCannotBeAdoptedByDigest(t *testing.T) {
 	f := newIdentityFixture(t)
 	f.group.Platform, f.a.Platform, f.b.Platform = service.PlatformGemini, service.PlatformGemini, service.PlatformGemini
-	f.h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, nil, nil, f.h.cfg)
+	f.h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, nil, nil, f.h.cfg, nil)
 	const body = `{"contents":[{"role":"user","parts":[{"text":"shared prompt"}]}]}`
 	invoke := func(session string) (int64, identityBindingKey) {
 		c, recorder := f.requestContext("/v1beta/models/client-model:generateContent", []byte(body))
@@ -308,7 +308,7 @@ func TestGatewayNativeGeminiExplicitSessionCannotBeAdoptedByDigest(t *testing.T)
 func TestGatewayNativeGeminiCLISessionRetainsAPIKeyScope(t *testing.T) {
 	f := newIdentityFixture(t)
 	f.group.Platform, f.a.Platform, f.b.Platform = service.PlatformGemini, service.PlatformGemini, service.PlatformGemini
-	f.h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, nil, nil, f.h.cfg)
+	f.h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, nil, nil, f.h.cfg, nil)
 	const body = `{"contents":[{"role":"user","parts":[{"text":"/home/test/.gemini/tmp/f7851b009ed314d1baee62e83115f486160283f4a55a582d89fdac8b9fe3b740"}]}]}`
 	invoke := func() (int64, identityBindingKey) {
 		c, recorder := f.requestContext("/v1beta/models/client-model:generateContent", []byte(body))

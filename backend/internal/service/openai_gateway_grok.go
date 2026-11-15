@@ -589,6 +589,8 @@ func replayHTTPRequest(req *http.Request) (*http.Request, error) {
 
 func (s *OpenAIGatewayService) doGrokUpstreamWithFreshConnectionRetry(req *http.Request, proxyURL string, account *Account, allowFreshRetry bool) (*http.Response, error, bool) {
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+
+	s.getOpenAIProxyStreamCircuit().observeTransport(req.Context(), account, resp, err)
 	if err == nil || !allowFreshRetry || !isGrokFreshConnectionRetryableTransportError(err) {
 		return resp, err, false
 	}
@@ -637,7 +639,9 @@ func (s *OpenAIGatewayService) doGrokStreamUpstreamWithFreshConnectionRetry(c *g
 	)
 	resp, err, terminal = requestStreamPreheader(c, replayed, account,
 		func(request *http.Request) (*http.Response, error) {
-			return freshUpstream.DoFresh(request, proxyURL, account.ID, account.Concurrency)
+			response, err := freshUpstream.DoFresh(request, proxyURL, account.ID, account.Concurrency)
+			s.getOpenAIProxyStreamCircuit().observeTransport(request.Context(), account, response, err)
+			return response, err
 		}, func(response *http.Response, body []byte) []byte {
 			return s.prepareOpenAIStreamUpstreamError(c, account, response, body)
 		})

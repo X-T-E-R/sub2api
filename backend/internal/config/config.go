@@ -674,6 +674,7 @@ type PricingConfig struct {
 }
 
 type ServerConfig struct {
+	ShutdownTimeoutSeconds   int       `mapstructure:"shutdown_timeout_seconds"` // Graceful request drain budget; container stop timeout must exceed it.
 	Host                     string    `mapstructure:"host"`
 	Port                     int       `mapstructure:"port"`
 	Mode                     string    `mapstructure:"mode"`                  // debug/release
@@ -2035,6 +2036,7 @@ func setDefaults() {
 	viper.SetDefault("server.frontend_url", "")
 	viper.SetDefault("server.read_header_timeout", 10) // 10秒读取请求头
 	viper.SetDefault("server.max_header_bytes", 64*1024)
+	viper.SetDefault("server.shutdown_timeout_seconds", 300)
 	viper.SetDefault("server.idle_timeout", 120) // 120秒空闲超时
 	viper.SetDefault("server.max_request_body_size", int64(256*1024*1024))
 	// H2C 默认配置
@@ -2715,6 +2717,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MaxHeaderBytes < 8*1024 || c.Server.MaxHeaderBytes > 1024*1024 {
 		return fmt.Errorf("server.max_header_bytes must be between 8192 and 1048576 bytes")
+	}
+	if c.Server.ShutdownTimeoutSeconds <= 0 {
+		return fmt.Errorf("server.shutdown_timeout_seconds must be positive")
 	}
 	if c.Server.IdleTimeout <= 0 {
 		return fmt.Errorf("server.idle_timeout must be positive")

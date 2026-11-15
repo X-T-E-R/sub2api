@@ -859,10 +859,14 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 							if response.Usage != nil {
 								usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
 							}
+							if event.Type == "response.completed" || event.Type == "response.done" {
+								observeProxyStreamCompletion(resp, true)
+							}
 							return response, usage, acc, nil
 						}
 					}
 				}
+				observeProxyStreamCompletion(resp, false)
 				return nil, usage, acc, nil
 			}
 			resetTimeout()
@@ -877,6 +881,7 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 			}
 
 			if isOpenAICompatDoneSentinelLine(ev.line) {
+				observeProxyStreamCompletion(resp, false)
 				return nil, usage, acc, nil
 			}
 			frame, ok := parser.AddLine(ev.line)
@@ -907,6 +912,9 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 				}
 				if response.Usage != nil {
 					usage = copyOpenAIUsageFromResponsesUsage(response.Usage)
+				}
+				if event.Type == "response.completed" || event.Type == "response.done" {
+					observeProxyStreamCompletion(resp, true)
 				}
 				return response, usage, acc, nil
 			}
@@ -1185,6 +1193,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				c.Writer.Flush()
 			}
 		}
+		if terminalEventType != "response.failed" && terminalEventType != "error" && terminalEventType != "response.canceled" && terminalEventType != "response.cancelled" {
+			observeProxyStreamCompletion(resp, true)
+		}
 		logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, &usage, terminalEventType, clientDisconnected)
 		return resultWithUsage(), nil
 	}
@@ -1199,6 +1210,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 	}
 	missingTerminalErr := func() (*OpenAIForwardResult, error) {
+		observeProxyStreamCompletion(resp, false)
 		result := resultWithUsage()
 		if clientDisconnected {
 			return result, fmt.Errorf("stream usage incomplete: missing terminal event")

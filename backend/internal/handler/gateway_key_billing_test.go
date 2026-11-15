@@ -43,14 +43,14 @@ func newKeyBillingGatewayService(repo service.UserGroupRateRepository) *service.
 	return service.NewGatewayService(
 		nil, nil, nil, nil, nil, nil, repo, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 }
 
 func newKeyBillingOpenAIGatewayService(repo service.UserGroupRateRepository) *service.OpenAIGatewayService {
 	return service.NewOpenAIGatewayService(
 		nil, nil, nil, nil, nil, repo, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 }
 
 func newKeyBillingContext(apiKey *service.APIKey) (*gin.Context, *httptest.ResponseRecorder) {

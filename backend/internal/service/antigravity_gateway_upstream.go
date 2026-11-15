@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // ForwardUpstream 使用 base_url + /v1/messages + 双 header 认证透传上游 Claude 请求
@@ -81,7 +82,9 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	// 发送请求
 	resp, err, terminal := requestStreamPreheader(c, req, account,
 		func(request *http.Request) (*http.Response, error) {
-			return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+			response, err := s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+			s.proxyStreamCircuit.observeTransport(request.Context(), account, response, err)
+			return response, err
 		}, func(response *http.Response, body []byte) []byte {
 			s.handleUpstreamError(ctx, prefix, account, response.StatusCode, response.Header, body, originalModel, 0, "", false)
 			return body
@@ -242,11 +245,15 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 
 	flusher, _ := c.Writer.(http.Flusher)
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity upstream")
+	sawTerminal, sawProviderError := false, false
 
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				if !sawProviderError {
+					observeProxyStreamCompletion(resp, sawTerminal)
+				}
 				return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}
 			}
 			if ev.err != nil {
@@ -262,6 +269,9 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 			line := ev.line
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				upstreamResponseModelObserverFromContext(c).ObserveAnthropic([]byte(strings.TrimSpace(data)))
+				frame := gjson.Parse(data)
+				sawTerminal = sawTerminal || frame.Get("type").String() == "message_stop"
+				sawProviderError = sawProviderError || frame.Get("type").String() == "error" || frame.Get("error").Exists()
 			}
 
 			// 记录首 token 时间

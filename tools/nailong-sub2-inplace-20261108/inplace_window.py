@@ -49,7 +49,7 @@ BACKUP_TIMER = 'sub2-core-backup.timer'
 BACKUP_SOURCE_JSON = '/etc/sub2-core-backup/source.json'
 CORE_BACKUP_PY = '/opt/sub2-core-backup/core-backup/core_backup.py'
 CORE_IDENTITY_PY = '/opt/sub2-core-backup/core-backup/core_identity.py'
-PARENT_CORE_IDENTITY_SHA = '4c2b48d80ce3406af4644d2a07a5686a5c9061325d522523e1fe3149af0043f3'
+PARENT_CORE_IDENTITY_SHA = '94d1b33189f1767c7a0bff4191e62476b1d93c2ef2419a7a2b4ba2b1afac55f5'
 CANDIDATE_CORE_IDENTITY = HERE / 'core_identity_candidate.py'
 NAILONG_INPLACE_ROOT = '/opt/sub2api-nailong/inplace'
 NAILONG_SYSTEMD_UNIT_PATH = '/etc/systemd/system/sub2-nailong-inplace@.service'
@@ -75,7 +75,7 @@ User=root
 UMask=0077
 WorkingDirectory=/opt/sub2api-nailong/inplace
 ExecStart=/usr/bin/python3 -B /opt/sub2api-nailong/inplace/inplace_window.py host-run --go /opt/sub2api-nailong/inplace/windows/%i/go.json
-TimeoutStartSec=600
+TimeoutStartSec=0
 StandardOutput=journal
 StandardError=journal
 """
@@ -722,19 +722,102 @@ class LocalNailongOps:
             raise InplaceError('jwt_or_totp_missing')
         return {'id': d['Id'], 'env': env, 'appdata': mounts[0]}
 
+    def health_telemetry(self):
+        with urllib.request.urlopen('http://127.0.0.1:17861/health', timeout=5) as response:
+            return json.load(response)
+
+    @staticmethod
+    def socket_count(path, port, both_ends=False):
+        count = 0
+        for table in ('tcp', 'tcp6'):
+            for line in (Path(path) / table).read_text().splitlines()[1:]:
+                fields = line.split()
+                local = int(fields[1].rsplit(':', 1)[1], 16)
+                remote = int(fields[2].rsplit(':', 1)[1], 16)
+                # LISTEN/TIME_WAIT/CLOSED carry no active request. Include
+                # half-closed connections and handshakes conservatively.
+                if (local == port or (both_ends and remote == port)) and fields[3] not in ('0A', '06', '07'):
+                    count += 1
+        return count
+
+    def connection_counts(self, app):
+        return {
+            'container_8080': self.socket_count('/proc/%d/net' % app['State']['Pid'], 8080),
+            'host_17861': self.socket_count('/proc/net', 17861, True),
+        }
+
+    def syn_hold(self, app, install):
+        # This is the application's network namespace, not the host firewall.
+        # Existing streams are never filtered. Only install after observing zero
+        # connections; verify zero again under this hold to close the race.
+        for binary in ('iptables', 'ip6tables'):
+            command = ['nsenter', '--target', str(app['State']['Pid']), '--net', binary, '-w', '5',
+                       '-I' if install else '-D', 'INPUT', '-p', 'tcp', '--dport', '8080', '--syn',
+                       '-m', 'comment', '--comment', 'sub2-release-idle', '-j', 'DROP']
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if install and result.returncode != 0:
+                self.syn_hold(app, False)
+                raise InplaceError('admission_hold_install_failed')
+
+    def acquire_release_idle(self, app):
+        try:
+            health = self.health_telemetry()
+        except (OSError, ValueError):
+            # An unhealthy candidate must remain recoverable: use the same
+            # socket-level quiet proof instead of guessing it has no requests.
+            health = {}
+        deadline = time.monotonic() + 180
+        if isinstance(health.get('draining'), bool) and isinstance(health.get('in_flight'), int):
+            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR1')
+            try:
+                while time.monotonic() < deadline:
+                    telemetry = self.health_telemetry()
+                    if telemetry.get('draining') is True and telemetry.get('in_flight') == 0:
+                        return {'mode': 'application_admission_hold', **telemetry}
+                    time.sleep(1)
+                raise InplaceError('inflight_drain_timeout_no_stop')
+            except Exception:
+                self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR2')
+                raise
+        # Bootstrap from the legacy 5s binary: do not signal until BOTH ingress
+        # paths have no active/half-closed TCP connection, under a SYN hold.
+        while time.monotonic() < deadline:
+            counts = self.connection_counts(app)
+            if not any(counts.values()):
+                self.syn_hold(app, True)
+                time.sleep(1)
+                counts = self.connection_counts(app)
+                if not any(counts.values()):
+                    return {'mode': 'legacy_verified_idle_syn_hold', **counts}
+                self.syn_hold(app, False)
+            time.sleep(1)
+        raise InplaceError('legacy_idle_timeout_no_stop')
+
+    def cancel_release_hold(self, app):
+        if not app['State']['Running']:
+            return
+        self.syn_hold(app, False)
+        try:
+            health = self.health_telemetry()
+        except (OSError, ValueError):
+            health = {}
+        if health.get('draining') is True:
+            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR2')
+
     def stop_and_rename_current(self, expected_id, retained_name):
         app = self.inspect_via_api141(APP_NAME)
         if app['Id'] != expected_id:
             raise InplaceError('stop_identity_mismatch')
+        idle = self.acquire_release_idle(app)
         self.api141('POST', '/containers/' + app['Id'] + '/update', {'RestartPolicy': {'Name': 'no'}})
         if app['State']['Running']:
             self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGTERM')
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + 360
         while time.monotonic() < deadline:
             cur = self.inspect_via_api141(app['Id'])
             if not cur['State']['Running']:
                 self.api141('POST', '/containers/' + app['Id'] + '/rename?name=' + retained_name)
-                return {'id': app['Id'], 'retained_name': retained_name, 'exit_code': cur['State']['ExitCode']}
+                return {'id': app['Id'], 'retained_name': retained_name, 'exit_code': cur['State']['ExitCode'], 'drain': idle}
             time.sleep(2)
         raise InplaceError('graceful_stop_timeout')
 
@@ -753,6 +836,9 @@ class LocalNailongOps:
             APP_NETWORK,
             'unless-stopped',
         )
+        body['StopTimeout'] = 360
+        # Explicit process budget and Docker grace must stay ordered.
+        body['Env'] = [v for v in env_list if not v.startswith('SERVER_SHUTDOWN_TIMEOUT_SECONDS=')] + ['SERVER_SHUTDOWN_TIMEOUT_SECONDS=300']
         created = json.loads(self.api141('POST', '/containers/create?name=' + APP_NAME, body))
         cid = created['Id']
         self.api141('POST', '/networks/' + DEPENDENCY_NETWORK + '/connect', {
@@ -793,10 +879,12 @@ class LocalNailongOps:
 
     def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
         cur = self.inspect_via_api141(new_container_id)
+        if cur['State']['Running']:
+            self.acquire_release_idle(cur)
         self.api141('POST', '/containers/' + new_container_id + '/update', {'RestartPolicy': {'Name': 'no'}})
         if cur['State']['Running']:
             self.api141('POST', '/containers/' + new_container_id + '/kill?signal=SIGTERM')
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + 360
         info = cur
         while time.monotonic() < deadline:
             info = self.inspect_via_api141(new_container_id)
@@ -822,7 +910,9 @@ class LocalNailongOps:
         if info['Name'].lstrip('/') != APP_NAME:
             self.api141('POST', '/containers/' + original_id + '/rename?name=' + APP_NAME)
         self.api141('POST', '/containers/' + original_id + '/update', {'RestartPolicy': {'Name': 'unless-stopped'}})
-        if not info['State']['Running']:
+        if info['State']['Running']:
+            self.cancel_release_hold(info)
+        else:
             self.api141('POST', '/containers/' + original_id + '/start')
 
         deadline = time.monotonic() + 180
@@ -877,7 +967,8 @@ class LocalNailongOps:
         return json.loads(proc.stdout)
 
     def ensure_backup_timer_active(self):
-        subprocess.run(['systemctl', 'enable', '--now', BACKUP_TIMER], check=True, timeout=30)
+        if self.backup_timer_state() != 'active':
+            raise InplaceError('backup_timer_inactive')
 
     def backup_timer_state(self):
         proc = subprocess.run(['systemctl', 'is-active', BACKUP_TIMER], stdout=subprocess.PIPE, text=True, timeout=20)
@@ -999,6 +1090,11 @@ runner = base64.b64decode(runner_b64)
 if hashlib.sha256(runner).hexdigest() != runner_sha:
     raise SystemExit("runner_sha_mismatch")
 
+old_runner = root / "inplace_window.py"
+backup_runner = root / "inplace_window.py.before-drain-20261115"
+if old_runner.is_file() and not backup_runner.exists():
+    backup_runner.write_bytes(old_runner.read_bytes())
+    os.chmod(backup_runner, 0o700)
 for name, raw, mode in (
     ("inplace_window.py", runner, 0o700),
     ("core_identity_candidate.py", base64.b64decode(candidate_b64), 0o644),
@@ -1012,13 +1108,26 @@ for name, raw, mode in (
 
 unit_text = base64.b64decode(unit_b64).decode("utf8")
 unit_path = Path("/etc/systemd/system/sub2-nailong-inplace@.service")
-if not unit_path.is_file() or unit_path.read_text(encoding="utf8") != unit_text:
-    unit_path.write_text(unit_text, encoding="utf8", newline="\n")
-    os.chmod(unit_path, 0o644)
-subprocess.run(["systemctl", "daemon-reload"], check=True)
+if not unit_path.is_file():
+    raise SystemExit("existing_systemd_unit_missing")
+current_unit = unit_path.read_text(encoding="utf8")
+if current_unit not in (unit_text, unit_text.replace("TimeoutStartSec=0", "TimeoutStartSec=600")):
+    raise SystemExit("existing_systemd_unit_mismatch")
+unit_backup = root / "sub2-nailong-inplace@.service.before-drain-20261115"
+if current_unit != unit_text:
+    if not unit_backup.exists():
+        unit_backup.write_text(current_unit, encoding="utf8")
+        os.chmod(unit_backup, 0o600)
+    unit_tmp = unit_path.with_suffix(".service.tmp")
+    unit_tmp.write_text(unit_text, encoding="utf8")
+    os.chmod(unit_tmp, 0o644)
+    unit_tmp.replace(unit_path)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
 print(json.dumps({
     "runner_sha256": hashlib.sha256((root / "inplace_window.py").read_bytes()).hexdigest(),
     "unit_present": unit_path.is_file(),
+    "unit_timeout_start_sec": 0,
+    "previous_unit_backup": str(unit_backup),
 }))
 ''' % (
             base64.b64encode(runner_bytes).decode('ascii'),

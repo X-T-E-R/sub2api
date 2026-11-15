@@ -103,6 +103,21 @@ func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	require.Equal(t, 16384, cfg.APIKeyAuth.InvalidAbuse.Capacity)
 }
 
+func TestShutdownTimeoutDefaultAndOverride(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 300, cfg.Server.ShutdownTimeoutSeconds)
+	t.Setenv("SERVER_SHUTDOWN_TIMEOUT_SECONDS", "480")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, 480, cfg.Server.ShutdownTimeoutSeconds)
+	for _, value := range []int{0, -1} {
+		cfg.Server.ShutdownTimeoutSeconds = value
+		require.ErrorContains(t, cfg.Validate(), "server.shutdown_timeout_seconds must be positive")
+	}
+}
+
 func TestNormalizeForwardedClientIPHeaders(t *testing.T) {
 	headers, err := NormalizeForwardedClientIPHeaders([]string{
 		" x-cdn-client-ip ",

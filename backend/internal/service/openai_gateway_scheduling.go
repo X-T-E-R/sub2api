@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -274,7 +275,7 @@ func (s *OpenAIGatewayService) SelectAccountForModel(ctx context.Context, groupI
 
 // SelectAccountForModelWithExclusions selects an account supporting the requested model while excluding specified accounts.
 // SelectAccountForModelWithExclusions 选择支持指定模型的账号，同时排除指定的账号。
-func (s *OpenAIGatewayService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+func (s *OpenAIGatewayService) SelectAccountForModelWithExclusionsOnce(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
 	return s.selectAccountForModelWithExclusions(s.withOpenAIQuotaAutoPauseContext(ctx), groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, 0, "", false)
 }
 
@@ -291,7 +292,7 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 ) (*Account, error) {
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	return s.selectAccountForModelWithExclusions(
+	selected, err := s.selectAccountForModelWithExclusions(
 		ctx,
 		groupID,
 		platform,
@@ -303,6 +304,10 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 		requiredCapability,
 		false,
 	)
+	if errors.Is(err, ErrNoAvailableAccounts) && !openAIProxyStreamQuarantineBypassed(ctx) && s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now()) > 0 && ctx.Err() == nil {
+		return s.selectAccountForModelWithExclusions(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, platform, sessionHash, requestedModel, nil, false, 0, requiredCapability, false)
+	}
+	return selected, err
 }
 
 // NormalizeOpenAICompatiblePlatform 保留 grok 与国产 OpenAI 兼容供应商（kimi/zhipu/
@@ -1781,4 +1786,12 @@ func (s *OpenAIGatewayService) schedulingConfig() config.GatewaySchedulingConfig
 		LoadBatchEnabled:         true,
 		SlotCleanupInterval:      30 * time.Second,
 	}
+}
+
+func (s *OpenAIGatewayService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+	selected, err := s.SelectAccountForModelWithExclusionsOnce(ctx, groupID, sessionHash, requestedModel, excludedIDs)
+	if errors.Is(err, ErrNoAvailableAccounts) && !openAIProxyStreamQuarantineBypassed(ctx) && s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now()) > 0 {
+		return s.SelectAccountForModelWithExclusionsOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, sessionHash, requestedModel, excludedIDs)
+	}
+	return selected, err
 }

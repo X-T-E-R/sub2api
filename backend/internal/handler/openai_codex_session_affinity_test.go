@@ -368,7 +368,7 @@ func newCodexAffinityHandlerFixture(t *testing.T, mode string) *codexAffinityHan
 	gateway := service.ProvideOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil,
 		nil, service.NewBillingService(cfg, nil), nil, billingCache, upstream,
-		&service.DeferredService{}, nil, nil, nil, nil, nil, settingService, nil, pool,
+		&service.DeferredService{}, nil, nil, nil, nil, nil, settingService, nil, pool, nil,
 	)
 	cache := &concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },

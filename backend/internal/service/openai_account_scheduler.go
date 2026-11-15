@@ -2218,10 +2218,6 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	if !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
 		return selection, decision, err
 	}
-	// The circuit only ever quarantines PlatformOpenAI accounts.
-	if NormalizeOpenAICompatiblePlatform(platform) != PlatformOpenAI {
-		return selection, decision, err
-	}
 	blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now())
 	if blocked == 0 {
 		return selection, decision, err

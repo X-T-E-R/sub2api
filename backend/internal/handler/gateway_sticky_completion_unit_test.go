@@ -88,11 +88,11 @@ func TestGatewayStickyCompletionSurvivesCancellationAndFailover(t *testing.T) {
 			snapshot := service.NewSchedulerSnapshotService(&fakeSchedulerCache{accounts: []*service.Account{f.a, f.b}}, nil, nil, nil, nil)
 			f.h.gatewayService = service.NewGatewayService(nil, &fakeGroupRepo{group: f.group}, usage, nil, nil, nil, nil,
 				cache, f.h.cfg, snapshot, service.NewConcurrencyService(f.slots), service.NewBillingService(f.h.cfg, nil), nil,
-				f.h.billingCacheService, nil, nil, service.NewDeferredService(nil, nil, 0), nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil)
+				f.h.billingCacheService, nil, nil, service.NewDeferredService(nil, nil, 0), nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil, nil)
 			upstream := &completionFailoverUpstream{failFirstAccount: failover}
 			settings := service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20}})
 			f.h.antigravityGatewayService = service.NewAntigravityGatewayService(nil, nil, nil,
-				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil)
+				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil)
 			body, err := sjson.SetBytes(task88IdentityBody(t, task88AgentOne, 2), "stream", true)
 			require.NoError(t, err)
 			body, err = sjson.SetBytes(body, "thinking", map[string]any{"type": "enabled", "budget_tokens": 1024})

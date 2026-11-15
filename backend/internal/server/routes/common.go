@@ -3,14 +3,26 @@ package routes
 import (
 	"net/http"
 
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+
 	"github.com/gin-gonic/gin"
 )
 
 // RegisterCommonRoutes 注册通用路由（健康检查、状态等）
-func RegisterCommonRoutes(r *gin.Engine) {
+func RegisterCommonRoutes(r *gin.Engine, drain *middleware.DrainState) {
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		draining, inFlight := drain.Snapshot()
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "draining": draining, "in_flight": inFlight})
+	})
+
+	r.GET("/readyz", func(c *gin.Context) {
+		draining, inFlight := drain.Snapshot()
+		status := http.StatusOK
+		if draining {
+			status = http.StatusServiceUnavailable
+		}
+		c.JSON(status, gin.H{"draining": draining, "in_flight": inFlight})
 	})
 
 	// Claude Code 遥测日志（忽略，直接返回200）

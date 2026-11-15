@@ -45,6 +45,7 @@ const (
 const geminiDummyThoughtSignature = "skip_thought_signature_validator"
 
 type GeminiMessagesCompatService struct {
+	proxyStreamCircuit        *openAIProxyStreamCircuit
 	accountRepo               AccountRepository
 	groupRepo                 GroupRepository
 	cache                     GatewayCache
@@ -79,8 +80,10 @@ func NewGeminiMessagesCompatService(
 	httpUpstream HTTPUpstream,
 	antigravityGatewayService *AntigravityGatewayService,
 	cfg *config.Config,
+	proxyStreamCircuit *openAIProxyStreamCircuit,
 ) *GeminiMessagesCompatService {
 	return &GeminiMessagesCompatService{
+		proxyStreamCircuit:        proxyStreamCircuit,
 		accountRepo:               accountRepo,
 		groupRepo:                 groupRepo,
 		cache:                     cache,
@@ -103,7 +106,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForModel(ctx context.Context,
 	return s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, nil)
 }
 
-func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusionsOnce(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
 	// 1. 确定目标平台和调度模式
 	// Determine target platform and scheduling mode
 	platform, useMixedScheduling, hasForcePlatform, err := s.resolvePlatformAndSchedulingMode(ctx, groupID)
@@ -139,9 +142,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	if selected == nil {
 		if requestedModel != "" {
-			return nil, fmt.Errorf("no available Gemini accounts supporting model: %s", requestedModel)
+			return nil, fmt.Errorf("%w: no available Gemini accounts supporting model: %s", ErrNoAvailableAccounts, requestedModel)
 		}
-		return nil, errors.New("no available Gemini accounts")
+		return nil, fmt.Errorf("%w: no available Gemini accounts", ErrNoAvailableAccounts)
 	}
 
 	// 5. 设置粘性会话绑定
@@ -255,6 +258,9 @@ func (s *GeminiMessagesCompatService) isAccountUsableForRequestWithPrecheck(
 	useMixedScheduling bool,
 	precheckResult map[int64]bool,
 ) bool {
+	if s.proxyStreamCircuit.quarantined(ctx, account) {
+		return false
+	}
 	// 检查模型调度能力
 	// Check model scheduling capability
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
@@ -510,7 +516,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
 	if len(accounts) == 0 {
-		return nil, errors.New("no available Gemini accounts")
+		return nil, fmt.Errorf("%w: no available Gemini accounts", ErrNoAvailableAccounts)
 	}
 
 	rank := func(a *Account) int {
@@ -541,9 +547,19 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 		}
 	}
 
+	hasHealthyProxy := false
+	for i := range accounts {
+		if rank(&accounts[i]) < 999 && !s.proxyStreamCircuit.quarantined(ctx, &accounts[i]) {
+			hasHealthyProxy = true
+			break
+		}
+	}
 	var selected *Account
 	for i := range accounts {
 		acc := &accounts[i]
+		if rank(acc) == 999 || (hasHealthyProxy && s.proxyStreamCircuit.quarantined(ctx, acc)) {
+			continue
+		}
 		if selected == nil {
 			selected = acc
 			continue
@@ -579,7 +595,7 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 	}
 
 	if selected == nil {
-		return nil, errors.New("no available Gemini accounts")
+		return nil, fmt.Errorf("%w: no available Gemini accounts", ErrNoAvailableAccounts)
 	}
 	return s.hydrateSelectedAccount(ctx, selected)
 }
@@ -944,83 +960,29 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode >= 400 {
-			respBody := s.readUpstreamErrorBody(resp)
-			upstreamReqID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader), respBody)
-			// 统一错误策略：自定义错误码 + 临时不可调度
-			if s.rateLimitService != nil {
-				policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
-				switch policy {
-				case ErrorPolicySkipped:
-					if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
-						failoverErr.ResponseHeaders = resp.Header.Clone()
-						return nil, failoverErr
-					}
-					if account.IsCustomErrorCodesEnabled() {
-						return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, upstreamReqID, respBody, func() {
-							_ = s.writeClaudeError(c, http.StatusInternalServerError, "api_error", geminiCustomCodeSkippedClientMessage)
-						})
-					}
-					// 池模式：客户端写出与 ErrorPolicyNone 相同（按上游真实状态码映射），仅跳过账号状态标记。
-					return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
-				case ErrorPolicyMatched, ErrorPolicyTempUnscheduled:
-					if policy == ErrorPolicyMatched {
-						s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-					}
-					upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
-					upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-					upstreamDetail := ""
-					if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
-						maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
-						if maxBytes <= 0 {
-							maxBytes = 2048
-						}
-						upstreamDetail = truncateString(string(respBody), maxBytes)
-					}
-					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-						Platform:           account.Platform,
-						AccountID:          account.ID,
-						AccountName:        account.Name,
-						UpstreamStatusCode: resp.StatusCode,
-						UpstreamRequestID:  upstreamReqID,
-						Kind:               "failover",
-						Message:            upstreamMsg,
-						Detail:             upstreamDetail,
-					})
-					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
+	if resp.StatusCode >= 400 {
+		respBody := s.readUpstreamErrorBody(resp)
+		upstreamReqID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader), respBody)
+		// 统一错误策略：自定义错误码 + 临时不可调度
+		if s.rateLimitService != nil {
+			policy := s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, mappedModel)
+			switch policy {
+			case ErrorPolicySkipped:
+				if failoverErr := s.skippedErrorPolicyFailoverError(c, account, resp.StatusCode, respBody, upstreamReqID); failoverErr != nil {
+					failoverErr.ResponseHeaders = resp.Header.Clone()
+					return nil, failoverErr
 				}
-			}
-
-			// ErrorPolicyNone → 原有逻辑
-			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-			// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
-			if resp.StatusCode == http.StatusBadRequest {
-				msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
-				if isGoogleProjectConfigError(msg400) {
-					upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
-					upstreamDetail := ""
-					if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
-						maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
-						if maxBytes <= 0 {
-							maxBytes = 2048
-						}
-						upstreamDetail = truncateString(string(respBody), maxBytes)
-					}
-					log.Printf("[Gemini] status=400 google_config_error failover=true upstream_message=%q account=%d", upstreamMsg, account.ID)
-					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-						Platform:           account.Platform,
-						AccountID:          account.ID,
-						AccountName:        account.Name,
-						UpstreamStatusCode: resp.StatusCode,
-						UpstreamRequestID:  upstreamReqID,
-						Kind:               "failover",
-						Message:            upstreamMsg,
-						Detail:             upstreamDetail,
+				if account.IsCustomErrorCodesEnabled() {
+					return nil, s.writeGeminiCustomCodeSkippedError(c, account, resp.StatusCode, upstreamReqID, respBody, func() {
+						_ = s.writeClaudeError(c, http.StatusInternalServerError, "api_error", geminiCustomCodeSkippedClientMessage)
 					})
-					return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
 				}
-			}
-			if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
+				// 池模式：客户端写出与 ErrorPolicyNone 相同（按上游真实状态码映射），仅跳过账号状态标记。
+				return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
+			case ErrorPolicyMatched, ErrorPolicyTempUnscheduled:
+				if policy == ErrorPolicyMatched {
+					s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				}
 				upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 				upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 				upstreamDetail := ""
@@ -1043,10 +1005,64 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				})
 				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
 			}
-			return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
 		}
 
-		requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader))
+		// ErrorPolicyNone → 原有逻辑
+		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
+		if resp.StatusCode == http.StatusBadRequest {
+			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+			if isGoogleProjectConfigError(msg400) {
+				upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+				upstreamDetail := ""
+				if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+					maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+					if maxBytes <= 0 {
+						maxBytes = 2048
+					}
+					upstreamDetail = truncateString(string(respBody), maxBytes)
+				}
+				log.Printf("[Gemini] status=400 google_config_error failover=true upstream_message=%q account=%d", upstreamMsg, account.ID)
+				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					Platform:           account.Platform,
+					AccountID:          account.ID,
+					AccountName:        account.Name,
+					UpstreamStatusCode: resp.StatusCode,
+					UpstreamRequestID:  upstreamReqID,
+					Kind:               "failover",
+					Message:            upstreamMsg,
+					Detail:             upstreamDetail,
+				})
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), RetryableOnSameAccount: true}
+			}
+		}
+		if s.shouldFailoverGeminiUpstreamError(resp.StatusCode) {
+			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+			upstreamDetail := ""
+			if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+				maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+				if maxBytes <= 0 {
+					maxBytes = 2048
+				}
+				upstreamDetail = truncateString(string(respBody), maxBytes)
+			}
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  upstreamReqID,
+				Kind:               "failover",
+				Message:            upstreamMsg,
+				Detail:             upstreamDetail,
+			})
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
+		}
+		return nil, s.writeGeminiMappedError(c, account, resp.StatusCode, upstreamReqID, respBody)
+	}
+
+	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, resp.Header.Get(requestIDHeader))
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int
@@ -2161,6 +2177,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 		return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, writeConfiguredStreamFailure(c, status, kind, message)
 	}
 	finishReason := ""
+	proxyGeneration := &proxyGeminiGeneration{}
 	sawToolUse := false
 
 	nextBlockIndex := 0
@@ -2176,6 +2193,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	defer stopKeepalive()
 	for {
 		line, err := reader.ReadString('\n')
+		proxyGeneration.observeLine(line)
 		if err != nil && !errors.Is(err, io.EOF) {
 			if preheaderConfigured {
 				return failIncomplete(http.StatusBadGateway, "upstream_error", "Upstream stream disconnected")
@@ -2371,6 +2389,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 		}
 	}
 
+	proxyGeneration.complete(resp)
 	if preheaderConfigured && finishReason == "" && !sawDone {
 		return failIncomplete(http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
 	}
@@ -2780,6 +2799,7 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 	var firstTokenMs *int
 	preheaderConfigured := StreamPreheaderConfigured(c)
 	sawTerminal, eventOpen := false, false
+	proxyGeneration := &proxyGeminiGeneration{}
 	failIncomplete := func(message string) (*geminiNativeStreamResult, error) {
 		if eventOpen && c.Request.Context().Err() == nil {
 			_, _ = io.WriteString(c.Writer, "\n\n")
@@ -2791,6 +2811,7 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
+			proxyGeneration.observeLine(line)
 			previousEventOpen := eventOpen
 			if preheaderConfigured && strings.TrimSpace(trimmed) == "event: error" {
 				continue // The error payload below owns the entire outgoing event.
@@ -2871,6 +2892,7 @@ func (s *GeminiMessagesCompatService) handleNativeStreamingResponse(c *gin.Conte
 		}
 	}
 
+	proxyGeneration.complete(resp)
 	if StreamPreheaderCommitted(c) && !sawTerminal {
 		return failIncomplete("Upstream stream ended before a terminal event")
 	}
@@ -2931,6 +2953,8 @@ func (s *GeminiMessagesCompatService) ForwardAIStudioGET(ctx context.Context, ac
 	}
 
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+
+	s.proxyStreamCircuit.observeTransport(req.Context(), account, resp, err)
 	if err != nil {
 		return nil, err
 	}
@@ -3868,4 +3892,12 @@ func (s *GeminiMessagesCompatService) extractImageInputSize(body []byte) string 
 	}
 
 	return ""
+}
+
+func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
+	selected, err := s.SelectAccountForModelWithExclusionsOnce(ctx, groupID, sessionHash, requestedModel, excludedIDs)
+	if errors.Is(err, ErrNoAvailableAccounts) && !openAIProxyStreamQuarantineBypassed(ctx) && s.proxyStreamCircuit.activeBlockCount(time.Now()) > 0 && ctx.Err() == nil {
+		return s.SelectAccountForModelWithExclusionsOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, sessionHash, requestedModel, excludedIDs)
+	}
+	return selected, err
 }

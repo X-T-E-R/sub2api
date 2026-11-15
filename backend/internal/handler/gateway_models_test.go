@@ -78,7 +78,7 @@ func newGatewayModelsHandlerForTest(repo service.AccountRepository) *GatewayHand
 			repo,
 			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		),
+			nil),
 	}
 }
 

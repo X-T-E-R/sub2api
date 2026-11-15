@@ -66,12 +66,12 @@ func newTask88IdentityFixture(t *testing.T) (*identityFixture, *task88IdentityUp
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true, ContinueZeroOutput: true}))
 	upstream := &task88IdentityUpstream{}
 	f.h.antigravityGatewayService = service.NewAntigravityGatewayService(nil, nil, nil,
-		service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil)
+		service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil)
 	usage := &thoughtUsageLogRepoStub{}
 	snapshot := service.NewSchedulerSnapshotService(&fakeSchedulerCache{accounts: []*service.Account{f.a, f.b}}, nil, nil, nil, nil)
 	f.h.gatewayService = service.NewGatewayService(nil, &fakeGroupRepo{group: f.group}, usage, nil, nil, nil, nil,
 		f.cache, f.h.cfg, snapshot, service.NewConcurrencyService(f.slots), service.NewBillingService(f.h.cfg, nil), nil,
-		f.h.billingCacheService, nil, nil, service.NewDeferredService(nil, nil, 0), nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil)
+		f.h.billingCacheService, nil, nil, service.NewDeferredService(nil, nil, 0), nil, nil, nil, f.digest, nil, nil, nil, nil, nil, nil, nil, nil)
 	return f, upstream, usage
 }
 

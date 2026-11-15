@@ -371,6 +371,7 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 	// Accumulate the final Anthropic response from streaming events
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	sawMessageStop, sawProviderError := false, false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -399,6 +400,8 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 			continue
 		}
 
+		sawMessageStop = sawMessageStop || event.Type == "message_stop"
+		sawProviderError = sawProviderError || event.Type == "error"
 		// message_start carries the initial response structure
 		if event.Type == "message_start" && event.Message != nil {
 			finalResp = event.Message
@@ -434,6 +437,9 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 		}
 	}
 
+	if scanner.Err() == nil && !sawProviderError {
+		observeProxyStreamCompletion(resp, sawMessageStop)
+	}
 	if err := scanner.Err(); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_responses buffered: read error",
@@ -521,7 +527,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
-	sawMessageStop := false
+	sawMessageStop, sawProviderError := false, false
 
 	source := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -646,11 +652,15 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 				streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})
 		}
 		sawMessageStop = sawMessageStop || event.Type == "message_stop"
+		sawProviderError = sawProviderError || event.Type == "error"
 		if processEvent(&event) {
 			return resultWithUsage(), nil
 		}
 	}
 
+	if scanner.Err() == nil && !sawProviderError {
+		observeProxyStreamCompletion(resp, sawMessageStop)
+	}
 	if StreamPreheaderConfigured(c) && !sawMessageStop {
 		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before message_stop",
 			streamPreheaderResponseMeta{id: state.ResponseID, model: originalModel})

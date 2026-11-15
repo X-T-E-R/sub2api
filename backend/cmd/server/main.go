@@ -179,12 +179,28 @@ func runMainServer() {
 
 	// 等待中断信号
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Linux release carrier: SIGUSR1 holds admission; SIGUSR2 cancels a hold.
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.Signal(10), syscall.Signal(12))
+	for {
+		sig := <-quit
+		if sig == syscall.Signal(12) {
+			app.Drain.EndDrain()
+			log.Println("Release admission hold canceled")
+			continue
+		}
+		app.Drain.BeginDrain()
+		if sig != syscall.Signal(10) {
+			break
+		}
+		_, active := app.Drain.Snapshot()
+		log.Printf("Admission held for release: in_flight=%d", active)
+	}
 
-	log.Println("Shutting down server...")
+	app.Drain.BeginDrain()
+	_, inFlight := app.Drain.Snapshot()
+	log.Printf("Draining server: in_flight=%d timeout=%ds", inFlight, cfg.Server.ShutdownTimeoutSeconds)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeoutSeconds)*time.Second)
 	defer cancel()
 
 	if err := app.Server.Shutdown(ctx); err != nil {

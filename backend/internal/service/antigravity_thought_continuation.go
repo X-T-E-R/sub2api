@@ -677,7 +677,9 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 		return nil, finished, errors.New("antigravity upstream transport unavailable")
 	}
 	send := func(request *http.Request) (*http.Response, error) {
-		return c.service.httpUpstream.Do(request, c.proxyURL, c.account.ID, c.account.Concurrency)
+		resp, err := c.service.httpUpstream.Do(request, c.proxyURL, c.account.ID, c.account.Concurrency)
+		c.service.proxyStreamCircuit.observeTransport(ctx, c.account, resp, err)
+		return resp, err
 	}
 	var resp *http.Response
 	var policy streamPreheaderPolicy

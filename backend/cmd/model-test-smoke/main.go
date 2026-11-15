@@ -474,7 +474,7 @@ func runGeneration(ctx context.Context, _ options, stats *eventStats) error {
 	// 测试服务直接调用 ResolveTLSProfile。
 	gatewayService := service.NewAntigravityGatewayService(
 		accountRepo, repository.NewGatewayCache(rdb), nil, tokenProvider, nil, httpUpstream, settingService, nil,
-	)
+		nil)
 	tlsFPProfileService := service.NewTLSFingerprintProfileService(
 		repository.NewTLSFingerprintProfileRepository(entClient), repository.NewTLSFingerprintProfileCache(rdb),
 	)

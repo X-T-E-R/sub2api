@@ -252,6 +252,7 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	sawMessageStop, sawProviderError := false, false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -274,6 +275,8 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 			continue
 		}
 
+		sawMessageStop = sawMessageStop || event.Type == "message_stop"
+		sawProviderError = sawProviderError || event.Type == "error"
 		// message_start carries the initial response structure and cache usage
 		if event.Type == "message_start" && event.Message != nil {
 			finalResp = event.Message
@@ -307,6 +310,9 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 		}
 	}
 
+	if scanner.Err() == nil && !sawProviderError {
+		observeProxyStreamCompletion(resp, sawMessageStop)
+	}
 	if err := scanner.Err(); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_cc buffered: read error",
@@ -396,7 +402,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
-	sawMessageStop := false
+	sawMessageStop, sawProviderError := false, false
 
 	source := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -488,11 +494,15 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			return resultWithUsage(), finishStreamPreheaderSSEError(c, []byte(payload), resp.Header)
 		}
 		sawMessageStop = sawMessageStop || event.Type == "message_stop"
+		sawProviderError = sawProviderError || event.Type == "error"
 		if processAnthropicEvent(&event) {
 			return resultWithUsage(), nil
 		}
 	}
 
+	if scanner.Err() == nil && !sawProviderError {
+		observeProxyStreamCompletion(resp, sawMessageStop)
+	}
 	if StreamPreheaderConfigured(c) && !sawMessageStop {
 		return resultWithUsage(), writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before message_stop")
 	}

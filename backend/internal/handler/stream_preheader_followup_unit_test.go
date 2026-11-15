@@ -39,7 +39,7 @@ func TestStreamPreheaderFollowupAPIKeyPairBillsOnce(t *testing.T) {
 	billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billing.Stop)
 	gateway := service.NewOpenAIGatewayService(accountRepo, usage, nil, nil, nil, nil, nil, cfg, nil, nil,
-		service.NewBillingService(cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil)
+		service.NewBillingService(cfg, nil), nil, billing, upstream, &service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil, nil)
 	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(nil), billing,
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg), nil, nil, nil, nil, cfg)
 	rec := httptest.NewRecorder()

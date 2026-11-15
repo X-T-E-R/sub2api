@@ -503,6 +503,9 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					// 兜底补刷，确保最后一个未以空行结尾的事件也能及时送达客户端。
 					flusher.Flush()
 				}
+				if !clientDisconnected {
+					observeProxyStreamCompletion(resp, sawTerminalEvent)
+				}
 				if !sawTerminalEvent {
 					if clientDisconnected && streamInterval > 0 {
 						lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
@@ -516,6 +519,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 			if ev.err != nil {
 				if sawTerminalEvent {
+					observeProxyStreamCompletion(resp, true)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}
 				if clientDisconnected {

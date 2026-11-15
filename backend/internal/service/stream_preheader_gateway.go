@@ -9,7 +9,9 @@ import (
 
 func (s *GatewayService) doStreamUpstream(c *gin.Context, req *http.Request, proxy string, account *Account, profile *tlsfingerprint.Profile, model string) (*http.Response, error, bool) {
 	return requestStreamPreheader(c, req, account, func(request *http.Request) (*http.Response, error) {
-		return s.httpUpstream.DoWithTLS(request, proxy, account.ID, account.Concurrency, profile)
+		resp, err := s.httpUpstream.DoWithTLS(request, proxy, account.ID, account.Concurrency, profile)
+		s.proxyStreamCircuit.observeTransport(c.Request.Context(), account, resp, err)
+		return resp, err
 	}, func(resp *http.Response, body []byte) []byte {
 		if s.rateLimitService != nil {
 			s.rateLimitService.HandleUpstreamError(c.Request.Context(), account, resp.StatusCode, resp.Header, body, model)
@@ -20,7 +22,9 @@ func (s *GatewayService) doStreamUpstream(c *gin.Context, req *http.Request, pro
 
 func (s *GeminiMessagesCompatService) doStreamUpstream(c *gin.Context, req *http.Request, proxy string, account *Account, model string) (*http.Response, error, bool) {
 	return requestStreamPreheader(c, req, account, func(request *http.Request) (*http.Response, error) {
-		return s.httpUpstream.Do(request, proxy, account.ID, account.Concurrency)
+		resp, err := s.httpUpstream.Do(request, proxy, account.ID, account.Concurrency)
+		s.proxyStreamCircuit.observeTransport(c.Request.Context(), account, resp, err)
+		return resp, err
 	}, func(resp *http.Response, body []byte) []byte {
 		if s.rateLimitService != nil {
 			s.rateLimitService.HandleUpstreamError(c.Request.Context(), account, resp.StatusCode, resp.Header, body, model)

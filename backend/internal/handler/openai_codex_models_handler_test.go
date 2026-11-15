@@ -152,7 +152,7 @@ func TestCodexModelsAppliesLocalFiltersBeforeClientETag(t *testing.T) {
 		nil, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeSimple}, nil, nil, nil, nil, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 	handler := &OpenAIGatewayHandler{gatewayService: gatewayService}
 	group := &service.Group{
 		ID:       groupID,
@@ -221,7 +221,7 @@ func TestCodexModelsAPIKeyCacheDoesNotLeakGroupFilters(t *testing.T) {
 		nil, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeSimple}, nil, nil, nil, nil, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 	handler := &OpenAIGatewayHandler{gatewayService: gatewayService}
 	groupA := &service.Group{
 		ID:       91,
@@ -328,7 +328,7 @@ func TestCodexModelsUsesConfiguredModelsBeforeUpstreamDiscovery(t *testing.T) {
 		nil, nil, nil, nil, nil, nil, &config.Config{RunMode: config.RunModeSimple}, nil, nil, nil, nil, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 	handler := &OpenAIGatewayHandler{gatewayService: gatewayService}
 
 	recorder := performCodexModelsRequestForGroup(t, handler, &service.Group{
@@ -547,7 +547,7 @@ func newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, accountCount
 		nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil,
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
-	)
+		nil)
 	return &OpenAIGatewayHandler{gatewayService: gatewayService, maxAccountSwitches: maxSwitches}, upstream, groupID
 }
 

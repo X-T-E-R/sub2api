@@ -463,6 +463,9 @@ class InplaceWindowTests(unittest.TestCase):
 
         with mock.patch.dict(sys.modules, {'migration': fake_migration, 'contract': real_contract}):
             local_ops = iw.LocalNailongOps(tools_dir=None)
+            # The separate ReleaseDrainTests exercise admission/connection safety;
+            # this fixture owns Docker 1.41 create/stop/recovery compatibility.
+            local_ops.acquire_release_idle = mock.Mock(return_value={'mode': 'application_admission_hold', 'in_flight': 0})
             probe = local_ops.probe_docker_api141(go['current_container_id'], go['target_image'])
             self.assertTrue(probe['ok'])
             self.assertEqual(probe['api_version'], '1.41')
@@ -487,6 +490,9 @@ class InplaceWindowTests(unittest.TestCase):
                 )
                 self.assertEqual(started['id'], daemon.new_id)
                 self.assertEqual(started['health'], 'healthy')
+                create_body = next(json.loads(payload) for method, path, payload in daemon.requests if path.startswith('/v1.41/containers/create'))
+                self.assertEqual(create_body['StopTimeout'], 360)
+                self.assertIn('SERVER_SHUTDOWN_TIMEOUT_SECONDS=300', create_body['Env'])
 
                 # Now exercise LocalNailongOps stop_and_remove_new_container + restore_and_start_original_container
                 removed = local_ops.stop_and_remove_new_container(daemon.new_id, 'sub2api-gcp-failed-test')

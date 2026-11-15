@@ -288,6 +288,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 	lastDataAt := time.Now()
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity gemini")
+	proxyGeneration := &proxyGeminiGeneration{}
+	proxyResponse := resp
 	var terminalGeneration *antigravityThoughtGeneration
 	if StreamPreheaderConfigured(c) {
 		terminalGeneration = newAntigravityThoughtGeneration()
@@ -366,6 +368,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				proxyGeneration.complete(proxyResponse)
 				if !sawUpstreamObject && c.Request.Context().Err() != nil {
 					return result(true), nil
 				}
@@ -411,6 +414,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 						if terminalGeneration != nil {
 							terminalGeneration = newAntigravityThoughtGeneration()
 						}
+						proxyGeneration = &proxyGeminiGeneration{}
+						proxyResponse = nextResp
 						continue
 					}
 				}
@@ -454,6 +459,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 
 			line := ev.line
 			s.observeAntigravityGeminiSSELine(c, line)
+			proxyGeneration.observeLine(line)
 			if terminalGeneration != nil {
 				terminalGeneration.observeLine(line)
 				if payload, failed := streamPreheaderSSEErrorPayload(line); failed {
@@ -588,6 +594,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	}
 	// Task24: A/B state for this request, nil while both effective switches are off.
 	cont := antigravityThoughtContinuationFromGin(c)
+	proxyGeneration := &proxyGeminiGeneration{}
+	proxyResponse := resp
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
@@ -673,6 +681,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				proxyGeneration.complete(proxyResponse)
 				// Task24 B：第一代只有思考且正常完成时，追加一次生成（原样信封 + 实际
 				// 收到的思考/签名）。追加失败不变成硬错误：下游拿到第一代的合法响应，
 				// 终态由 A 的有效设置决定，第一代 usage 照常入账。
@@ -690,6 +699,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 						}
 						firstLast, firstLastWithParts = last, lastWithParts
 						last, lastWithParts, usage = nil, nil, nil
+						proxyGeneration = &proxyGeminiGeneration{}
+						proxyResponse = nextResp
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner = startScanner(nextResp.Body)
@@ -713,6 +724,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 			}
 
 			line := ev.line
+			proxyGeneration.observeLine(line)
 			s.observeAntigravityGeminiSSELine(c, line)
 			trimmed := strings.TrimRight(line, "\r\n")
 
@@ -1095,6 +1107,8 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	}
 	// Task24: A/B state for this request, nil while both effective switches are off.
 	cont := antigravityThoughtContinuationFromGin(c)
+	proxyGeneration := &proxyGeminiGeneration{}
+	proxyResponse := resp
 	maxLineSize := defaultMaxLineSize
 	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
@@ -1179,6 +1193,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				proxyGeneration.complete(proxyResponse)
 				// Task24 B：第一代只有思考且正常完成时，追加一次生成（复用原样上游信封
 				// 加实际收到的思考/签名）。追加失败不再变成硬错误：下游拿到第一代的
 				// 合法响应，终态由 A 的有效设置决定，usage 累计入账。
@@ -1194,6 +1209,8 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 						}
 						firstLast, firstLastWithParts = last, lastWithParts
 						last, lastWithParts = nil, nil
+						proxyGeneration = &proxyGeminiGeneration{}
+						proxyResponse = nextResp
 						extraResp = nextResp
 						scannerStops = append(scannerStops, stopScanner)
 						events, stopScanner = startScanner(nextResp.Body)
@@ -1217,6 +1234,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 			}
 
 			line := ev.line
+			proxyGeneration.observeLine(line)
 			trimmed := strings.TrimRight(line, "\r\n")
 
 			if !strings.HasPrefix(trimmed, "data:") {
@@ -1532,6 +1550,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	}
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity claude")
+	proxyGeneration := &proxyGeminiGeneration{}
+	proxyResponse := resp
 	var terminalGeneration *antigravityThoughtGeneration
 	if StreamPreheaderConfigured(c) {
 		terminalGeneration = newAntigravityThoughtGeneration()
@@ -1620,6 +1640,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				proxyGeneration.complete(proxyResponse)
 				// Task24 B：上游正常完成、且本轮只有思考时，追加一次生成。请求复用原样
 				// 上游信封并接上实际收到的思考/签名；只追加一次，不重入重试循环，也不
 				// 重开调度/粘性身份/并发槽位。
@@ -1641,6 +1662,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 						if terminalGeneration != nil {
 							terminalGeneration = newAntigravityThoughtGeneration()
 						}
+						proxyGeneration = &proxyGeminiGeneration{}
+						proxyResponse = nextResp
 						continue
 					}
 				}
@@ -1671,6 +1694,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			}
 
 			s.observeAntigravityGeminiSSELine(c, ev.line)
+			proxyGeneration.observeLine(ev.line)
 			if terminalGeneration != nil {
 				terminalGeneration.observeLine(ev.line)
 				if payload, failed := streamPreheaderSSEErrorPayload(ev.line); failed {

@@ -94,7 +94,7 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			upstream := &preheaderHandlerUpstream{status: tc.status, truncated: tc.truncated, empty: tc.empty}
 			antigravity := service.NewAntigravityGatewayService(nil, nil, nil,
 				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream,
-				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil)
+				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil, nil)
 			cache := &countingThoughtConcurrencyCache{fakeConcurrencyCache: &fakeConcurrencyCache{}}
 			concurrency := service.NewConcurrencyService(cache)
 			billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
@@ -103,11 +103,11 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			snapshot := service.NewSchedulerSnapshotService(&fakeSchedulerCache{accounts: []*service.Account{account}}, nil, nil, nil, nil)
 			gateway := service.NewGatewayService(
 				nil, &fakeGroupRepo{group: group}, usage, nil, nil, nil, nil, nil, cfg, snapshot, concurrency, service.NewBillingService(cfg, nil), nil, billing, nil, nil,
-				service.NewDeferredService(nil, nil, 0), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+				service.NewDeferredService(nil, nil, 0), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 			h := &GatewayHandler{gatewayService: gateway, antigravityGatewayService: antigravity, billingCacheService: billing,
 				concurrencyHelper: NewConcurrencyHelper(concurrency, SSEPingFormatClaude, 0), maxAccountSwitches: 1, maxAccountSwitchesGemini: 1, cfg: cfg}
 			if tc.geminiGroup {
-				h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, snapshot, nil, nil, upstream, antigravity, cfg)
+				h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, snapshot, nil, nil, upstream, antigravity, cfg, nil)
 			}
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)

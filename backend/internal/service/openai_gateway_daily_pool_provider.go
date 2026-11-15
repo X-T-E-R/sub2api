@@ -12,11 +12,12 @@ func ProvideOpenAIGatewayService(
 	openAITokenProvider *OpenAITokenProvider, grokTokenProvider *GrokTokenProvider, resolver *ModelPricingResolver,
 	channelService *ChannelService, balanceNotifyService *BalanceNotifyService, settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository, pool *CodexDailySessionPool,
+	proxyStreamCircuit *openAIProxyStreamCircuit,
 ) *OpenAIGatewayService {
 	gateway := NewOpenAIGatewayService(accountRepo, usageLogRepo, usageBillingRepo, userRepo, userSubRepo,
 		userGroupRateRepo, cache, cfg, schedulerSnapshot, concurrencyService, billingService, rateLimitService,
 		billingCacheService, httpUpstream, deferredService, openAITokenProvider, grokTokenProvider, resolver,
-		channelService, balanceNotifyService, settingService, userPlatformQuotaRepo)
+		channelService, balanceNotifyService, settingService, userPlatformQuotaRepo, proxyStreamCircuit)
 	gateway.codexDailySessionPool = pool
 	return gateway
 }

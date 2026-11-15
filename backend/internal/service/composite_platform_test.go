@@ -142,7 +142,7 @@ func TestNewGatewayServiceWiresCompositeModelOwnershipResolver(t *testing.T) {
 		resolver,
 		nil,
 		nil,
-	)
+		nil)
 	require.Same(t, resolver, svc.compositeResolver)
 
 	decision, err := resolver.Resolve(context.Background(), groupID, "reasoning-alias", CompositeRouteEndpointResponses)

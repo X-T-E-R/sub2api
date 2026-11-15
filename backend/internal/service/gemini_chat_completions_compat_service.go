@@ -580,6 +580,7 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 	}
 
 	finishReason := ""
+	proxyGeneration := &proxyGeminiGeneration{}
 	sawToolUse := false
 	nextBlockIndex := 0
 	openBlockIndex := -1
@@ -613,6 +614,7 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 	defer stopReader()
 	for {
 		line, err := reader.ReadString('\n')
+		proxyGeneration.observeLine(line)
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(trimmed, "data:") {
@@ -766,6 +768,7 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 			break
 		}
 	}
+	proxyGeneration.complete(resp)
 	if StreamPreheaderConfigured(c) && finishReason == "" {
 		return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", "Upstream stream ended before a terminal event")
 	}

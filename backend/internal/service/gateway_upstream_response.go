@@ -1072,6 +1072,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		case ev, ok := <-events:
 			if !ok {
 				// 上游完成，返回结果
+				if !clientDisconnected {
+					observeProxyStreamCompletion(resp, sawTerminalEvent)
+				}
 				if !sawTerminalEvent {
 					if StreamPreheaderCommitted(c) && !clientDisconnected {
 						sendErrorEvent("upstream_error", "Upstream stream ended before a terminal event")
@@ -1082,6 +1085,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			if ev.err != nil {
 				if sawTerminalEvent {
+					observeProxyStreamCompletion(resp, true)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}
 				// 检测 context 取消（客户端断开会导致 context 取消，进而影响上游读取）

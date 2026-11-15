@@ -522,6 +522,7 @@ func NewOpenAIGatewayService(
 	balanceNotifyService *BalanceNotifyService,
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	proxyStreamCircuit *openAIProxyStreamCircuit,
 ) *OpenAIGatewayService {
 	// enforceCodexIdentityHeaders 是 HTTP / 透传 / WS / 探针 等出站路径共用的纯函数收口点，
 	// 拿不到配置，故在此发布进程级开关快照。配置取反义，零值即「强制统一出口开启」。
@@ -529,19 +530,20 @@ func NewOpenAIGatewayService(
 		SetCodexIdentityEnforcementEnabled(!cfg.Gateway.DisableCodexIdentityEnforcement)
 	}
 	svc := &OpenAIGatewayService{
-		accountRepo:         accountRepo,
-		usageLogRepo:        usageLogRepo,
-		usageBillingRepo:    usageBillingRepo,
-		userRepo:            userRepo,
-		userSubRepo:         userSubRepo,
-		cache:               cache,
-		cfg:                 cfg,
-		codexDetector:       NewOpenAICodexClientRestrictionDetector(cfg),
-		schedulerSnapshot:   schedulerSnapshot,
-		concurrencyService:  concurrencyService,
-		billingService:      billingService,
-		rateLimitService:    rateLimitService,
-		billingCacheService: billingCacheService,
+		openaiProxyStreamCircuit: proxyStreamCircuit,
+		accountRepo:              accountRepo,
+		usageLogRepo:             usageLogRepo,
+		usageBillingRepo:         usageBillingRepo,
+		userRepo:                 userRepo,
+		userSubRepo:              userSubRepo,
+		cache:                    cache,
+		cfg:                      cfg,
+		codexDetector:            NewOpenAICodexClientRestrictionDetector(cfg),
+		schedulerSnapshot:        schedulerSnapshot,
+		concurrencyService:       concurrencyService,
+		billingService:           billingService,
+		rateLimitService:         rateLimitService,
+		billingCacheService:      billingCacheService,
 		userGroupRateResolver: newUserGroupRateResolver(
 			userGroupRateRepo,
 			nil,

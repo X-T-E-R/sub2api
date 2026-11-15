@@ -121,6 +121,7 @@ func (e *PromptTooLongError) Error() string {
 
 // AntigravityGatewayService 处理 Antigravity 平台的 API 转发
 type AntigravityGatewayService struct {
+	proxyStreamCircuit           *openAIProxyStreamCircuit
 	accountRepo                  AccountRepository
 	tokenProvider                *AntigravityTokenProvider
 	rateLimitService             *RateLimitService
@@ -160,8 +161,10 @@ func NewAntigravityGatewayService(
 	httpUpstream HTTPUpstream,
 	settingService *SettingService,
 	internal500Cache Internal500CounterCache,
+	proxyStreamCircuit *openAIProxyStreamCircuit,
 ) *AntigravityGatewayService {
 	return &AntigravityGatewayService{
+		proxyStreamCircuit:       proxyStreamCircuit,
 		accountRepo:              accountRepo,
 		tokenProvider:            tokenProvider,
 		rateLimitService:         rateLimitService,
