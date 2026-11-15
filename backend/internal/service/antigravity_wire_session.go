@@ -2,7 +2,7 @@ package service
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/binary"
 	"strconv"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
@@ -32,5 +32,9 @@ func antigravityWireSessionID(c *gin.Context, account *Account, request *antigra
 	scope := strconv.FormatInt(key.ID, 10) + ":" + strconv.FormatInt(derefGroupID(key.GroupID), 10) + ":" +
 		strconv.FormatInt(account.ID, 10) + ":" + strconv.Quote(source) + ":" + strconv.Quote(seed)
 	digest := sha256.Sum256([]byte(scope))
-	return "ag-v1:" + hex.EncodeToString(digest[:])
+	n := int64(binary.BigEndian.Uint64(digest[:8])) & 0x7FFFFFFFFFFFFFFF
+	if n == 0 {
+		n = 1
+	}
+	return "-" + strconv.FormatInt(n, 10)
 }

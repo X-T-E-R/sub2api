@@ -92,7 +92,7 @@ func TestGatewayStickyCompletionSurvivesCancellationAndFailover(t *testing.T) {
 			upstream := &completionFailoverUpstream{failFirstAccount: failover}
 			settings := service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20}})
 			f.h.antigravityGatewayService = service.NewAntigravityGatewayService(nil, nil, nil,
-				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil)
+				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil, nil)
 			body, err := sjson.SetBytes(task88IdentityBody(t, task88AgentOne, 2), "stream", true)
 			require.NoError(t, err)
 			body, err = sjson.SetBytes(body, "thinking", map[string]any{"type": "enabled", "budget_tokens": 1024})

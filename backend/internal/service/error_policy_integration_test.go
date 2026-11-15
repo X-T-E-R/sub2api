@@ -327,10 +327,10 @@ func TestRetryLoop_ErrorPolicy_NilRateLimitService(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestRetryLoop_ErrorPolicy_NoPolicy_OriginalBehavior
+// TestRetryLoop_ErrorPolicy_NoPolicy_Bare429RetryBudget
 // ---------------------------------------------------------------------------
 
-func TestRetryLoop_ErrorPolicy_NoPolicy_OriginalBehavior(t *testing.T) {
+func TestRetryLoop_ErrorPolicy_NoPolicy_Bare429RetryBudget(t *testing.T) {
 	saveAndSetBaseURLs(t)
 
 	upstream := &epFixedUpstream{statusCode: 429, body: `{"error":"rate limited"}`}
@@ -362,7 +362,7 @@ func TestRetryLoop_ErrorPolicy_NoPolicy_OriginalBehavior(t *testing.T) {
 	defer func() { _ = result.resp.Body.Close() }()
 
 	require.Equal(t, http.StatusTooManyRequests, result.resp.StatusCode)
-	require.Equal(t, antigravityMaxRetries, upstream.calls, "should exhaust all retries")
+	require.Equal(t, 2, upstream.calls, "bare 429 should exhaust its bounded retry budget")
 	require.Equal(t, 1, handleErrorCount, "handleError should be called once after retries exhausted")
 }
 

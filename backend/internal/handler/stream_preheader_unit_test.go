@@ -94,7 +94,7 @@ func TestStreamPreheaderHandlerMessagesBillsOnlyRealUsage(t *testing.T) {
 			upstream := &preheaderHandlerUpstream{status: tc.status, truncated: tc.truncated, empty: tc.empty}
 			antigravity := service.NewAntigravityGatewayService(nil, nil, nil,
 				service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream,
-				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil, nil)
+				service.NewSettingService(handlerThoughtSettingRepo{}, cfg), nil, nil, nil)
 			cache := &countingThoughtConcurrencyCache{fakeConcurrencyCache: &fakeConcurrencyCache{}}
 			concurrency := service.NewConcurrencyService(cache)
 			billing := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)

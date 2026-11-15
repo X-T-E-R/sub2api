@@ -155,7 +155,7 @@ func TestAntigravityRetryLoop_NoURLFallback_UsesConfiguredBaseURL(t *testing.T) 
 	defer func() { _ = result.resp.Body.Close() }()
 	require.Equal(t, http.StatusTooManyRequests, result.resp.StatusCode)
 	require.True(t, handleErrorCalled)
-	require.Len(t, upstream.calls, antigravityMaxRetries)
+	require.Len(t, upstream.calls, 2, "bare 429 gets one same-origin retry")
 	for _, callURL := range upstream.calls {
 		require.True(t, strings.HasPrefix(callURL, base2), "daily retries must not cross to prod")
 	}

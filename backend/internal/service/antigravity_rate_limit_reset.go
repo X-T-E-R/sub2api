@@ -37,6 +37,23 @@ func antigravityExplicitRetryDelay(headers http.Header, body []byte) (time.Durat
 	return reset.Sub(now), !reset.IsZero()
 }
 
+// Only an unstructured 429 without any upstream delay is content-suspect.
+// Structured quota/rate-limit responses retain the normal full-pool recovery.
+func isAntigravityContentSuspect429(status int, headers http.Header, body []byte) bool {
+	if status != http.StatusTooManyRequests || classifyAntigravity429(body) != antigravity429Unknown {
+		return false
+	}
+	if _, explicit := antigravityExplicitRetryDelay(headers, body); explicit {
+		return false
+	}
+	if strings.TrimSpace(headers.Get("Retry-After")) != "" ||
+		strings.Contains(strings.ToUpper(string(body)), googleRPCReasonRateLimitExceeded) {
+		return false
+	}
+	details := gjson.GetBytes(body, "error.details")
+	return !details.Exists() || details.Type == gjson.Null || details.IsArray() && len(details.Array()) == 0
+}
+
 func (s *AntigravityGatewayService) antigravity429Cooldown(headers http.Header, body []byte) time.Duration {
 	if delay, explicit := antigravityExplicitRetryDelay(headers, body); explicit {
 		return delay

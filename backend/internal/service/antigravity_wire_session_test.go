@@ -45,6 +45,7 @@ func TestAntigravityWireSessionHeaderMultiRound(t *testing.T) {
 	account := wireSessionFixtureAccount()
 	body := []byte(wireSessionImageRequest)
 	first := forwardWireSessionFixture(t, body, "session_id", "image-conversation", key, account)
+	require.Regexp(t, `^-[1-9][0-9]*$`, first.Request.SessionID)
 	for _, header := range clientSessionIDHeaders {
 		next := forwardWireSessionFixture(t, body, header, "image-conversation", key, account)
 		require.Equal(t, first.Request.SessionID, next.Request.SessionID, "explicit image-only session must survive header aliases and repeated conversion")
@@ -214,9 +215,11 @@ func TestAntigravityWireSessionLegacyCallerContract(t *testing.T) {
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 	wire := forwardWireSessionFixture(t, body, "session_id", "header-without-auth", nil, account)
-	require.Equal(t, "legacy-user-id", wire.Request.SessionID, "existing direct callers need no authenticated HTTP scope")
+	require.Regexp(t, `^-[1-9][0-9]*$`, wire.Request.SessionID)
+	require.NotEqual(t, "legacy-user-id", wire.Request.SessionID)
+	fallbackSession := wire.Request.SessionID
 	group := int64(8)
 	key := &APIKey{ID: 11, UserID: 1, GroupID: &group}
 	wire = forwardWireSessionFixture(t, body, "", "", key, account)
-	require.Equal(t, "legacy-user-id", wire.Request.SessionID, "arbitrary user ID alone is not upgraded to a conversation")
+	require.Equal(t, fallbackSession, wire.Request.SessionID, "unscoped metadata uses a stable native-format hash")
 }

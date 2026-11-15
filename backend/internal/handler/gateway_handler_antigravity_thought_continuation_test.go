@@ -164,7 +164,7 @@ func TestGatewayMessagesAntigravityThoughtAppendedFailureBillsFirstGeneration(t 
 		upstream,
 		service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20}}),
 		nil,
-		nil)
+		nil, nil)
 	h := &GatewayHandler{antigravityGatewayService: svc}
 
 	body := []byte(`{"model":"client-alias","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"question"}]}`)

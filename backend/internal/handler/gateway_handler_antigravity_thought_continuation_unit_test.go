@@ -200,7 +200,7 @@ func runGatewayThoughtPartialCase(t *testing.T, tc gatewayThoughtCase) {
 		upstream,
 		service.NewSettingService(handlerThoughtSettingRepo{}, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 1 << 20, AntigravityRetryMissingTerminal: tc.missingReplay}}),
 		nil,
-		nil)
+		nil, nil)
 
 	schedulerCache := &fakeSchedulerCache{accounts: []*service.Account{account}}
 	schedulerSnapshot := service.NewSchedulerSnapshotService(schedulerCache, nil, nil, nil, nil)

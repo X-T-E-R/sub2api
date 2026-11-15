@@ -66,7 +66,7 @@ func newTask88IdentityFixture(t *testing.T) (*identityFixture, *task88IdentityUp
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), service.AntigravityThoughtPolicySettings{SuppressThoughtOnlyStop: true, ContinueZeroOutput: true}))
 	upstream := &task88IdentityUpstream{}
 	f.h.antigravityGatewayService = service.NewAntigravityGatewayService(nil, nil, nil,
-		service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil)
+		service.NewAntigravityTokenProvider(nil, handlerThoughtTokenCache{}, nil), nil, upstream, settings, nil, nil, nil)
 	usage := &thoughtUsageLogRepoStub{}
 	snapshot := service.NewSchedulerSnapshotService(&fakeSchedulerCache{accounts: []*service.Account{f.a, f.b}}, nil, nil, nil, nil)
 	f.h.gatewayService = service.NewGatewayService(nil, &fakeGroupRepo{group: f.group}, usage, nil, nil, nil, nil,
@@ -127,7 +127,7 @@ func TestGatewayTask88AgentSessionParseScheduleForward(t *testing.T) {
 		var wire antigravity.V1InternalRequest
 		require.NoError(t, json.Unmarshal(upstream.bodies[calls], &wire))
 		require.Equal(t, "gemini-4-argon-high", wire.Model)
-		require.True(t, strings.HasPrefix(wire.Request.SessionID, "ag-v1:"))
+		require.Regexp(t, `^-[1-9][0-9]*$`, wire.Request.SessionID)
 		require.NotEqual(t, session, wire.Request.SessionID, "wire identity carries authenticated account scope")
 		require.Len(t, usage.created, calls+1, "handler bills each successful request once")
 		return binding, wire

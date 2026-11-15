@@ -11,7 +11,7 @@ import (
 // the surrounding retry loop and cannot add a request of its own.
 func (s *AntigravityGatewayService) doAntigravityInference(p antigravityRetryLoopParams, req *http.Request, capture *GeminiCaptureAttempt, observe ...func(*http.Response, []byte)) (*http.Response, error, bool) {
 	send := func(request *http.Request) (*http.Response, error) {
-		resp, err := p.httpUpstream.Do(request, p.proxyURL, p.account.ID, p.account.Concurrency)
+		resp, err := p.httpUpstream.DoWithTLS(request, p.proxyURL, p.account.ID, p.account.Concurrency, s.resolveTLSProfile(p.account))
 		s.proxyStreamCircuit.observeTransport(p.ctx, p.account, resp, err)
 		if capture != nil {
 			if resp != nil {

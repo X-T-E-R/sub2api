@@ -651,8 +651,13 @@ urlFallbackLoop:
 					}
 					// smartRetryActionContinue: 继续默认重试逻辑
 
-					// 账户/模型配额限流，重试 3 次（指数退避）- 默认逻辑（非 OAuth 账号或解析失败）
-					if attempt < antigravityMaxRetries {
+					// A bare 429 gets one backoff retry for transient edge recovery.
+					// Explicit quota/rate-limit signals retain the normal retry budget.
+					maxAttempts := antigravityMaxRetries
+					if isAntigravityContentSuspect429(resp.StatusCode, resp.Header, respBody) {
+						maxAttempts = 2
+					}
+					if attempt < maxAttempts {
 						upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(respBody))
 						upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 						appendOpsUpstreamError(p.c, OpsUpstreamErrorEvent{
@@ -666,7 +671,7 @@ urlFallbackLoop:
 							Message:            upstreamMsg,
 							Detail:             getUpstreamDetail(respBody),
 						})
-						logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, antigravityMaxRetries, truncateForLog(respBody, 200))
+						logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d retry=%d/%d body=%s", p.prefix, resp.StatusCode, attempt, maxAttempts, truncateForLog(respBody, 200))
 						if !sleepAntigravityBackoffWithContext(p.ctx, attempt) {
 							logger.LegacyPrintf("service.antigravity_gateway", "%s status=context_canceled_during_backoff", p.prefix)
 							return nil, p.ctx.Err()

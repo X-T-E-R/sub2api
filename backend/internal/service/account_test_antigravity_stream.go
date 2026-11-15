@@ -250,7 +250,7 @@ func (s *AccountTestService) streamAntigravityAccountTest(c *gin.Context, accoun
 		gateway.tokenProvider, gateway.rateLimitService,
 		&accountTestObservedUpstream{HTTPUpstream: gateway.httpUpstream, state: state},
 		gateway.settingService, gateway.internal500Cache,
-		nil)
+		nil, gateway.tlsFPProfileService)
 	forward := c.Copy()
 	writer := &accountTestForwardWriter{ResponseWriter: c.Writer, service: s, admin: c, headers: make(http.Header)}
 	forward.Writer = writer

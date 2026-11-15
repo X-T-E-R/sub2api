@@ -472,12 +472,12 @@ func runGeneration(ctx context.Context, _ options, stats *eventStats) error {
 	// gemini/claude/grok token provider 传 nil —— 本工具只走 Antigravity 账号路径。
 	// settingService 与 tlsFingerprintProfileService 必须是真的：网关直接解引用 cfg，
 	// 测试服务直接调用 ResolveTLSProfile。
-	gatewayService := service.NewAntigravityGatewayService(
-		accountRepo, repository.NewGatewayCache(rdb), nil, tokenProvider, nil, httpUpstream, settingService, nil,
-		nil)
 	tlsFPProfileService := service.NewTLSFingerprintProfileService(
 		repository.NewTLSFingerprintProfileRepository(entClient), repository.NewTLSFingerprintProfileCache(rdb),
 	)
+	gatewayService := service.NewAntigravityGatewayService(
+		accountRepo, repository.NewGatewayCache(rdb), nil, tokenProvider, nil, httpUpstream, settingService, nil,
+		nil, tlsFPProfileService)
 	accountTest := service.NewAccountTestService(accountRepo, nil, nil, nil, gatewayService, httpUpstream, cfg, tlsFPProfileService)
 	accountTest.SetSettingService(settingService) // prompt 留空时由全局 model_test_prompt 生效
 

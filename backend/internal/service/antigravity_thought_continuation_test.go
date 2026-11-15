@@ -45,7 +45,7 @@ func newAntigravityThoughtTestService(t *testing.T, global AntigravityThoughtPol
 	settings := NewSettingService(repo, &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}})
 	require.NoError(t, settings.SetAntigravityThoughtPolicySettings(context.Background(), global))
 	tokenProvider := NewAntigravityTokenProvider(nil, &antigravityCompatTokenCache{token: "fresh-oauth-token"}, nil)
-	return NewAntigravityGatewayService(nil, nil, nil, tokenProvider, nil, upstream, settings, nil, nil)
+	return NewAntigravityGatewayService(nil, nil, nil, tokenProvider, nil, upstream, settings, nil, nil, nil)
 }
 
 func antigravityThoughtStreamResponse(lines ...string) *http.Response {
@@ -306,7 +306,7 @@ func TestAntigravityThoughtContinuationUsesTheIsolatedUpstreamPort(t *testing.T)
 		svc.accountRepo, svc.cache, svc.schedulerSnapshot,
 		svc.tokenProvider, svc.rateLimitService, observed,
 		svc.settingService, svc.internal500Cache,
-		nil)
+		nil, nil)
 	body, c, recorder := newAntigravityThoughtClaudeRequest(true)
 
 	result, err := isolated.Forward(context.Background(), c, antigravityThoughtAccount(nil), body, false)

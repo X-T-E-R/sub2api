@@ -480,9 +480,10 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 		}
 		appendOpsUpstreamError(c, event)
 		return &UpstreamFailoverError{
-			StatusCode:      resp.StatusCode,
-			ResponseBody:    body,
-			ResponseHeaders: resp.Header.Clone(),
+			StatusCode:        resp.StatusCode,
+			ResponseBody:      body,
+			ResponseHeaders:   resp.Header.Clone(),
+			ContentSuspect429: isAntigravityContentSuspect429(resp.StatusCode, resp.Header, body),
 		}
 	}
 	PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", body)

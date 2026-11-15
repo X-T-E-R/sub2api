@@ -93,7 +93,7 @@ func TestAntigravityBare429RetryExhaustionKeepsFailoverAndShortCooldown(t *testi
 	})
 	require.NoError(t, err)
 	defer result.resp.Body.Close()
-	require.Equal(t, antigravityMaxRetries, u.calls)
+	require.Equal(t, 2, u.calls, "bare 429 gets one recovery retry")
 	require.Equal(t, 429, result.resp.StatusCode)
 	body, err := io.ReadAll(result.resp.Body)
 	require.NoError(t, err)

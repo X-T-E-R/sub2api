@@ -389,7 +389,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps, ResponseHeaders: resp.Header.Clone()}
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: unwrappedForOps, ResponseHeaders: resp.Header.Clone(), ContentSuspect429: isAntigravityContentSuspect429(resp.StatusCode, resp.Header, respBody)}
 		}
 		if contentType == "" {
 			contentType = "application/json"

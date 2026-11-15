@@ -123,13 +123,15 @@ func effectiveSameAccountRetryLimit(failoverErr *service.UpstreamFailoverError, 
 
 // FailoverState 跨循环迭代共享的 failover 状态
 type FailoverState struct {
-	SwitchCount           int
-	MaxSwitches           int
-	FailedAccountIDs      map[int64]struct{}
-	SameAccountRetryCount map[int64]int
-	LastFailoverErr       *service.UpstreamFailoverError
-	ForceCacheBilling     bool
-	hasBoundSession       bool
+	SwitchCount                    int
+	MaxSwitches                    int
+	FailedAccountIDs               map[int64]struct{}
+	SameAccountRetryCount          map[int64]int
+	LastFailoverErr                *service.UpstreamFailoverError
+	ForceCacheBilling              bool
+	hasBoundSession                bool
+	contentSuspect429Count         int
+	lastContentSuspect429AccountID int64
 
 	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
 	// 的子集。之所以单独维护：HandleSelectionExhausted 的 503 退避分支会清空
@@ -206,6 +208,19 @@ func (s *FailoverState) HandleFailoverError(
 	s.LastFailoverErr = failoverErr
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
+	}
+
+	if failoverErr.ContentSuspect429 {
+		if s.lastContentSuspect429AccountID != accountID {
+			s.contentSuspect429Count++
+			s.lastContentSuspect429AccountID = accountID
+		}
+		if s.contentSuspect429Count >= 2 {
+			return FailoverExhausted
+		}
+	} else {
+		s.contentSuspect429Count = 0
+		s.lastContentSuspect429AccountID = 0
 	}
 
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。

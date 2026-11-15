@@ -117,8 +117,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: proactively stripped cross-account thought signatures model=%s", account.ID, targetModel)
 			}
 		}
-		transformOpts.SessionID = antigravityWireSessionID(c, account, &claudeReq)
 	}
+	transformOpts.SessionID = antigravityWireSessionID(c, account, &claudeReq)
 
 	// 转换 Claude 请求为 Gemini 格式
 	geminiBody, err := antigravity.TransformClaudeToGeminiWithOptions(&claudeReq, projectID, mappedModel, transformOpts)
@@ -494,7 +494,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
 				})
-				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone()}
+				return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, ResponseHeaders: resp.Header.Clone(), ContentSuspect429: isAntigravityContentSuspect429(resp.StatusCode, resp.Header, respBody)}
 			}
 
 			PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)

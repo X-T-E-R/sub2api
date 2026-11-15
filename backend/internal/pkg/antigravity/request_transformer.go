@@ -27,17 +27,33 @@ func generateStableSessionID(contents []GeminiContent) string {
 	for _, content := range contents {
 		if content.Role == "user" && len(content.Parts) > 0 {
 			if text := content.Parts[0].Text; text != "" {
-				h := sha256.Sum256([]byte(text))
-				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-				return "-" + strconv.FormatInt(n, 10)
+				return sessionIDFromSeed(text)
 			}
 		}
 	}
 	// 回退：生成随机 session ID
 	sessionRandMutex.Lock()
-	n := sessionRand.Int63n(9_000_000_000_000_000_000)
+	n := sessionRand.Int63n(9_000_000_000_000_000_000) + 1
 	sessionRandMutex.Unlock()
 	return "-" + strconv.FormatInt(n, 10)
+}
+
+func sessionIDFromSeed(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	n := int64(binary.BigEndian.Uint64(digest[:8])) & 0x7FFFFFFFFFFFFFFF
+	if n == 0 {
+		n = 1
+	}
+	return "-" + strconv.FormatInt(n, 10)
+}
+
+func metadataSessionID(userID string) string {
+	if len(userID) > 1 && userID[0] == '-' && userID[1] >= '0' && userID[1] <= '9' {
+		if n, err := strconv.ParseUint(userID[1:], 10, 63); err == nil && n > 0 {
+			return userID
+		}
+	}
+	return sessionIDFromSeed(userID)
 }
 
 type TransformOptions struct {
@@ -272,12 +288,11 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		innerRequest.Tools = tools
 	}
 
-	// 如果提供了 metadata.user_id，优先使用
-	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
-		innerRequest.SessionID = claudeReq.Metadata.UserID
-	}
+	// Authenticated gateway identity wins; direct callers never expose raw metadata.
 	if opts.SessionID != "" {
 		innerRequest.SessionID = opts.SessionID
+	} else if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
+		innerRequest.SessionID = metadataSessionID(claudeReq.Metadata.UserID)
 	}
 
 	// 6. 包装为 v1internal 请求

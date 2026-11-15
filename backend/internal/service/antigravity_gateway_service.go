@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -126,6 +127,7 @@ type AntigravityGatewayService struct {
 	tokenProvider                *AntigravityTokenProvider
 	rateLimitService             *RateLimitService
 	httpUpstream                 HTTPUpstream
+	tlsFPProfileService          *TLSFingerprintProfileService
 	settingService               *SettingService
 	cache                        GatewayCache // 用于模型级限流时清除粘性会话绑定
 	schedulerSnapshot            *SchedulerSnapshotService
@@ -162,6 +164,7 @@ func NewAntigravityGatewayService(
 	settingService *SettingService,
 	internal500Cache Internal500CounterCache,
 	proxyStreamCircuit *openAIProxyStreamCircuit,
+	tlsFPProfileService *TLSFingerprintProfileService,
 ) *AntigravityGatewayService {
 	return &AntigravityGatewayService{
 		proxyStreamCircuit:       proxyStreamCircuit,
@@ -169,12 +172,20 @@ func NewAntigravityGatewayService(
 		tokenProvider:            tokenProvider,
 		rateLimitService:         rateLimitService,
 		httpUpstream:             httpUpstream,
+		tlsFPProfileService:      tlsFPProfileService,
 		settingService:           settingService,
 		cache:                    cache,
 		schedulerSnapshot:        schedulerSnapshot,
 		internal500Cache:         internal500Cache,
 		malformedFunctionRetries: newAntigravityMalformedRetryCache(),
 	}
+}
+
+func (s *AntigravityGatewayService) resolveTLSProfile(account *Account) *tlsfingerprint.Profile {
+	if s == nil || s.tlsFPProfileService == nil {
+		return nil
+	}
+	return s.tlsFPProfileService.ResolveTLSProfile(account)
 }
 
 // GetTokenProvider 返回 token provider

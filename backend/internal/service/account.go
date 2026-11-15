@@ -2225,11 +2225,11 @@ func (a *Account) IsAnthropicOAuthOrSetupToken() bool {
 }
 
 // IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装
-// 仅适用于 Anthropic OAuth/SetupToken 类型账号
-// 启用后将模拟 Claude Code (Node.js) 客户端的 TLS 握手特征
+// 适用于 Antigravity 及 Anthropic OAuth/SetupToken 账号。
+// 启用后模拟 Node.js 客户端的 TLS 握手特征。
 func (a *Account) IsTLSFingerprintEnabled() bool {
-	// 仅支持 Anthropic OAuth/SetupToken 账号
-	if !a.IsAnthropicOAuthOrSetupToken() {
+	// Antigravity uses the same Node.js TLS profile as Anthropic OAuth/SetupToken.
+	if !a.IsAnthropicOAuthOrSetupToken() && a.Platform != PlatformAntigravity {
 		return false
 	}
 	if a.Extra == nil {
