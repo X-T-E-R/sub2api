@@ -203,6 +203,17 @@ func postUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *bill
 	// by the caller after recording the usage log.
 }
 
+// Persist correlation independently of OpenAI-only request-observation snapshots.
+// Billing dedup IDs remain separate and retain their existing semantics.
+func applyUsageCorrelationContext(ctx context.Context, log *UsageLog) {
+	if log.ClientRequestID == nil {
+		log.ClientRequestID = optionalTrimmedStringPtr(requestObservationContextString(ctx.Value(ctxkey.ClientRequestID)))
+	}
+	if log.GatewayRequestID == nil {
+		log.GatewayRequestID = optionalTrimmedStringPtr(requestObservationContextString(ctx.Value(ctxkey.RequestID)))
+	}
+}
+
 func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string) string {
 	// Forced durable money-event IDs must win over client/local context IDs so
 	// standalone web_search / async video cannot collapse under a reused client id.
@@ -1267,6 +1278,7 @@ func (s *GatewayService) buildRecordUsageLog(
 		SubscriptionID:           optionalSubscriptionID(subscription),
 		CreatedAt:                time.Now(),
 	}
+	applyUsageCorrelationContext(ctx, usageLog)
 	if switchCount, ok := AccountSwitchCountFromContext(ctx); ok {
 		usageLog.AccountSwitchCount = intPtr(switchCount)
 	}

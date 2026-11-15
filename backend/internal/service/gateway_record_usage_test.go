@@ -766,3 +766,22 @@ func TestGatewayServiceRecordUsage_FastSpeedHonouredKeepsPremium(t *testing.T) {
 	require.NoError(t, err)
 	require.InDelta(t, fastCost.TotalCost, usageRepo.lastLog.TotalCost, 1e-10)
 }
+
+func TestGatewayRecordUsagePersistsInboundClientCorrelation(t *testing.T) {
+	for _, platform := range []string{PlatformAnthropic, PlatformGemini, PlatformAntigravity} {
+		t.Run(platform, func(t *testing.T) {
+			repo := &openAIRecordUsageBestEffortLogRepoStub{}
+			svc := newGatewayRecordUsageServiceForTest(repo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
+			ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "edge-live:client-42")
+			ctx = context.WithValue(ctx, ctxkey.RequestID, "gateway-local-42")
+			err := svc.RecordUsage(ctx, &RecordUsageInput{
+				Result: &ForwardResult{RequestID: "upstream-42", Model: "claude-sonnet-4", Usage: ClaudeUsage{InputTokens: 10, OutputTokens: 6}},
+				APIKey: &APIKey{ID: 501}, User: &User{ID: 601}, Account: &Account{ID: 701, Platform: platform},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, repo.lastLog)
+			require.Equal(t, "edge-live:client-42", *repo.lastLog.ClientRequestID)
+			require.Equal(t, "gateway-local-42", *repo.lastLog.GatewayRequestID)
+		})
+	}
+}
