@@ -48,7 +48,7 @@ func TestCodexDailyPoolPostgresActualGatewayAndRestart(t *testing.T) {
 		cfg := &config.Config{Timezone: "Asia/Shanghai"}
 		pool := service.NewCodexDailySessionPool(repo, cfg)
 		t.Cleanup(pool.Close)
-		return service.ProvideOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, upstream, nil, nil, nil, nil, nil, nil, nil, nil, pool)
+		return service.ProvideOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil, upstream, nil, nil, nil, nil, nil, nil, nil, nil, pool, nil)
 	}
 	gateway := newGateway()
 	forward := func(root, thread string, raw bool) (string, string) {

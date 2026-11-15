@@ -404,6 +404,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 	var firstTokenMs *int
 	clientDisconnected := false
 	sawTerminalEvent := false
+	sawProviderError := false
 	inPartialEvent := false
 	defer func() {
 		if resultErr == nil || sawTerminalEvent || StreamPreheaderFinalized(c) || !StreamPreheaderConfigured(c) || !c.Writer.Written() {
@@ -503,7 +504,7 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 					// 兜底补刷，确保最后一个未以空行结尾的事件也能及时送达客户端。
 					flusher.Flush()
 				}
-				if !clientDisconnected {
+				if !clientDisconnected && !sawProviderError {
 					observeProxyStreamCompletion(resp, sawTerminalEvent)
 				}
 				if !sawTerminalEvent {
@@ -536,11 +537,15 @@ func (s *GatewayService) handleStreamingResponseAnthropicAPIKeyPassthrough(
 			}
 
 			line := ev.line
+			if strings.TrimSpace(line) == "event: error" {
+				sawProviderError = true
+			}
 			if StreamPreheaderConfigured(c) && c.Writer.Written() && strings.TrimSpace(line) == "event: error" {
 				continue
 			}
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				trimmed := strings.TrimSpace(data)
+				sawProviderError = sawProviderError || gjson.Get(trimmed, "type").String() == "error"
 				if StreamPreheaderConfigured(c) && c.Writer.Written() && gjson.Get(trimmed, "error").Exists() {
 					parseSSEUsagePassthrough(data, usage)
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, finishStreamPreheaderSSEError(c, []byte(trimmed), resp.Header)

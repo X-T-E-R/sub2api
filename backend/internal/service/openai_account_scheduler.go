@@ -454,6 +454,11 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if err != nil {
 			return nil, decision, err
 		}
+		// On the fail-open pass, try free capacity before keeping a sticky wait.
+		if selection != nil && selection.WaitPlan != nil && openAIProxyStreamQuarantineBypassed(ctx) {
+			req.PreserveStickyBinding = true
+			selection = nil
+		}
 		if selection != nil && selection.Account != nil {
 			decision.Layer = openAIAccountScheduleLayerSessionSticky
 			decision.StickySessionHit = true
@@ -542,8 +547,8 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
-	if !s.isAccountRequestCompatible(ctx, account, req) {
-		return nil, false, nil
+	if compatible, reason := s.isAccountRequestCompatibleReason(ctx, account, req); !compatible {
+		return nil, reason == "proxy_stream_quarantined", nil
 	}
 	if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
 		clearBinding()
@@ -2212,10 +2217,11 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
-	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
+	waiting := err == nil && selection != nil && selection.WaitPlan != nil
+	if openAIProxyStreamQuarantineBypassed(ctx) || (err == nil && !waiting) {
 		return selection, decision, err
 	}
-	if !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
+	if !waiting && !errors.Is(err, ErrNoAvailableAccounts) && !errors.Is(err, ErrNoAvailableCompactAccounts) {
 		return selection, decision, err
 	}
 	blocked := s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now())
@@ -2223,7 +2229,15 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 		return selection, decision, err
 	}
 	s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
-	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	fallback, fallbackDecision, fallbackErr := s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	if waiting && (fallbackErr != nil || fallback == nil || !fallback.Acquired) {
+		return selection, decision, err
+	}
+	if fallbackErr == nil && fallback != nil && fallback.Acquired && !fallback.ProfitGateActive() {
+		// Capacity probes defer eager writes until a slot is actually acquired.
+		_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, fallback.Account.ID)
+	}
+	return fallback, fallbackDecision, fallbackErr
 }
 
 type openAIGroupPrivacyRequirementContextKey struct{}

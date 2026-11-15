@@ -47,7 +47,7 @@ func TestProxyCircuitAllPlatformsTransportStreamAndSuccess(t *testing.T) {
 			_, err = io.ReadAll(response.Body)
 			require.NoError(t, err)
 			observeProxyStreamCompletion(response, false)
-			require.True(t, circuit.quarantined(ctx, account), "EOF before terminal must trip the bound proxy")
+			require.False(t, circuit.quarantined(ctx, account), "clean protocol EOF must not penalize the proxy")
 			response = &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}
 			circuit.observeTransport(ctx, account, response, nil)
 			_, err = io.ReadAll(response.Body)
@@ -203,7 +203,7 @@ func TestProxyCircuitAntigravityProtocolReaders(t *testing.T) {
 				case "upstream_claude":
 					_ = s.streamUpstreamResponse(c, resp, time.Now())
 				}
-				require.Equal(t, outcome == "truncated", circuit.quarantined(c.Request.Context(), account))
+				require.False(t, circuit.quarantined(c.Request.Context(), account), "protocol truncation and provider errors are not transport failures")
 			})
 		}
 	}
@@ -283,7 +283,7 @@ func TestProxyCircuitOpenAIBufferedTerminalAndGatewayScannerOutcomes(t *testing.
 				s := &GatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: 512}}}
 				_, _ = s.handleCCStreamingFromAnthropic(resp, c, "test", "test", nil, time.Now(), false)
 			}
-			require.Equal(t, strings.HasSuffix(kind, "truncated"), circuit.quarantined(c.Request.Context(), account))
+			require.False(t, circuit.quarantined(c.Request.Context(), account), "protocol truncation and scanner limits are not transport failures")
 		})
 	}
 }
@@ -343,7 +343,7 @@ func TestProxyCircuitConversionReaders(t *testing.T) {
 				case "gateway_responses":
 					_, _ = (&GatewayService{}).handleResponsesBufferedStreamingResponse(resp, c, "test", "test", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 				}
-				require.Equal(t, outcome == "truncated", circuit.quarantined(c.Request.Context(), account))
+				require.False(t, circuit.quarantined(c.Request.Context(), account), "protocol truncation and provider errors are not transport failures")
 			})
 		}
 	}

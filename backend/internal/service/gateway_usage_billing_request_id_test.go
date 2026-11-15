@@ -18,11 +18,11 @@ func TestResolveUsageBillingRequestID_ForcedWebSearchBeatsClientID(t *testing.T)
 	require.Equal(t, "web_search:uuid-1", got)
 }
 
-func TestResolveUsageBillingRequestID_ClientWinsOverPlainUpstream(t *testing.T) {
+func TestResolveUsageBillingRequestID_ClientIsCorrelationOnly(t *testing.T) {
 	t.Parallel()
 	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "client-shared-id")
 	got := resolveUsageBillingRequestID(ctx, "resp_abc")
-	require.Equal(t, "client:client-shared-id", got)
+	require.Equal(t, "resp_abc", got)
 }
 
 func TestIsForcedUsageBillingRequestID(t *testing.T) {

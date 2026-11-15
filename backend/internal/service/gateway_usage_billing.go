@@ -221,7 +221,7 @@ func correlatedUsageBillingRequestID(kind, id string) string {
 	if len(kind)+1+len(id) <= 64 {
 		return kind + ":" + id
 	}
-	// The raw ID remains in client_request_id; the billing identity must also
+	// Raw IDs remain in their correlation columns; the billing identity must also
 	// fit usage_logs.request_id VARCHAR(64), including its namespace prefix.
 	digest := sha256.Sum256([]byte(id))
 	return kind + "-hash:" + base64.RawURLEncoding.EncodeToString(digest[:])
@@ -235,9 +235,11 @@ func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string)
 			return requestID
 		}
 	}
+	// Both client headers can repeat across retries. Ingress supplies an
+	// independent execution ID; internal callers may supply their own RequestID.
 	if ctx != nil {
-		if clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
-			return correlatedUsageBillingRequestID("client", clientRequestID)
+		if attemptID, _ := ctx.Value(ctxkey.GatewayAttemptID).(string); strings.TrimSpace(attemptID) != "" {
+			return correlatedUsageBillingRequestID("local", attemptID)
 		}
 		if requestID, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
 			return correlatedUsageBillingRequestID("local", requestID)
@@ -553,14 +555,14 @@ func detachStreamUpstreamContext(ctx context.Context, stream bool) (context.Cont
 	if !stream {
 		return ctx, func() {}
 	}
-	return context.WithoutCancel(ctx), func() {}
+	return context.WithValue(context.WithoutCancel(ctx), proxyStreamClientContextKey{}, proxyStreamClientContext(ctx)), func() {}
 }
 
 func detachUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		return context.Background(), func() {}
 	}
-	return context.WithoutCancel(ctx), func() {}
+	return context.WithValue(context.WithoutCancel(ctx), proxyStreamClientContextKey{}, proxyStreamClientContext(ctx)), func() {}
 }
 
 // billingDeps 扣费逻辑依赖的服务（由各 gateway service 提供）

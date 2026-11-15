@@ -155,6 +155,21 @@ func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, gr
 	if s == nil || s.cache == nil || accountID <= 0 {
 		return nil
 	}
+	// Fail-open passes probe capacity; only the admitted handler result may bind.
+	if openAIProxyStreamQuarantineBypassed(ctx) {
+		return nil
+	}
+	// Keep the original prompt cache through temporary proxy spillover. All
+	// scheduler and post-slot handler writes pass through this persistence seam.
+	if s.getOpenAIProxyStreamCircuit().activeBlockCount(time.Now()) > 0 {
+		boundID, _ := s.getStickySessionAccountID(ctx, groupID, sessionHash)
+		if boundID > 0 && boundID != accountID {
+			bound, _ := s.getSchedulableAccount(ctx, boundID)
+			if s.isOpenAIProxyStreamQuarantined(context.Background(), bound) {
+				return nil
+			}
+		}
+	}
 	primaryKey := s.openAISessionCacheKey(sessionHash)
 	if primaryKey == "" {
 		return nil

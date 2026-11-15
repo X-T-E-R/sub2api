@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -246,34 +245,8 @@ func openAIProxyStreamCircuitProxyID(account *Account) (int64, bool) {
 	return *account.ProxyID, true
 }
 
-func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Account, streamErr error, upstreamRequestID string) {
-	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
-	if !ok || streamErr == nil || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) || errors.Is(streamErr, bufio.ErrTooLong) {
-		return
-	}
-	circuit := s.getOpenAIProxyStreamCircuit()
-	tripped, until := circuit.recordFailure(proxyID, time.Now())
-	if !tripped {
-		return
-	}
-	logger.L().With(zap.String("component", "service.openai_gateway")).Warn(
-		"openai.proxy_quarantined_stream_disconnect",
-		zap.Int64("proxy_id", proxyID),
-		zap.Int64("account_id", account.ID),
-		zap.Time("until", until),
-		zap.String("upstream_request_id", upstreamRequestID),
-		zap.String("error", sanitizeUpstreamErrorMessage(streamErr.Error())),
-	)
-}
-
-func (s *OpenAIGatewayService) clearOpenAIProxyStreamDisconnect(account *Account) {
-	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
-	if !ok {
-		return
-	}
-	if circuit := s.getOpenAIProxyStreamCircuit(); circuit != nil {
-		circuit.recordSuccess(proxyID)
-	}
+func (s *OpenAIGatewayService) clearOpenAIProxyStreamDisconnect(ctx context.Context, account *Account) {
+	s.getOpenAIProxyStreamCircuit().recordCompleted(ctx, account)
 }
 
 // openAIProxyStreamQuarantineBypassKey marks a selection pass that must ignore
@@ -330,7 +303,7 @@ func NewProxyStreamCircuit(cfg *config.Config) *openAIProxyStreamCircuit {
 
 func (c *openAIProxyStreamCircuit) recordDisconnect(ctx context.Context, account *Account, err error) {
 	id, ok := openAIProxyStreamCircuitProxyID(account)
-	if !ok || err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if !ok || err == nil || proxyStreamClientContext(ctx).Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	tripped, until := c.recordFailure(id, time.Now())
@@ -340,7 +313,7 @@ func (c *openAIProxyStreamCircuit) recordDisconnect(ctx context.Context, account
 }
 
 func (c *openAIProxyStreamCircuit) recordCompleted(ctx context.Context, account *Account) {
-	if ctx.Err() != nil {
+	if proxyStreamClientContext(ctx).Err() != nil {
 		return
 	}
 	if id, ok := openAIProxyStreamCircuitProxyID(account); ok {
@@ -372,6 +345,17 @@ func (c *openAIProxyStreamCircuit) observeTransport(ctx context.Context, account
 	}
 }
 
+// Detached upstream reads may continue for usage accounting after the client
+// leaves. Keep the client signal separate from the transport lifetime.
+type proxyStreamClientContextKey struct{}
+
+func proxyStreamClientContext(ctx context.Context) context.Context {
+	if clientCtx, ok := ctx.Value(proxyStreamClientContextKey{}).(context.Context); ok {
+		return clientCtx
+	}
+	return ctx
+}
+
 type proxyStreamObservationKey struct{}
 type proxyStreamObservation struct {
 	circuit   *openAIProxyStreamCircuit
@@ -390,7 +374,7 @@ type proxyObservedBody struct {
 
 func (b *proxyObservedBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	if err != nil && err != io.EOF && !b.observation.closed.Load() && !b.observation.completed.Load() && !b.observation.failed.Swap(true) {
+	if err != nil && err != io.EOF && proxyTransportFailure(err) && !b.observation.closed.Load() && !b.observation.completed.Load() && !b.observation.failed.Swap(true) {
 		b.observation.circuit.recordDisconnect(b.observation.ctx, b.observation.account, err)
 	}
 	if err == io.EOF && !b.stream && !b.observation.failed.Load() {
@@ -416,9 +400,9 @@ func observeProxyStreamCompletion(resp *http.Response, terminal bool) {
 	if terminal {
 		observation.completed.Store(true)
 		observation.circuit.recordCompleted(observation.ctx, observation.account)
-	} else if !observation.completed.Load() && !observation.failed.Swap(true) {
-		observation.circuit.recordDisconnect(observation.ctx, observation.account, io.ErrUnexpectedEOF)
 	}
+	// A clean EOF without a terminal frame is an upstream protocol truncation,
+	// not evidence that the proxy transport failed.
 }
 
 // proxyGeminiGeneration observes only wire termination, including v1internal
@@ -471,5 +455,6 @@ func proxyTransportFailure(err error) bool {
 	var unknownAuthority x509.UnknownAuthorityError
 	var invalidCertificate x509.CertificateInvalidError
 	var record tls.RecordHeaderError
-	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.As(err, &network) || errors.As(err, &cert) || errors.As(err, &unknownAuthority) || errors.As(err, &invalidCertificate) || errors.As(err, &record)
+	// net/http's HTTP/2 ping timeout aborts streams with this unexported error.
+	return err != nil && (err.Error() == "http2: client connection lost" || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.As(err, &network) || errors.As(err, &cert) || errors.As(err, &unknownAuthority) || errors.As(err, &invalidCertificate) || errors.As(err, &record))
 }

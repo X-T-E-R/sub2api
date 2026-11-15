@@ -25,13 +25,15 @@ func TestUsageCorrelationContextPersistsWithoutObservationSnapshot(t *testing.T)
 
 func TestUsageCorrelation64BytesFitsBillingIdentity(t *testing.T) {
 	id := strings.Repeat("a", 64)
-	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, id)
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "same-client-across-retries")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, id)
 	billingID := resolveUsageBillingRequestID(ctx, "upstream")
 	require.LessOrEqual(t, len(billingID), 64)
 	require.Equal(t, billingID, resolveUsageBillingRequestID(ctx, "another-upstream"))
-	require.NotEqual(t, billingID, correlatedUsageBillingRequestID("client", strings.Repeat("b", 64)))
+	require.NotEqual(t, billingID, correlatedUsageBillingRequestID("local", strings.Repeat("b", 64)))
 	usage := &UsageLog{RequestID: billingID}
 	applyUsageCorrelationContext(ctx, usage)
-	require.Equal(t, id, *usage.ClientRequestID)
-	require.Equal(t, "client:short-id", correlatedUsageBillingRequestID("client", "short-id"))
+	require.Equal(t, "same-client-across-retries", *usage.ClientRequestID)
+	require.Equal(t, id, *usage.GatewayRequestID)
+	require.Equal(t, "local:short-id", correlatedUsageBillingRequestID("local", "short-id"))
 }

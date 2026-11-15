@@ -1703,6 +1703,7 @@ func TestOpenAIStreamingPostOutputDisconnectQuarantinesSharedProxyWithoutSameStr
 			Header: http.Header{"X-Request-Id": []string{"rid-proxy-disconnect"}},
 		}
 
+		svc.getOpenAIProxyStreamCircuit().observeTransport(c.Request.Context(), account, resp, nil)
 		_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "gpt-5.6-sol", "gpt-5.6-sol")
 		require.Error(t, err)
 		var failoverErr *UpstreamFailoverError
@@ -2488,6 +2489,7 @@ func TestOpenAIStreamingPassthroughPostOutputDisconnectQuarantinesSharedProxy(t 
 			Header: http.Header{"X-Request-Id": []string{"rid-passthrough-proxy-disconnect"}},
 		}
 
+		svc.getOpenAIProxyStreamCircuit().observeTransport(c.Request.Context(), account, resp, nil)
 		_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, account, time.Now(), "model", "model")
 		require.Error(t, err)
 		var failoverErr *UpstreamFailoverError

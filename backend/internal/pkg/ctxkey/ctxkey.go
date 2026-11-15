@@ -23,7 +23,11 @@ const (
 	// RequestID 为服务端生成/透传的请求 ID。
 	RequestID Key = "ctx_request_id"
 
-	// ClientRequestID 客户端请求的唯一标识，用于追踪请求全生命周期（用于 Ops 监控与排障）。
+	// GatewayAttemptID is generated at ingress for each HTTP execution, never
+	// copied from a client correlation header. Billing uses it for deduplication.
+	GatewayAttemptID Key = "ctx_gateway_attempt_id"
+
+	// ClientRequestID 跨 hop 与重试的关联标识，用于 Ops 监控与排障，不是计费唯一键。
 	ClientRequestID Key = "ctx_client_request_id"
 
 	// Model 请求模型标识（用于统一请求链路日志字段）。

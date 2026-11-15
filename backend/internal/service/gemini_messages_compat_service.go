@@ -150,7 +150,17 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusionsOnce(ct
 	// 5. 设置粘性会话绑定
 	// Set sticky session binding
 	if sessionHash != "" {
-		_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, selected.ID, geminiStickySessionTTL)
+		preserveBinding := false
+		if s.proxyStreamCircuit.activeBlockCount(time.Now()) > 0 {
+			boundID, _ := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), cacheKey)
+			if boundID > 0 && boundID != selected.ID {
+				bound, _ := s.getSchedulableAccount(ctx, boundID)
+				preserveBinding = s.proxyStreamCircuit.quarantined(context.Background(), bound)
+			}
+		}
+		if !preserveBinding {
+			_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, selected.ID, geminiStickySessionTTL)
+		}
 	}
 
 	return s.hydrateSelectedAccount(ctx, selected)

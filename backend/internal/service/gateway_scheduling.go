@@ -169,9 +169,13 @@ func (s *GatewayService) SelectAccountWithLoadAwarenessOnce(ctx context.Context,
 			localExcluded[k] = v
 		}
 
+		var waitFallback *AccountSelectionResult
 		for {
-			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, localExcluded)
+			account, err := s.SelectAccountForModelWithExclusionsOnce(ctx, groupID, sessionHash, requestedModel, localExcluded)
 			if err != nil {
+				if waitFallback != nil && errors.Is(err, ErrNoAvailableAccounts) {
+					return waitFallback, nil
+				}
 				return nil, err
 			}
 
@@ -194,7 +198,7 @@ func (s *GatewayService) SelectAccountWithLoadAwarenessOnce(ctx context.Context,
 
 			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 				waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-				if waitingCount < cfg.StickySessionMaxWaiting {
+				if waitingCount < cfg.StickySessionMaxWaiting && !openAIProxyStreamQuarantineBypassed(ctx) {
 					return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 						AccountID:      account.ID,
 						MaxConcurrency: account.Concurrency,
@@ -203,12 +207,19 @@ func (s *GatewayService) SelectAccountWithLoadAwarenessOnce(ctx context.Context,
 					})
 				}
 			}
-			return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+			waitResult, waitErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 				AccountID:      account.ID,
 				MaxConcurrency: account.Concurrency,
 				Timeout:        cfg.FallbackWaitTimeout,
 				MaxWaiting:     cfg.FallbackMaxWaiting,
 			})
+			if waitErr != nil || !openAIProxyStreamQuarantineBypassed(ctx) || err != nil {
+				return waitResult, waitErr
+			}
+			if waitFallback == nil {
+				waitFallback = waitResult
+			}
+			localExcluded[account.ID] = struct{}{} // Probe other free slots before waiting.
 		}
 	}
 
@@ -377,7 +388,7 @@ func (s *GatewayService) SelectAccountWithLoadAwarenessOnce(ctx context.Context,
 
 							if stickyCacheMissReason == "" {
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
-								if waitingCount < cfg.StickySessionMaxWaiting {
+								if waitingCount < cfg.StickySessionMaxWaiting && !openAIProxyStreamQuarantineBypassed(ctx) {
 									// 会话数量限制检查（等待计划也需要占用会话配额）
 									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
 										stickyCacheMissReason = "session_limit"
@@ -582,7 +593,7 @@ func (s *GatewayService) SelectAccountWithLoadAwarenessOnce(ctx context.Context,
 					}
 
 					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-					if waitingCount < cfg.StickySessionMaxWaiting {
+					if waitingCount < cfg.StickySessionMaxWaiting && !openAIProxyStreamQuarantineBypassed(ctx) {
 						// 会话数量限制检查（等待计划也需要占用会话配额）
 						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
 							// 会话限制已满，继续到 Layer 2
@@ -2684,8 +2695,16 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 
 func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, metadataUserID string, sub2apiUserID int64) (*AccountSelectionResult, error) {
 	selected, err := s.SelectAccountWithLoadAwarenessOnce(ctx, groupID, sessionHash, requestedModel, excludedIDs, metadataUserID, sub2apiUserID)
-	if errors.Is(err, ErrNoAvailableAccounts) && !openAIProxyStreamQuarantineBypassed(ctx) && s.proxyStreamCircuit.activeBlockCount(time.Now()) > 0 {
-		return s.SelectAccountWithLoadAwarenessOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, sessionHash, requestedModel, excludedIDs, metadataUserID, sub2apiUserID)
+	waiting := err == nil && selected != nil && selected.WaitPlan != nil
+	if (waiting || errors.Is(err, ErrNoAvailableAccounts)) && !openAIProxyStreamQuarantineBypassed(ctx) && s.proxyStreamCircuit.activeBlockCount(time.Now()) > 0 {
+		fallback, fallbackErr := s.SelectAccountWithLoadAwarenessOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, sessionHash, requestedModel, excludedIDs, metadataUserID, sub2apiUserID)
+		if waiting && (fallbackErr != nil || fallback == nil || !fallback.Acquired) {
+			return selected, err
+		}
+		if fallbackErr == nil && fallback != nil && fallback.Acquired && !fallback.ProfitGateActive() {
+			_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, fallback.Account.ID)
+		}
+		return fallback, fallbackErr
 	}
 	return selected, err
 }

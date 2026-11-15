@@ -997,6 +997,9 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 		return nil
 	}
+	if s.isOpenAIProxyStreamQuarantined(ctx, account) {
+		return nil // A temporary proxy spillover must retain the sticky binding.
+	}
 	account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 	if account == nil || !s.openAIAccountMatchesSchedulingGroup(account, groupID) {
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1155,31 +1158,44 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 	}
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
-		account, err := s.selectAccountForModelWithExclusions(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
-		if err != nil {
-			return nil, err
+		localExcluded := cloneExcludedAccountIDs(excludedIDs)
+		if localExcluded == nil {
+			localExcluded = make(map[int64]struct{})
 		}
-		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
-		if err == nil && result != nil && result.Acquired {
-			return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
-		}
-		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
-			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
-			if waitingCount < cfg.StickySessionMaxWaiting {
-				return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-					AccountID:      account.ID,
-					MaxConcurrency: account.Concurrency,
-					Timeout:        cfg.StickySessionWaitTimeout,
-					MaxWaiting:     cfg.StickySessionMaxWaiting,
-				})
+		var waitFallback *AccountSelectionResult
+		for {
+			account, err := s.selectAccountForModelWithExclusions(ctx, groupID, platform, sessionHash, requestedModel, localExcluded, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
+			if err != nil {
+				if waitFallback != nil && errors.Is(err, ErrNoAvailableAccounts) {
+					return waitFallback, nil
+				}
+				return nil, err
 			}
+			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+			if err == nil && result != nil && result.Acquired {
+				return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
+			}
+			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil && !openAIProxyStreamQuarantineBypassed(ctx) {
+				waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
+				if waitingCount < cfg.StickySessionMaxWaiting {
+					return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+						AccountID: account.ID, MaxConcurrency: account.Concurrency,
+						Timeout: cfg.StickySessionWaitTimeout, MaxWaiting: cfg.StickySessionMaxWaiting,
+					})
+				}
+			}
+			waitResult, waitErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+				AccountID: account.ID, MaxConcurrency: account.Concurrency,
+				Timeout: cfg.FallbackWaitTimeout, MaxWaiting: cfg.FallbackMaxWaiting,
+			})
+			if waitErr != nil || !openAIProxyStreamQuarantineBypassed(ctx) || err != nil {
+				return waitResult, waitErr
+			}
+			if waitFallback == nil {
+				waitFallback = waitResult
+			}
+			localExcluded[account.ID] = struct{}{} // Try other free slots before waiting.
 		}
-		return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-			AccountID:      account.ID,
-			MaxConcurrency: account.Concurrency,
-			Timeout:        cfg.FallbackWaitTimeout,
-			MaxWaiting:     cfg.FallbackMaxWaiting,
-		})
 	}
 
 	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
@@ -1213,7 +1229,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if clearSticky {
 					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 				}
-				if !clearSticky && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
+				if !clearSticky && !s.isOpenAIProxyStreamQuarantined(ctx, account) && isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, false, requiredCapability) {
 					account = s.recheckSelectedOpenAIAccountFromDB(ctx, account, groupID, platform, requestedModel, requireCompact, requiredCapability)
 					if account == nil {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1237,7 +1253,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						}
 
 						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
+						if waitingCount < cfg.StickySessionMaxWaiting && !openAIProxyStreamQuarantineBypassed(ctx) {
 							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
 								MaxConcurrency: account.Concurrency,

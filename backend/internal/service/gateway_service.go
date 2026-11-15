@@ -961,6 +961,20 @@ func (s *GatewayService) BindStickySession(ctx context.Context, groupID *int64, 
 	if sessionHash == "" || accountID <= 0 || s.cache == nil {
 		return nil
 	}
+	// A fail-open capacity probe must not persist an unacquired candidate.
+	if openAIProxyStreamQuarantineBypassed(ctx) {
+		return nil
+	}
+	// Quarantine spillover is temporary, including post-slot handler binds.
+	if s.proxyStreamCircuit.activeBlockCount(time.Now()) > 0 {
+		boundID, _ := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+		if boundID > 0 && boundID != accountID {
+			bound, _ := s.getSchedulableAccount(ctx, boundID)
+			if s.proxyStreamCircuit.quarantined(context.Background(), bound) {
+				return nil
+			}
+		}
+	}
 	return s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), sessionHash, accountID, stickySessionTTL)
 }
 

@@ -896,6 +896,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	needModelReplace := originalModel != mappedModel
 	clientDisconnected := false // 客户端断开标志，断开后继续读取上游以获取完整usage
 	sawTerminalEvent := false
+	sawProviderError := false
 	useNoopDeltaKeepalive := c != nil && c.Request != nil && shouldUseClaudeCodeNoopDeltaKeepalive(c.GetHeader("User-Agent"))
 	noopDeltaKeepaliveBlockIndex := -1
 	noopDeltaKeepaliveDeltaType := ""
@@ -920,6 +921,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 		}
 
+		sawProviderError = sawProviderError || eventName == "error" || gjson.Get(dataLine, "type").String() == "error"
 		if StreamPreheaderConfigured(c) && c.Writer.Written() && (eventName == "error" || gjson.Get(dataLine, "error").Exists()) {
 			s.parseSSEUsage(dataLine, usage)
 			return nil, dataLine, nil, finishStreamPreheaderSSEError(c, []byte(dataLine), resp.Header)
@@ -1072,7 +1074,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		case ev, ok := <-events:
 			if !ok {
 				// 上游完成，返回结果
-				if !clientDisconnected {
+				if !clientDisconnected && !sawProviderError {
 					observeProxyStreamCompletion(resp, sawTerminalEvent)
 				}
 				if !sawTerminalEvent {

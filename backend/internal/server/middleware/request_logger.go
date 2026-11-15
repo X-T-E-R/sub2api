@@ -21,19 +21,22 @@ func RequestLogger() gin.HandlerFunc {
 			return
 		}
 
+		attemptID := uuid.NewString()
 		requestID, validRequestID := normalizeCorrelationID(c.GetHeader(requestIDHeader))
 		if !validRequestID {
-			requestID = uuid.NewString()
+			requestID = attemptID
 		}
 		c.Header(requestIDHeader, requestID)
 
 		ctx := context.WithValue(c.Request.Context(), ctxkey.RequestID, requestID)
+		ctx = context.WithValue(ctx, ctxkey.GatewayAttemptID, attemptID)
 		clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string)
 		clientRequestID, _ = normalizeCorrelationID(clientRequestID)
 
 		requestLogger := logger.With(
 			zap.String("component", "http"),
 			zap.String("request_id", requestID),
+			zap.String("gateway_attempt_id", attemptID),
 			zap.String("client_request_id", strings.TrimSpace(clientRequestID)),
 			zap.String("path", c.Request.URL.Path),
 			zap.String("method", c.Request.Method),
