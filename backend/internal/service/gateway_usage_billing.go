@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"log/slog"
 	"strings"
 	"time"
@@ -214,6 +216,17 @@ func applyUsageCorrelationContext(ctx context.Context, log *UsageLog) {
 	}
 }
 
+func correlatedUsageBillingRequestID(kind, id string) string {
+	id = strings.TrimSpace(id)
+	if len(kind)+1+len(id) <= 64 {
+		return kind + ":" + id
+	}
+	// The raw ID remains in client_request_id; the billing identity must also
+	// fit usage_logs.request_id VARCHAR(64), including its namespace prefix.
+	digest := sha256.Sum256([]byte(id))
+	return kind + "-hash:" + base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
 func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string) string {
 	// Forced durable money-event IDs must win over client/local context IDs so
 	// standalone web_search / async video cannot collapse under a reused client id.
@@ -224,10 +237,10 @@ func resolveUsageBillingRequestID(ctx context.Context, upstreamRequestID string)
 	}
 	if ctx != nil {
 		if clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
-			return "client:" + strings.TrimSpace(clientRequestID)
+			return correlatedUsageBillingRequestID("client", clientRequestID)
 		}
 		if requestID, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
-			return "local:" + strings.TrimSpace(requestID)
+			return correlatedUsageBillingRequestID("local", requestID)
 		}
 	}
 	if requestID := strings.TrimSpace(upstreamRequestID); requestID != "" {
@@ -276,10 +289,10 @@ func resolveUsageBillingPayloadFingerprint(ctx context.Context, requestPayloadHa
 	}
 	if ctx != nil {
 		if clientRequestID, _ := ctx.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
-			return "client:" + strings.TrimSpace(clientRequestID)
+			return correlatedUsageBillingRequestID("client", clientRequestID)
 		}
 		if requestID, _ := ctx.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
-			return "local:" + strings.TrimSpace(requestID)
+			return correlatedUsageBillingRequestID("local", requestID)
 		}
 	}
 	return ""
