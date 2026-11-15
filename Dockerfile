@@ -111,6 +111,8 @@ FROM ${ALPINE_IMAGE}
 LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
 LABEL description="Sub2API - AI API Gateway Platform"
 LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
+# Startup preserves live request slots owned by a concurrently serving peer.
+LABEL io.sub2api.peer-safe-startup="true"
 
 # Install runtime dependencies
 RUN apk add --no-cache \

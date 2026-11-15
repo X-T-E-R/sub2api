@@ -60,6 +60,9 @@ func TestDrainKeepsSSEAliveAndLivenessHealthy(t *testing.T) {
 		require.Equal(t, "drain.contract:1", response.Header.Get("X-Client-Request-ID"))
 		if check.path == "/health" {
 			require.JSONEq(t, `{"status":"ok","draining":true,"in_flight":1}`, string(body))
+		} else if check.path != "/readyz" {
+			require.Equal(t, "5", response.Header.Get("Retry-After"))
+			require.JSONEq(t, `{"error":"server_draining"}`, string(body))
 		}
 	}
 	stopped := make(chan error, 1)

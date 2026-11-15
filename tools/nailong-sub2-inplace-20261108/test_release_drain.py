@@ -1,3 +1,8 @@
+"""Silent retirement preserves old ingress/SSE, and never monopolizes rollback."""
+from contextlib import nullcontext
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 import inplace_window as iw
@@ -7,75 +12,70 @@ class ReleaseDrainTests(unittest.TestCase):
     def setUp(self):
         self.ops = object.__new__(iw.LocalNailongOps)
         self.ops.api141 = mock.Mock()
-        self.app = {'Id': 'a' * 64, 'State': {'Pid': 123, 'Running': True}}
+        self.ops.active_request_count = mock.Mock(return_value=0)
+        self.ops.routed_container = mock.Mock(return_value={'id': 'new'})
+        self.ops._inspect_container = mock.Mock(side_effect=[{'running': True, 'started_at': 'epoch', 'port': 17861}, {'running': False, 'started_at': 'epoch', 'port': 17861}])
+        self.patches = [mock.patch.object(iw, 'release_lock', side_effect=nullcontext),
+                        mock.patch.object(iw.slot_routing, 'retiring_worker_pids', return_value=set()),
+                        mock.patch.object(iw.time, 'sleep')]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
-    @mock.patch.object(iw.time, 'sleep')
-    def test_application_hold_waits_for_actual_zero(self, sleep):
-        self.ops.health_telemetry = mock.Mock(side_effect=[
-            {'status': 'ok', 'draining': False, 'in_flight': 5},
-            {'draining': True, 'in_flight': 3},
-            {'draining': True, 'in_flight': 0},
-        ])
-        self.ops.concurrency_snapshot = mock.Mock()
-        result = self.ops.acquire_release_idle(self.app)
-        self.assertEqual(result['mode'], 'application_admission_hold')
-        self.assertEqual(result['in_flight'], 0)
-        self.assertEqual(self.ops.api141.call_args.args[1], '/containers/' + self.app['Id'] + '/kill?signal=SIGUSR1')
-        self.assertEqual(self.ops.api141.call_count, 1)
-        self.ops.concurrency_snapshot.assert_not_called()
+    def test_waits_for_retiring_workers_before_sigterm_no_hold_or_disconnect(self):
+        order = []
+        self.ops.api141.side_effect = lambda *a: order.append(a[1])
+        def workers():
+            order.append('workers')
+            return {42} if order.count('workers') == 1 else set()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'worker_pids', side_effect=workers):
+            self.ops.drain_retired_slot('old', [42], tmp, 'epoch')
+        self.assertEqual(order[:2], ['workers', 'workers'])
+        self.assertEqual(order[-1], '/containers/old/kill?signal=SIGTERM')
+        self.assertFalse(any('SIGUSR' in item or 'disconnect' in item or 'SIGKILL' in item for item in order))
 
-    @mock.patch.object(iw.time, 'sleep')
-    def test_legacy_uses_active_slots_not_keepalive_connections(self, sleep):
-        self.ops.health_telemetry = mock.Mock(return_value={'status': 'ok'})
-        self.ops.concurrency_snapshot = mock.Mock(side_effect=[
-            {'account_slots': 2, 'user_slots': 2, 'user_waiting': 1},
-            {'account_slots': 0, 'user_slots': 0, 'user_waiting': 0},
-        ])
-        result = self.ops.acquire_release_idle(self.app)
-        self.assertEqual(result['mode'], 'legacy_zero_concurrency_slots')
-        self.assertEqual(len(result['samples']), 2)
+    def test_newer_compensating_generation_is_also_waited(self):
+        self.ops._inspect_container.side_effect = [{'running': True, 'started_at': 'epoch', 'port': 17861}]*2 + [{'running': False, 'started_at': 'epoch', 'port': 17861}]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'worker_pids', side_effect=[{202}, set()]) as workers, mock.patch.object(iw.slot_routing, 'retiring_worker_pids', side_effect=[{202}, set()]):
+            self.ops.drain_retired_slot('old', [], tmp, 'epoch')
+        self.assertEqual(workers.call_count, 2)
+        self.assertTrue(self.ops.api141.call_args.args[1].endswith('SIGTERM'))
+
+    def test_direct_pre_migration_request_finishes_before_term(self):
+        self.ops.active_request_count.side_effect = [1, 0]
+        self.ops._inspect_container.side_effect = [{'running': True, 'started_at': 'epoch', 'port': 17861}]*2 + [{'running': False, 'started_at': 'epoch', 'port': 17861}]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'worker_pids', return_value=set()):
+            self.ops.drain_retired_slot('old', [], tmp, 'epoch')
+        self.assertEqual(self.ops.active_request_count.call_count, 2)
+        self.assertEqual(self.ops.api141.call_count, 2)
+
+    def test_reactivated_or_restarted_container_cancels_retirement(self):
+        for routed_id, epoch in [('old','epoch'), ('new','new-epoch')]:
+            self.ops.routed_container.return_value = {'id': routed_id}
+            self.ops._inspect_container.side_effect = None
+            self.ops._inspect_container.return_value = {'running': True, 'started_at': epoch}
+            with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'worker_pids', return_value=set()):
+                self.ops.drain_retired_slot('old', [], tmp, 'epoch')
+                receipt = json.loads((Path(tmp) / 'retirement-status-old.json').read_text())
+            self.assertEqual(receipt['stage'], 'retirement_cancelled_reactivated')
         self.ops.api141.assert_not_called()
-        self.assertFalse(hasattr(iw.LocalNailongOps, 'connection_counts'))
 
-    def test_legacy_busy_timeout_requires_explicit_override(self):
-        self.ops.health_telemetry = mock.Mock(return_value={'status': 'ok'})
-        self.ops.concurrency_snapshot = mock.Mock(return_value={'account_slots': 2})
-        with mock.patch.object(iw.time, 'monotonic', side_effect=[0, 61]):
-            with self.assertRaisesRegex(iw.InplaceError, 'legacy_active_slots_timeout_no_stop'):
-                self.ops.acquire_release_idle(self.app)
-        self.ops.api141.assert_not_called()
+    def test_retirement_timeout_keeps_no_sigkill_contract(self):
+        self.ops._inspect_container.return_value = {'running': True, 'started_at': 'epoch', 'port': 17861}
+        self.ops._inspect_container.side_effect = None
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'worker_pids', return_value=set()), mock.patch.object(iw.time, 'monotonic', side_effect=[0, 361]):
+            with self.assertRaisesRegex(iw.InplaceError, 'retired_slot_stop_timeout_no_kill'):
+                self.ops.drain_retired_slot('old', [], tmp, 'epoch')
+        self.assertFalse(any('SIGKILL' in call.args[1] for call in self.ops.api141.call_args_list))
 
-    def test_parent_authorized_bounded_legacy_forward_records_busy_state(self):
-        self.ops.allow_legacy_busy_after_wait = True
-        self.ops.health_telemetry = mock.Mock(return_value={'status': 'ok'})
-        self.ops.concurrency_snapshot = mock.Mock(return_value={'account_slots': 2})
-        with mock.patch.object(iw.time, 'monotonic', side_effect=[0, 61]):
-            result = self.ops.acquire_release_idle(self.app)
-        self.assertEqual(result['mode'], 'legacy_explicit_bounded_forward')
-        self.assertEqual(result['active_slots_at_stop']['account_slots'], 2)
-        self.ops.api141.assert_not_called()
-
-    def test_drain_probe_failure_resumes_admission(self):
-        self.ops.health_telemetry = mock.Mock(side_effect=[{'draining': False, 'in_flight': 1}, OSError('health unavailable')])
-        with self.assertRaises(OSError):
-            self.ops.acquire_release_idle(self.app)
-        self.assertTrue(self.ops.api141.call_args.args[1].endswith('signal=SIGUSR2'))
-        self.assertFalse(any('SIGTERM' in call.args[1] for call in self.ops.api141.call_args_list))
-
-    def test_slot_projection_keeps_auth_in_child_environment(self):
-        self.ops.inspect_via_api141 = mock.Mock(return_value={'Config': {'Env': ['REDIS_PASSWORD=fixture-only']}})
-        with mock.patch.object(iw.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout='[0,0,0,0,0,0]')) as run:
-            sample = self.ops.concurrency_snapshot()
-        self.assertEqual(sample['account_slots'], 0)
-        self.assertEqual(run.call_args.kwargs['env']['REDISCLI_AUTH'], 'fixture-only')
-        self.assertNotIn('fixture-only', run.call_args.args[0])
-
-    def test_unhealthy_candidate_uses_slot_projection(self):
-        self.ops.health_telemetry = mock.Mock(side_effect=OSError('health unavailable'))
-        self.ops.concurrency_snapshot = mock.Mock(return_value={'account_slots': 0})
-        result = self.ops.acquire_release_idle(self.app)
-        self.assertEqual(result['mode'], 'legacy_zero_concurrency_slots')
-        self.ops.api141.assert_not_called()
+    def test_schedule_captures_unrecorded_workers_and_runs_independent_unit(self):
+        self.ops._inspect_container.side_effect = None
+        self.ops._inspect_container.return_value = {'started_at': 'epoch', 'port': 17861}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.slot_routing, 'retiring_worker_pids', return_value={202}), mock.patch.object(iw.subprocess, 'run') as run:
+            result = self.ops.schedule_retirement('a'*64, [101], tmp)
+        self.assertEqual(result['retiring_workers'], [101,202])
+        self.assertIn('systemd-run', run.call_args.args[0])
+        self.assertIn('retire', run.call_args.args[0])
 
 
 if __name__ == '__main__':

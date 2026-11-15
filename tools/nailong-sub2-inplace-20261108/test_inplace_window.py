@@ -1,630 +1,296 @@
-#!/usr/bin/env python3
-"""Unit & failure-fixture tests for Nailong same-host in-place Sub2 release & recovery carrier."""
-import io
+"""Dual-slot ordering, failure recovery, backup binding and Docker API contracts."""
 import json
 from pathlib import Path
-import sys
 import tempfile
 import types
 import unittest
 from unittest import mock
-
 import inplace_window as iw
 
 
 def make_valid_go(action='forward', **overrides):
-    base = json.loads((iw.HERE / 'go.template.json').read_text(encoding='utf8'))
-    base['explicit_parent_go'] = True
-    base['action'] = action
-    base['window'] = 'nailong-1d14bbdc3-20261108t1300z'
-    base.update(overrides)
-    return base
+    go = json.loads((iw.HERE / 'go.template.json').read_text())
+    go.update(explicit_parent_go=True, action=action, window='bluegreen-fixture-20261115')
+    go.update(overrides)
+    return go
 
 
 class FakeNailongOps:
     def __init__(self, go):
         self.go = go
-        self.current_id = go['current_container_id']
-        self.new_id = '99' * 32
-        self.current_started_at = go['current_started_at']
-        self.new_started_at = '2026-11-08T13:05:10.000000000Z'
-        self.recovered_started_at = '2026-11-08T13:06:22.000000000Z'
+        self.old = dict(id=go['current_container_id'], name=iw.APP_NAME, image=go['current_image'],
+                        revision=go['current_revision'], started_at=go['current_started_at'],
+                        running=True, health='healthy', restart_count=0, appdata=go['appdata'], port=go['current_port'])
+        self.active = self.old
+        self.new = None
+        self.calls = []
+        self.fail = None
+        self.binding = {'dependency_network': iw.DEPENDENCY_NETWORK, 'appdata': go['appdata']}
+        for role, info in self.roles().items():
+            self.binding[role] = {k: info[k] for k in ('name', 'id', 'started_at')}
 
-        self.active_sub2 = {
-            'id': self.current_id,
-            'name': 'sub2api-gcp',
-            'image': go['current_image'],
-            'revision': go['current_revision'],
-            'running': True,
-            'health': 'healthy',
-            'started_at': self.current_started_at,
-            'restart_count': 0,
-            'appdata': go['appdata'],
-        }
-        self.retained = None
-        self.pg = {
-            'id': go['pg']['id'],
-            'name': go['pg']['name'],
-            'running': True,
-            'health': 'healthy',
-            'started_at': go['pg']['started_at'],
-        }
-        self.redis = {
-            'id': go['redis']['id'],
-            'name': go['redis']['name'],
-            'running': True,
-            'health': 'healthy',
-            'started_at': go['redis']['started_at'],
-        }
-        self.axon = {
-            'id': go['axon_nailong']['id'],
-            'name': go['axon_nailong']['name'],
-            'running': True,
-            'health': None,
-            'started_at': go['axon_nailong']['started_at'],
-        }
-        self.thought_policy = dict(iw.EXPECTED_THOUGHT_POLICY)
-        self.source_binding = {
-            'app': {'name': 'sub2api-gcp', 'id': self.current_id, 'started_at': self.current_started_at},
-            'pg': {'name': go['pg']['name'], 'id': go['pg']['id'], 'started_at': go['pg']['started_at']},
-            'redis': {'name': go['redis']['name'], 'id': go['redis']['id'], 'started_at': go['redis']['started_at']},
-            'dependency_network': 'sub2api-nailong',
-            'appdata': go['appdata'],
-        }
-        self.timer_state = 'active'
-        self.fail_on_stop_ack = False
-        self.fail_on_create = False
-        self.fail_new_container_stop_timeout = False
-        self.fail_on_source_check = False
-        self.fail_on_recover_source_check = False
-        self.original_start_calls = 0
-        self.admitted_pairs = {
-            (go['current_image'], go['current_revision']),
-            (go['target_image'], go['target_revision']),
-        }
+    def roles(self):
+        return {'app': self.active, **{k: dict(self.go[k], running=True, health='healthy') for k in ('pg', 'redis')}}
 
-    def observe_live(self, target_revision):
-        return {
-            'app': dict(self.active_sub2) if self.active_sub2 else None,
-            'pg': dict(self.pg),
-            'redis': dict(self.redis),
-            'axon_nailong': dict(self.axon),
-            'loaded_target': {
-                'id': self.go['target_image'],
-                'revision': self.go['target_revision'],
-                'repo_tags': ['sub2api:1d14bbdc3'],
-            },
-            'thought_policy': dict(self.thought_policy),
-            'backup_timer': self.timer_state,
-            'source_check': {
-                'stage': 'core_backup_source_bound',
-                'image': self.active_sub2['image'] if self.active_sub2 else None,
-                'revision': self.active_sub2['revision'] if self.active_sub2 else None,
-                'source': json.loads(json.dumps(self.source_binding)),
-            },
-            'nailong_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
-            'lag_identity_sha': iw.PARENT_CORE_IDENTITY_SHA,
-            'docker_api141_probe': {
-                'ok': True,
-                'api_version': '1.41',
-                'app_id': self.current_id,
-                'target_image_id': self.go['target_image'],
-            },
-        }
+    def observe_live(self, rev):
+        return dict(app=self.active, loaded_target={'id': self.go['target_image'], 'revision': self.go['target_revision']},
+                    thought_policy=iw.EXPECTED_THOUGHT_POLICY,
+                    **{k: dict(self.go[k], running=True, health='healthy') for k in ('pg', 'redis', 'axon_nailong')})
 
-    def admit_core_identity_pair(self, candidate_bytes, target_image, target_revision):
-        self.admitted_pairs.add((target_image, target_revision))
-        return {'nailong_sha256': 'admitted_sha', 'lag_sha256': 'admitted_sha', 'pair': [target_image, target_revision]}
+    def routed_container(self):
+        return self.active
 
-    def capture_current_container_spec(self, expected_id, expected_appdata):
-        assert self.active_sub2['id'] == expected_id
-        assert self.active_sub2['appdata'] == expected_appdata
-        return {
-            'id': expected_id,
-            'env': ['JWT_SECRET=jwt-fixed', 'TOTP_ENCRYPTION_KEY=totp-fixed', 'DATABASE_HOST=postgres', 'REDIS_HOST=redis'],
-            'appdata': expected_appdata,
-        }
+    def admit_core_identity_pair(self, *args):
+        return {'admitted': True}
 
-    def stop_and_rename_current(self, expected_id, retained_name):
-        assert self.active_sub2 and self.active_sub2['id'] == expected_id
-        stopped = dict(self.active_sub2, name=retained_name, running=False)
-        self.retained = stopped
-        self.active_sub2 = None
-        if self.fail_on_stop_ack:
-            raise iw.InplaceError('ssh_connection_reset_after_remote_stop')
-        return {'id': expected_id, 'retained_name': retained_name, 'exit_code': 0}
+    def verify_peer_safe_image(self, *args):
+        pass
 
-    def create_and_start_target(self, window, target_image, target_revision, env_list, appdata):
-        if self.fail_on_create:
-            still_running = bool(self.fail_new_container_stop_timeout)
-            self.active_sub2 = {
-                'id': self.new_id,
-                'name': 'sub2api-gcp',
-                'image': target_image,
-                'revision': target_revision,
-                'running': still_running,
-                'health': 'unhealthy',
-                'started_at': self.new_started_at,
-                'restart_count': 1,
-                'appdata': appdata,
-            }
-            raise iw.InplaceError('target_exited_or_restarted')
-        self.active_sub2 = {
-            'id': self.new_id,
-            'name': 'sub2api-gcp',
-            'image': target_image,
-            'revision': target_revision,
-            'running': True,
-            'health': 'healthy',
-            'started_at': self.new_started_at,
-            'restart_count': 0,
-            'appdata': appdata,
-            'loopback_http': 200,
-        }
-        return dict(self.active_sub2)
+    def capture_current_container_spec(self, cid, appdata):
+        self.calls.append('capture')
+        return {'env': ['JWT_SECRET=fixture', 'TOTP_ENCRYPTION_KEY=fixture'], 'port': self.active['port']}
 
-    def observe_containers(self, original_id, retained_name):
-        return {
-            'active_sub2': dict(self.active_sub2) if self.active_sub2 else None,
-            'original_by_id': dict(self.retained) if self.retained and self.retained['id'] == original_id else (
-                dict(self.active_sub2) if self.active_sub2 and self.active_sub2['id'] == original_id else None
-            ),
-            'retained': dict(self.retained) if self.retained and self.retained['name'] == retained_name else None,
-        }
+    def create_and_start_target(self, window, image, rev, env, appdata, port, directory):
+        self.calls.append('warm')
+        assert self.old['running'] and self.active is self.old
+        self.new = dict(self.old, id='99'*32, name='standby', image=image, revision=rev, port=port,
+                        started_at='2026-11-15T09:00:00Z', health='healthy')
+        iw.write_atomic(directory, 'target-created.json', {'id': self.new['id']})
+        if self.fail == 'warm':
+            raise iw.InplaceError('target_readiness_timeout')
+        return self.new
 
-    def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
-        assert self.active_sub2 and self.active_sub2['id'] == new_container_id
-        if self.fail_new_container_stop_timeout:
-            raise iw.InplaceError('new_container_stop_timeout_still_running')
-        self.active_sub2 = None
-        return {
-            'stopped_id': new_container_id,
-            'running': False,
-            'exit_code': 0,
-            'archived_as': failed_archive_name,
-        }
+    def make_canonical(self, cid, window):
+        pass
 
-    def restore_and_start_original_container(self, original_id, retained_name):
-        self.original_start_calls += 1
-        assert self.retained and self.retained['id'] == original_id
-        self.active_sub2 = {
-            'id': original_id,
-            'name': 'sub2api-gcp',
-            'image': self.go['current_image'],
-            'revision': self.go['current_revision'],
-            'running': True,
-            'health': 'healthy',
-            'started_at': self.recovered_started_at,
-            'restart_count': 0,
-            'appdata': self.go['appdata'],
-            'loopback_http': 200,
-        }
-        self.retained = None
-        return dict(self.active_sub2)
+    def activate_slot(self, expected_id, target_id, window):
+        self.calls.append('switch')
+        assert self.active['id'] == expected_id
+        old_port = self.active['port']
+        self.active = self.old if target_id == self.old['id'] else self.new
+        self.active['name'] = iw.APP_NAME
+        if self.fail == 'lost-switch-ack':
+            self.fail = None
+            raise iw.InplaceError('lost_switch_ack')
+        return {'from_port': old_port, 'to_port': self.active['port'], 'retiring_workers': [12]}
+
+    def prepare_original(self, go, directory):
+        self.calls.append('prepare-original')
+        self.old['running'] = True
+        return self.old
+
+    def schedule_retirement(self, cid, workers, directory):
+        self.calls.append('drain')
+        assert self.active['id'] != cid
+        (self.old if cid == self.old['id'] else self.new)['running'] = False
+
+    def discard_unrouted_candidate(self, cid, directory):
+        self.calls.append('discard')
+        assert self.active['id'] != cid
+        self.new['running'] = False
 
     def inspect_backup_roles(self):
-        return {
-            'binding': json.loads(json.dumps(self.source_binding)),
-            'roles': {
-                'app': dict(self.active_sub2),
-                'pg': dict(self.pg),
-                'redis': dict(self.redis),
-            },
-            'appdata': self.active_sub2['appdata'],
-        }
+        return {'binding': self.binding, 'roles': self.roles(), 'appdata': self.go['appdata']}
 
     def write_source_binding(self, binding):
-        self.source_binding = json.loads(json.dumps(binding))
+        self.calls.append('bind')
+        self.binding = binding
 
     def run_source_check(self):
-        if self.fail_on_source_check and self.active_sub2 and self.active_sub2['id'] == self.new_id:
-            raise iw.InplaceError('source_app_identity_or_health_changed')
-        if self.fail_on_recover_source_check and self.active_sub2 and self.active_sub2['id'] == self.current_id:
-            raise iw.InplaceError('source_check_failed_on_recover')
-        app_id = self.source_binding['app']['id']
-        app_started = self.source_binding['app']['started_at']
-        if not self.active_sub2 or self.active_sub2['id'] != app_id or self.active_sub2['started_at'] != app_started:
-            raise iw.InplaceError('source_app_identity_or_health_changed')
-        return {
-            'stage': 'core_backup_source_bound',
-            'image': self.active_sub2['image'],
-            'revision': self.active_sub2['revision'],
-            'source': json.loads(json.dumps(self.source_binding)),
-        }
+        if self.fail == 'backup' and self.active is self.new:
+            raise iw.InplaceError('backup_fixture_failure')
+        return {'stage': 'core_backup_source_bound', 'image': self.active['image'],
+                'revision': self.active['revision'], 'source': self.binding}
 
     def ensure_backup_timer_active(self):
-        self.timer_state = 'active'
+        pass
 
     def backup_timer_state(self):
-        return self.timer_state
+        return 'active'
 
 
-class FakeDocker20Daemon:
-    """Simulates Nailong's Docker 20.10.24 Unix socket daemon: rejects `/v1.45` with HTTP 400 and serves `/v1.41`."""
-
-    def __init__(self, go):
-        self.go = go
-        self.requests = []
-        self.containers = {
-            go['current_container_id']: {
-                'Id': go['current_container_id'],
-                'Name': '/sub2api-gcp',
-                'Image': go['current_image'],
-                'Config': {
-                    'Labels': {'org.opencontainers.image.revision': go['current_revision']},
-                    'Env': ['JWT_SECRET=s1', 'TOTP_ENCRYPTION_KEY=t1'],
-                },
-                'State': {
-                    'Running': True,
-                    'Status': 'running',
-                    'ExitCode': 0,
-                    'StartedAt': go['current_started_at'],
-                    'Health': {'Status': 'healthy'},
-                },
-                'RestartCount': 0,
-                'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped'}},
-                'Mounts': [{'Destination': '/app/data', 'Source': go['appdata']}],
-            },
-        }
-        self.images = {
-            go['target_image']: {
-                'Id': go['target_image'],
-                'RepoTags': ['sub2api:1d14bbdc3'],
-                'Config': {'Labels': {'org.opencontainers.image.revision': go['target_revision']}},
-            },
-        }
-        self.new_id = 'ab' * 32
-
-    def resolve_container(self, ref):
-        if ref in self.containers:
-            return self.containers[ref]
-        for c in self.containers.values():
-            if c['Name'].lstrip('/') == ref:
-                return c
-        return None
-
-    def handle(self, method, path, payload):
-        self.requests.append((method, path, payload))
-        if not path.startswith('/v1.41/'):
-            version = path.split('/', 2)[1] if path.startswith('/v') else 'unknown'
-            msg = f'client version {version.lstrip("v")} is too new. Maximum supported API version is 1.41'
-            return 400, json.dumps({'message': msg}).encode('utf8')
-
-        sub = path[len('/v1.41'):]
-        if method == 'GET' and sub.startswith('/containers/') and sub.endswith('/json'):
-            ref = sub[len('/containers/'):-len('/json')]
-            c = self.resolve_container(ref)
-            if not c:
-                return 404, json.dumps({'message': f'No such container: {ref}'}).encode('utf8')
-            return 200, json.dumps(c).encode('utf8')
-
-        if method == 'GET' and sub.startswith('/images/') and sub.endswith('/json'):
-            ref = sub[len('/images/'):-len('/json')]
-            img = self.images.get(ref)
-            if not img:
-                return 404, json.dumps({'message': f'No such image: {ref}'}).encode('utf8')
-            return 200, json.dumps(img).encode('utf8')
-
-        if method == 'POST' and sub.startswith('/containers/') and sub.endswith('/update'):
-            ref = sub[len('/containers/'):-len('/update')]
-            c = self.resolve_container(ref)
-            body = json.loads(payload.decode('utf8'))
-            c['HostConfig']['RestartPolicy'] = body['RestartPolicy']
-            return 200, b'{"Warnings":null}'
-
-        if method == 'POST' and sub.startswith('/containers/') and '/kill?' in sub:
-            ref = sub[len('/containers/'):sub.index('/kill?')]
-            c = self.resolve_container(ref)
-            c['State']['Running'] = False
-            c['State']['Status'] = 'exited'
-            c['State']['ExitCode'] = 0
-            return 204, b''
-
-        if method == 'POST' and sub.startswith('/containers/') and '/rename?name=' in sub:
-            ref, new_name = sub[len('/containers/'):].split('/rename?name=', 1)
-            c = self.resolve_container(ref)
-            c['Name'] = '/' + new_name
-            return 204, b''
-
-        if method == 'POST' and sub == '/containers/create?name=sub2api-gcp':
-            body = json.loads(payload.decode('utf8'))
-            # Docker 20 API 1.41 rejects >1 EndpointsConfig entry at create time
-            if len(body.get('NetworkingConfig', {}).get('EndpointsConfig', {})) != 1:
-                return 400, json.dumps({'message': 'Container cannot be connected to network endpoints'}).encode('utf8')
-            self.containers[self.new_id] = {
-                'Id': self.new_id,
-                'Name': '/sub2api-gcp',
-                'Image': body['Image'],
-                'Config': {
-                    'Labels': {'org.opencontainers.image.revision': self.go['target_revision']},
-                    'Env': body.get('Env', []),
-                },
-                'State': {
-                    'Running': False,
-                    'Status': 'created',
-                    'ExitCode': 0,
-                    'StartedAt': '2026-11-08T13:20:00.000000000Z',
-                    'Health': {'Status': 'healthy'},
-                },
-                'RestartCount': 0,
-                'HostConfig': body['HostConfig'],
-                'Mounts': [{'Destination': '/app/data', 'Source': self.go['appdata']}],
-            }
-            return 201, json.dumps({'Id': self.new_id, 'Warnings': []}).encode('utf8')
-
-        if method == 'POST' and sub == '/networks/sub2api-nailong/connect':
-            return 200, b''
-
-        if method == 'POST' and sub.startswith('/containers/') and sub.endswith('/start'):
-            ref = sub[len('/containers/'):-len('/start')]
-            c = self.resolve_container(ref)
-            c['State']['Running'] = True
-            c['State']['Status'] = 'running'
-            if c['Id'] == self.go['current_container_id']:
-                c['State']['StartedAt'] = '2026-11-08T13:21:00.000000000Z'
-            return 204, b''
-
-        return 500, json.dumps({'message': f'Unhandled {method} {path}'}).encode('utf8')
-
-
-class InplaceWindowTests(unittest.TestCase):
-    def test_validate_go_refuses_template_and_scope_violations(self):
-        go = make_valid_go()
-        self.assertEqual(iw.validate_go(go, 'forward')['window'], 'nailong-1d14bbdc3-20261108t1300z')
-
+class BlueGreenTests(unittest.TestCase):
+    def test_go_rejects_stop_first_schema_and_template(self):
+        iw.validate_go(make_valid_go(), 'forward')
+        for overrides in ({'schema': 'nailong-sub2-inplace-go-1'}, {'dual_slot': False}, {'current_port': 8080}, {'worker_apply': True}):
+            with self.assertRaises(iw.InplaceError):
+                iw.validate_go(make_valid_go(**overrides), 'forward')
         with self.assertRaisesRegex(iw.InplaceError, 'template_is_not_a_go'):
-            iw.validate_go(go, 'forward', filename='go.template.json')
+            iw.validate_go(make_valid_go(), 'forward', 'go.template.json')
+        for name in iw.PROTECTED_UNITS:
+            with self.assertRaises(iw.InplaceError):
+                iw.assert_stoppable(name)
 
-        with self.assertRaisesRegex(iw.InplaceError, 'explicit_parent_go_required'):
-            iw.validate_go(make_valid_go(explicit_parent_go=False), 'forward')
+    def test_both_slot_directions_warm_switch_bind_then_drain(self):
+        for port in iw.SLOT_PORTS:
+            with self.subTest(port=port), tempfile.TemporaryDirectory() as tmp:
+                go = make_valid_go(current_port=port)
+                ops = FakeNailongOps(go)
+                result = iw.forward(go, ops, directory=tmp)
+                self.assertEqual(result['stage'], 'forward_terminal')
+                self.assertEqual(ops.calls, ['capture', 'warm', 'switch', 'bind', 'drain'])
+                self.assertNotEqual(result['route']['to_port'], port)
+                self.assertEqual(ops.binding['app']['id'], ops.new['id'])
+                self.assertEqual(ops.binding['app']['started_at'], ops.new['started_at'])
+                self.assertTrue(ops.new['running'])
+                self.assertFalse(ops.old['running'])
 
-        with self.assertRaisesRegex(iw.InplaceError, 'scope_guard_violation'):
-            iw.validate_go(make_valid_go(dns_apply=True), 'forward')
+    def test_warm_failure_never_switches_or_stops_original(self):
+        ops = FakeNailongOps(make_valid_go())
+        ops.fail = 'warm'
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(iw.InplaceError, 'target_readiness_timeout'):
+                iw.forward(ops.go, ops, directory=tmp)
+        self.assertNotIn('switch', ops.calls)
+        self.assertNotIn('drain', ops.calls)
+        self.assertIs(ops.active, ops.old)
+        self.assertTrue(ops.old['running'])
+        self.assertFalse(ops.new['running'])
 
-        with self.assertRaisesRegex(iw.InplaceError, 'scope_guard_violation'):
-            iw.validate_go(make_valid_go(forbid_old_gcp_fallback=False), 'forward')
+    def test_lost_reload_ack_reconciles_actual_routing_and_swaps_back(self):
+        ops = FakeNailongOps(make_valid_go())
+        ops.fail = 'lost-switch-ack'
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(iw.InplaceError, 'lost_switch_ack'):
+                iw.forward(ops.go, ops, directory=tmp)
+            self.assertTrue((Path(tmp) / 'recover-terminal.json').exists())
+        self.assertIs(ops.active, ops.old)
+        self.assertEqual(ops.calls.count('switch'), 2)
+        self.assertTrue(ops.old['running'])
 
-        with self.assertRaisesRegex(iw.InplaceError, 'thought_policy_contract_mismatch'):
-            iw.validate_go(make_valid_go(thought_policy={
-                'suppress_thought_only_stop': True,
-                'continue_thought_only': True,
-                'continue_zero_output': False,
-            }), 'forward')
+    def test_backup_failure_swaps_back_before_draining_candidate(self):
+        ops = FakeNailongOps(make_valid_go())
+        ops.fail = 'backup'
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(iw.InplaceError, 'backup_fixture_failure'):
+                iw.forward(ops.go, ops, directory=tmp)
+        self.assertIs(ops.active, ops.old)
+        self.assertEqual(ops.binding['app']['id'], ops.old['id'])
+        self.assertEqual(ops.calls[:7], ['capture', 'warm', 'switch', 'bind', 'prepare-original', 'switch', 'bind'])
 
-        for protected in iw.PROTECTED_UNITS:
-            with self.assertRaisesRegex(iw.InplaceError, 'protected_unit_stop_forbidden'):
-                iw.assert_stoppable(protected)
-
-    def test_error_label_preserves_specific_sanitized_codes_and_never_generic_failure(self):
-        class Failure(Exception):
-            pass
-
-        class ContractError(Exception):
-            pass
-
-        self.assertEqual(iw.error_label(Failure('docker_api_failed')), 'docker_api_failed')
-        self.assertEqual(
-            iw.error_label(Failure('docker_api_400:client version 1.45 is too new. Maximum supported API version is 1.41')),
-            'docker_api_400:client version 1.45 is too new. Maximum supported API version is 1.41',
-        )
-        self.assertEqual(iw.error_label(ContractError('create_seam_mismatch')), 'create_seam_mismatch')
-        self.assertEqual(iw.error_label(iw.InplaceError('target_exited_or_restarted')), 'target_exited_or_restarted')
-        # Secret-bearing text must never be echoed
-        self.assertEqual(iw.error_label(iw.InplaceError('REDIS_PASSWORD=secret_leaked')), 'inplace_error')
-
-    def test_real_local_nailong_ops_binds_api141_and_executes_stop_create_and_recover(self):
-        """Exercises the real LocalNailongOps methods against a simulated Docker 20.10.24 daemon that rejects /v1.45."""
-        go = make_valid_go()
-        daemon = FakeDocker20Daemon(go)
-
-        tools_path = str(Path('C:/Programs/AI/MLAIGateWay/outputs/task53-sub2-nailong-20261107').resolve())
-        if tools_path not in sys.path:
-            sys.path.insert(0, tools_path)
-        import contract as real_contract
-
-        fake_migration = types.ModuleType('migration')
-
-        class Failure(Exception):
-            pass
-
-        class FakeConn:
-            def __init__(self):
-                self._res = None
-
-            def request(self, method, path, payload=None, headers=None):
-                status, raw = daemon.handle(method, path, payload)
-                self._res = (status, raw)
-
-            def getresponse(self):
-                status, raw = self._res
-                res = types.SimpleNamespace(status=status, read=lambda: raw)
-                return res
-
-            def close(self):
-                pass
-
-        # Simulate Nailong's unpatched `/opt/sub2api-nailong/tools/migration.py` which calls `/v1.45`!
-        def unpatched_api(method, path, body=None):
-            conn = FakeConn()
-            conn.request(method, '/v1.45' + path)
-            res = conn.getresponse()
-            if res.status not in (200, 201, 204):
-                raise Failure('docker_api_failed')
-            return res.read()
-
-        fake_migration.Failure = Failure
-        fake_migration.DockerConnection = FakeConn
-        fake_migration.api = unpatched_api
-        fake_migration.inspect = lambda name: json.loads(fake_migration.api('GET', '/containers/' + name + '/json'))
-
-        # Verify unpatched migration.inspect fails with Failure('docker_api_failed') on Docker 20.10
-        with self.assertRaises(Failure):
-            fake_migration.inspect('sub2api-gcp')
-
-        with mock.patch.dict(sys.modules, {'migration': fake_migration, 'contract': real_contract}):
-            local_ops = iw.LocalNailongOps(tools_dir=None)
-            # The separate ReleaseDrainTests exercise admission/connection safety;
-            # this fixture owns Docker 1.41 create/stop/recovery compatibility.
-            local_ops.acquire_release_idle = mock.Mock(return_value={'mode': 'application_admission_hold', 'in_flight': 0})
-            probe = local_ops.probe_docker_api141(go['current_container_id'], go['target_image'])
-            self.assertTrue(probe['ok'])
-            self.assertEqual(probe['api_version'], '1.41')
-
-            spec = local_ops.capture_current_container_spec(go['current_container_id'], go['appdata'])
-            self.assertEqual(spec['id'], go['current_container_id'])
-
-            retained = iw.archive_container_name(go['window'], go['current_container_id'])
-            stopped = local_ops.stop_and_rename_current(go['current_container_id'], retained)
-            self.assertEqual(stopped['retained_name'], retained)
-            self.assertFalse(daemon.containers[go['current_container_id']]['State']['Running'])
-
-            fake_http_resp = mock.MagicMock()
-            fake_http_resp.status = 200
-            with mock.patch('urllib.request.urlopen', return_value=fake_http_resp):
-                started = local_ops.create_and_start_target(
-                    window=go['window'],
-                    target_image=go['target_image'],
-                    target_revision=go['target_revision'],
-                    env_list=spec['env'],
-                    appdata=go['appdata'],
-                )
-                self.assertEqual(started['id'], daemon.new_id)
-                self.assertEqual(started['health'], 'healthy')
-                create_body = next(json.loads(payload) for method, path, payload in daemon.requests if path.startswith('/v1.41/containers/create'))
-                self.assertEqual(create_body['StopTimeout'], 360)
-                self.assertIn('SERVER_SHUTDOWN_TIMEOUT_SECONDS=300', create_body['Env'])
-
-                # Now exercise LocalNailongOps stop_and_remove_new_container + restore_and_start_original_container
-                removed = local_ops.stop_and_remove_new_container(daemon.new_id, 'sub2api-gcp-failed-test')
-                self.assertFalse(removed['running'])
-                restored = local_ops.restore_and_start_original_container(go['current_container_id'], retained)
-                self.assertEqual(restored['id'], go['current_container_id'])
-                self.assertEqual(restored['name'], 'sub2api-gcp')
-                self.assertEqual(restored['started_at'], '2026-11-08T13:21:00.000000000Z')
-
-        # Every request issued by LocalNailongOps must have used `/v1.41/`
-        local_ops_paths = [p for _, p, _ in daemon.requests[1:]]
-        self.assertTrue(all(p.startswith('/v1.41/') for p in local_ops_paths), local_ops_paths)
-
-    def test_forward_happy_path_rebinds_daily_backup_to_new_container_epoch(self):
+    def test_explicit_rollback_warms_old_before_switch_and_rebind(self):
         go = make_valid_go()
         ops = FakeNailongOps(go)
         with tempfile.TemporaryDirectory() as tmp:
-            result = iw.forward(go, ops, directory=Path(tmp))
-            self.assertEqual(result['stage'], 'forward_terminal')
-            self.assertEqual(result['app']['id'], ops.new_id)
-            self.assertEqual(result['app']['image'], go['target_image'])
-            self.assertEqual(result['app']['revision'], go['target_revision'])
-            self.assertEqual(ops.source_binding['app']['id'], ops.new_id)
-            self.assertEqual(ops.source_binding['app']['started_at'], ops.new_started_at)
-            self.assertEqual(result['backup']['source']['app']['id'], ops.new_id)
-            self.assertEqual(result['backup']['source']['app']['started_at'], ops.new_started_at)
-            self.assertEqual(result['pg_preserved'], go['pg']['id'])
-            self.assertEqual(result['redis_preserved'], go['redis']['id'])
-            self.assertEqual(result['appdata_preserved'], go['appdata'])
-            self.assertFalse(result['old_gcp_touched'])
+            iw.forward(go, ops, directory=tmp)
+            ops.calls.clear()
+            result = iw.recover(dict(go, action='recover'), ops, directory=tmp)
+        self.assertEqual(result['stage'], 'recovered_to_previous_image')
+        self.assertEqual(ops.calls, ['prepare-original', 'switch', 'bind', 'drain'])
+        self.assertTrue(ops.old['running'])
+        self.assertFalse(ops.new['running'])
+        self.assertEqual(ops.binding['app']['id'], go['current_container_id'])
 
-    def test_failure_fixture_lost_ack_on_stop_current_still_converges_via_recover(self):
-        go = make_valid_go()
+    def test_commissioning_rollback_roundtrip_finishes_on_new_slot(self):
+        go = make_valid_go(verify_rollback=True)
         ops = FakeNailongOps(go)
-        ops.fail_on_stop_ack = True
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with self.assertRaisesRegex(iw.InplaceError, 'ssh_connection_reset_after_remote_stop'):
-                iw.forward(go, ops, directory=tmp_path)
+            result = iw.forward(go, ops, directory=tmp)
+            self.assertTrue((Path(tmp) / 'rollback-verified.json').exists())
+        self.assertEqual(ops.calls, ['capture', 'warm', 'switch', 'bind', 'switch', 'bind', 'switch', 'bind', 'drain'])
+        self.assertIs(ops.active, ops.new)
+        self.assertEqual(result['app']['id'], ops.new['id'])
 
-            self.assertTrue((tmp_path / 'stop-intent.json').is_file())
-            self.assertTrue((tmp_path / 'stop-observed-after-error.json').is_file())
-            self.assertTrue((tmp_path / 'current-stopped.json').is_file())
-            self.assertTrue((tmp_path / 'recover-terminal.json').is_file())
-            self.assertIsNotNone(ops.active_sub2)
-            self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
-            self.assertTrue(ops.active_sub2['running'])
-            self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
-            self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
+    def test_sanitized_error_labels(self):
+        self.assertEqual(iw.error_label(iw.InplaceError('REDIS_PASSWORD=private')), 'inplace_error')
+        self.assertEqual(iw.error_label(iw.InplaceError('target_readiness_timeout')), 'target_readiness_timeout')
 
-    def test_failure_fixture_new_container_stop_timeout_refuses_dual_active_start_of_old(self):
-        go = make_valid_go()
-        ops = FakeNailongOps(go)
-        ops.fail_on_create = True
-        ops.fail_new_container_stop_timeout = True
+
+class LocalDockerTests(unittest.TestCase):
+    def setUp(self):
+        self.ops = object.__new__(iw.LocalNailongOps)
+        self.ops.api141 = mock.Mock()
+
+    def test_readiness_checks_health_and_readyz_on_standby_port(self):
+        info = dict(image='image', revision='revision', running=True, restart_count=0, health='healthy', port=17862)
+        self.ops._inspect_container = mock.Mock(return_value=info)
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        with mock.patch.object(iw.urllib.request, 'urlopen', return_value=response) as urlopen:
+            self.assertEqual(self.ops.wait_ready('cid', 'image', 'revision'), info)
+        self.assertEqual([call.args[0] for call in urlopen.call_args_list],
+                         ['http://127.0.0.1:17862/health', 'http://127.0.0.1:17862/readyz'])
+
+    def test_create_uses_distinct_port_alias_and_preserves_both_networks(self):
+        def body(*args):
+            return {'HostConfig': {'PortBindings': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '17861'}]}},
+                    'NetworkingConfig': {'EndpointsConfig': {iw.APP_NETWORK: {'Aliases': [iw.ALIAS]}}}}
+        self.ops._contract = types.SimpleNamespace(api141_create_body=body)
+        self.ops._inspect_container = mock.Mock(side_effect=[None, {'id': 'cid', 'running': False, 'networks': [iw.APP_NETWORK]}])
+        self.ops.api141.side_effect = [json.dumps({'Id': 'image', 'Config': {'Labels': {'org.opencontainers.image.revision': 'revision', 'io.sub2api.peer-safe-startup': 'true'}}}),
+                                       json.dumps({'Id': 'cid'}), b'', b'']
+        self.ops.wait_ready = mock.Mock(return_value={'id': 'cid'})
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with self.assertRaisesRegex(iw.InplaceError, 'new_container_still_running_or_stop_unknown'):
-                iw.forward(go, ops, directory=tmp_path)
+            self.ops.create_and_start_target('window', 'image', 'revision', ['JWT_SECRET=fixed'], '/appdata', 17862, tmp)
+        calls = self.ops.api141.call_args_list
+        create = calls[1].args[2]
+        self.assertEqual(create['HostConfig']['PortBindings']['8080/tcp'][0]['HostPort'], '17862')
+        self.assertEqual(create['StopTimeout'], 360)
+        self.assertIn('SERVER_SHUTDOWN_TIMEOUT_SECONDS=300', create['Env'])
+        self.assertEqual(list(create['NetworkingConfig']['EndpointsConfig']), [iw.APP_NETWORK])
+        self.assertNotIn(iw.ALIAS, create['NetworkingConfig']['EndpointsConfig'][iw.APP_NETWORK]['Aliases'])
+        self.assertEqual(calls[2].args[1], '/networks/' + iw.DEPENDENCY_NETWORK + '/connect')
+        self.assertFalse(any('disconnect' in call.args[1] or 'SIGUSR' in call.args[1] for call in calls))
 
-            self.assertEqual(ops.original_start_calls, 0)
-            self.assertFalse((tmp_path / 'recover-terminal.json').exists())
-            status = json.loads((tmp_path / 'status.json').read_text(encoding='utf8'))
-            self.assertEqual(status['stage'], 'recovery_requires_operator')
-            self.assertEqual(status['reason'], 'new_container_still_running_or_stop_unknown')
-            self.assertEqual(status['error'], 'new_container_stop_timeout_still_running')
-            self.assertFalse(status['original_started'])
-
-    def test_failure_fixture_target_start_failure_auto_recovers_original_container_and_rebinds_new_started_at(self):
-        go = make_valid_go()
-        ops = FakeNailongOps(go)
-        ops.fail_on_create = True
+    def test_cold_legacy_rollback_uses_pinned_peer_safe_rebuild_not_old_boot(self):
+        go = make_valid_go(rollback_compatible={'image': 'sha256:' + 'a'*64, 'revision': 'b'*40})
+        self.ops._inspect_container = mock.Mock(return_value={'id': go['current_container_id'], 'image': go['current_image'],
+                                            'revision': go['current_revision'], 'running': False, 'port': 17861})
+        self.ops.api141.return_value = json.dumps({'Config': {'Labels': {}}})
+        self.ops.routed_container = mock.Mock(return_value={'id': 'serving', 'image': go['target_image'], 'revision': go['target_revision']})
+        self.ops.admit_core_identity_pair = mock.Mock()
+        self.ops.capture_current_container_spec = mock.Mock(return_value={'env': ['fixture']})
+        self.ops.create_and_start_target = mock.Mock(return_value={'id': 'rollback-safe'})
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with self.assertRaisesRegex(iw.InplaceError, 'target_exited_or_restarted'):
-                iw.forward(go, ops, directory=tmp_path)
+            result = self.ops.prepare_original(go, tmp)
+        self.assertEqual(result['id'], 'rollback-safe')
+        self.assertEqual(self.ops.create_and_start_target.call_args.args[1:3], ('sha256:' + 'a'*64, 'b'*40))
+        self.assertFalse(any('/start' in call.args[1] for call in self.ops.api141.call_args_list))
 
-            self.assertIsNotNone(ops.active_sub2)
-            self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
-            self.assertEqual(ops.active_sub2['image'], go['current_image'])
-            self.assertTrue(ops.active_sub2['running'])
-            self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
-            self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
-            self.assertNotEqual(ops.source_binding['app']['started_at'], go['current_started_at'])
-            self.assertTrue((tmp_path / 'recover-terminal.json').is_file())
-            self.assertTrue((tmp_path / 'new-container-removed.json').is_file())
-
-    def test_failure_fixture_backup_rebind_mismatch_triggers_same_host_recovery_so_no_unbound_new_app_remains(self):
-        go = make_valid_go()
-        ops = FakeNailongOps(go)
-        ops.fail_on_source_check = True
+    def test_lost_start_ack_resumes_existing_pinned_standby(self):
+        self.ops.verify_peer_safe_image = mock.Mock()
+        self.ops._contract = types.SimpleNamespace(api141_create_body=lambda *a: {
+            'HostConfig': {'PortBindings': {'8080/tcp': [{'HostPort': '17861'}]}},
+            'NetworkingConfig': {'EndpointsConfig': {iw.APP_NETWORK: {'Aliases': []}}}})
+        self.ops._inspect_container = mock.Mock(return_value={'id': 'resumed', 'image': 'image', 'revision': 'revision',
+                         'port': 17861, 'appdata': '/appdata', 'running': True, 'networks': [iw.APP_NETWORK, iw.DEPENDENCY_NETWORK]})
+        self.ops.wait_ready = mock.Mock(return_value={'id': 'resumed'})
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with self.assertRaisesRegex(iw.InplaceError, 'source_app_identity_or_health_changed'):
-                iw.forward(go, ops, directory=tmp_path)
+            result = self.ops.create_and_start_target('rollback', 'image', 'revision', [], '/appdata', 17861, tmp)
+        self.assertEqual(result['id'], 'resumed')
+        self.ops.api141.assert_not_called()
 
-            self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
-            self.assertEqual(ops.active_sub2['image'], go['current_image'])
-            self.assertEqual(ops.source_binding['app']['id'], go['current_container_id'])
-            self.assertEqual(ops.source_binding['app']['started_at'], ops.recovered_started_at)
-            recover_doc = json.loads((tmp_path / 'recover-terminal.json').read_text(encoding='utf8'))
-            self.assertEqual(recover_doc['stage'], 'recovered_to_previous_image')
+    def test_old_restart_policy_is_disabled_before_route_switch(self):
+        self.ops.routed_container = mock.Mock(return_value={'id': 'old', 'port': 17861})
+        self.ops._inspect_container = mock.Mock(return_value={'id': 'new', 'port': 17862, 'image': 'image', 'revision': 'revision'})
+        self.ops.api141.side_effect = [b'', json.dumps({'Config': {'Labels': {'io.sub2api.peer-safe-startup': 'true'}}}), b'']
+        self.ops.wait_ready = mock.Mock()
+        self.ops.make_canonical = mock.Mock()
+        with mock.patch.object(iw.slot_routing, 'switch', return_value={}) as switch:
+            self.ops.activate_slot('old', 'new', 'window')
+            self.assertEqual(self.ops.api141.call_args_list[0].args, ('POST', '/containers/old/update', {'RestartPolicy': {'Name': 'no'}}))
+            self.assertEqual(self.ops.api141.call_args_list[-1].args, ('POST', '/containers/new/update', {'RestartPolicy': {'Name': 'unless-stopped'}}))
+            switch.assert_called_once_with(17861, 17862)
 
-    def test_failure_fixture_pg_or_thought_policy_drift_aborts_before_stopping_sub2(self):
-        go = make_valid_go()
-        ops = FakeNailongOps(go)
-        ops.thought_policy['continue_thought_only'] = True
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with self.assertRaisesRegex(iw.InplaceError, 'thought_policy_drifted'):
-                iw.forward(go, ops, directory=tmp_path)
-            self.assertFalse((tmp_path / 'stop-intent.json').exists())
-            self.assertFalse((tmp_path / 'current-stopped.json').exists())
-            self.assertTrue(ops.active_sub2['running'])
-            self.assertEqual(ops.active_sub2['id'], go['current_container_id'])
+    def test_launcher_does_not_accept_forward_terminal_for_recover(self):
+        ops = iw.RemoteNailongOps()
+        ops._json_py = mock.Mock(side_effect=[{'execution_id': '123'},
+            {'status': {'stage': 'forward_terminal', 'execution_id': '123'}, 'unit_state': 'inactive'}])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(iw.time, 'time_ns', return_value=123):
+            with self.assertRaisesRegex(iw.InplaceError, 'forward_terminal'):
+                ops.launch_via_systemd(make_valid_go('recover'), 'recover', tmp)
+        launch_script = ops._json_py.call_args_list[0].args[1]
+        self.assertIn("state['ActiveState'] not in ('inactive','failed')", launch_script)
+        self.assertIn("state.get('Job')", launch_script)
+        self.assertIn('fcntl.flock(lock, fcntl.LOCK_EX)', launch_script)
 
-    def test_candidate_core_identity_admits_1d14bbdc3_and_preserves_existing_pairs(self):
-        ns = {}
-        code = iw.CANDIDATE_CORE_IDENTITY.read_text(encoding='utf8')
-        exec(compile(code, str(iw.CANDIDATE_CORE_IDENTITY), 'exec'), ns)
-        self.assertTrue(ns['admits'](
-            'sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61',
-            '1d14bbdc38c25e4279f6948c7128c4a43e6ef985',
-        ))
-        self.assertTrue(ns['admits'](
-            'sha256:8a087d23f70de512fcb9b064b9b088fa453650dbf2e8d4b05929f9130c0937a7',
-            'fc899738487a38a7d40664fdf92bc90375fbaf7b',
-        ))
-        self.assertFalse(ns['admits'](
-            'sha256:ad403de503301cc681c18b961a3532a8c739b4bed1b1b7de3043a9073b3c5e61',
-            'fc899738487a38a7d40664fdf92bc90375fbaf7b',
-        ))
+    def test_docker_141_binding(self):
+        connection = mock.Mock()
+        connection.getresponse.return_value = types.SimpleNamespace(status=200, read=lambda: b'{}')
+        migration = types.SimpleNamespace(DockerConnection=lambda: connection)
+        iw.bind_nailong_docker_api141(migration, types.SimpleNamespace())
+        migration.api('GET', '/containers/sub2api-gcp/json')
+        self.assertEqual(connection.request.call_args.args[1], '/v1.41/containers/sub2api-gcp/json')
 
 
 if __name__ == '__main__':

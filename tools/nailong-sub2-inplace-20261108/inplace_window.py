@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-"""Same-host in-place Sub2 release & recovery carrier on Nailong (136.66.61.218 / 10.77.48.3).
+"""Nailong dual-slot Sub2API release and recovery.
 
-Supports two execution modes using the exact same state machine:
-1. Host-resident autonomous mode on Nailong (`LocalNailongOps`, invoked by
-   `sub2-nailong-inplace@<window>.service` so a controller / SSH / Kiki disconnect
-   never truncates an in-flight forward or recovery).
-2. Controller launcher / preflight mode on Windows (`RemoteNailongOps`, which stages
-   the runner + systemd unit + dual-end `core_identity.py` admission before any stop,
-   triggers the Nailong systemd unit for `forward`/`recover`, and tails status).
-
-Invariants enforced:
-- Single Sub2 container (`sub2api-gcp`) stop/start only; never touches old GCP (`136.118.187.9`),
-  Worker, Axon (`task51-gcp-nailong-usw1`), CPR, Xray, or DNS.
-- Preserves live PostgreSQL (`sub2api-nailong-postgres`), Redis (`sub2api-nailong-redis`),
-  appdata (`/opt/sub2api-nailong/runs/nailong-fc899-20261108t0659z/appdata`), and env/credentials
-  (including `JWT_SECRET` and `TOTP_ENCRYPTION_KEY`) in place — zero snapshot/dump re-import.
-- Preserves `antigravity_thought_policy` (`suppress_thought_only_stop=true`,
-  `continue_thought_only=false`, `continue_zero_output=false`).
-- Dynamically rebinds `/etc/sub2-core-backup/source.json` to the actual active container's
-  (`id`, `started_at`) after container swap (and after same-host recovery to the previous image),
-  verifying `core_backup.py source-check --binding /etc/sub2-core-backup/source.json` and
-  `sub2-core-backup.timer == active`.
+Start and warm the inactive loopback slot while production remains fully open.
+Reload the shared Nginx upstream, rebind the canonical container and backup, then
+silently retire the old slot in the host-managed release service. No admission
+hold, network disconnection, dependency restart, or synthetic inference probe.
 """
 import argparse
+from contextlib import contextmanager
 import base64
 import hashlib
 import json
@@ -35,11 +20,12 @@ import time
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
-SCHEMA = 'nailong-sub2-inplace-go-1'
+SCHEMA = 'nailong-sub2-bluegreen-go-2'
 TARGET_HOST = '136.66.61.218'
 APP_NAME = 'sub2api-gcp'
 ALIAS = 'sub2api-gcp'
-LOOPBACK = '127.0.0.1:17861'
+SLOT_PORTS = (17861, 17862)
+import slot_routing
 APP_NETWORK = 'sub2api-nailong-app'
 DEPENDENCY_NETWORK = 'sub2api-nailong'
 PG_NAME = 'sub2api-nailong-postgres'
@@ -150,11 +136,11 @@ def validate_go(go, action, filename=None):
         raise InplaceError('invalid_window_name')
     if go.get('host') != TARGET_HOST or go.get('app_name') != APP_NAME:
         raise InplaceError('host_or_app_mismatch')
-    if go.get('alias') != ALIAS or go.get('loopback') != LOOPBACK:
+    if go.get('alias') != ALIAS or go.get('current_port') not in SLOT_PORTS:
         raise InplaceError('endpoint_contract_mismatch')
     if go.get('app_network') != APP_NETWORK or go.get('dependency_network') != DEPENDENCY_NETWORK:
         raise InplaceError('network_contract_mismatch')
-    if (go.get('single_app_only') is not True or go.get('stop_only_sub2') is not True
+    if (go.get('dual_slot') is not True or go.get('stop_only_sub2') is not True
             or go.get('preserve_pg_redis_appdata') is not True
             or go.get('forbid_old_gcp_fallback') is not True
             or go.get('dns_apply') is not False
@@ -175,6 +161,11 @@ def validate_go(go, action, filename=None):
             raise InplaceError('revision_invalid')
     if go['current_image'] == go['target_image'] or go['current_revision'] == go['target_revision']:
         raise InplaceError('target_must_differ_from_current')
+    compatible = go.get('rollback_compatible')
+    if compatible is not None and (not isinstance(compatible, dict)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(compatible.get('image')))
+            or not HEX40_RE.fullmatch(str(compatible.get('revision')))):
+        raise InplaceError('rollback_compatible_identity_invalid')
     if not isinstance(go.get('current_started_at'), str) or not go['current_started_at']:
         raise InplaceError('current_started_at_required')
     for dep_key, dep_name in (('pg', PG_NAME), ('redis', REDIS_NAME), ('axon_nailong', AXON_NAME)):
@@ -287,131 +278,39 @@ def rebind_daily_backup(ops, directory, expected_app_id, expected_image, expecte
     return result
 
 
-def recover(go, ops, directory=None):
-    """Converge Nailong back to the previous container image on the live PG/Redis/appdata.
+@contextmanager
+def release_lock():
+    import fcntl
+    with open(Path(NAILONG_INPLACE_ROOT) / 'release.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
-    Never assumes a missing `current-stopped.json` means the original container wasn't stopped;
-    always inspects actual container states first and refuses to start the original container
-    unless any new candidate container is verified Exited (`running == False`).
-    """
-    validate_go(go, go.get('action', 'recover'))
+
+def recover(go, ops, directory=None):
+    """Warm the retained original, swap the same upstream back, then drain the candidate."""
+    validate_go(go, 'recover')
     directory = Path(directory) if directory is not None else HERE / 'windows' / go['window']
     directory.mkdir(parents=True, exist_ok=True)
     live = ops.observe_live(go['target_revision'])
     verify_dependencies_and_policy(live, go)
-
-    retained_name = archive_container_name(go['window'], go['current_container_id'])
-    try:
-        state = ops.observe_containers(go['current_container_id'], retained_name)
-    except Exception as obs_err:
-        label = error_label(obs_err)
-        record_event(directory, 'recovery_requires_operator', {
-            'reason': 'container_state_unknown',
-            'error': label,
-        })
-        raise InplaceError('container_state_unknown') from None
-
-    if not isinstance(state, dict) or state.get('original_by_id') is None:
-        record_event(directory, 'recovery_requires_operator', {
-            'reason': 'original_container_missing_or_unobservable',
-        })
-        raise InplaceError('original_container_missing_or_unobservable')
-
-    active = state.get('active_sub2')
-    original = state.get('original_by_id')
-
-    record_event(directory, 'recover_started', {
-        'window': go['window'],
-        'current_container_id': go['current_container_id'],
-        'active_sub2_id': active.get('id') if active else None,
-        'original_running': original.get('running'),
-        'original_name': original.get('name'),
-    })
-
-    # If a new container occupies `sub2api-gcp`, it MUST be stopped and verified Exited (`running == False`)
-    # before we ever rename or start the original container (prevents dual-active Sub2).
-    if active and active['id'] != go['current_container_id']:
-        assert_stoppable(APP_NAME)
-        failed_archive = f"sub2api-gcp-failed-{go['window']}-{active['id'][:12]}"
-        try:
-            stopped_new = ops.stop_and_remove_new_container(active['id'], failed_archive)
-        except Exception as stop_err:
-            label = error_label(stop_err)
-            record_event(directory, 'recovery_requires_operator', {
-                'reason': 'new_container_still_running_or_stop_unknown',
-                'new_container_id': active['id'],
-                'error': label,
-                'original_started': False,
-            })
-            raise InplaceError('new_container_still_running_or_stop_unknown') from None
-
-        if stopped_new.get('running') is not False:
-            record_event(directory, 'recovery_requires_operator', {
-                'reason': 'new_container_not_exited_refusing_dual_active',
-                'new_container_id': active['id'],
-                'original_started': False,
-            })
-            raise InplaceError('new_container_not_exited_refusing_dual_active')
-        write_atomic(directory, 'new-container-removed.json', stopped_new)
-
-    restored_app = ops.restore_and_start_original_container(go['current_container_id'], retained_name)
-    write_atomic(directory, 'original-container-restored.json', restored_app)
-
-    after_live = ops.observe_live(go['target_revision'])
-    verify_dependencies_and_policy(after_live, go)
-
-    # Even if the original container was only stopped and restarted (or never renamed),
-    # its StartedAt may have changed or stayed put; rebind_daily_backup syncs source.json
-    # to the actual live (id, started_at) and verifies `core_backup.py source-check`.
-    backup_receipt = rebind_daily_backup(
-        ops,
-        directory,
-        expected_app_id=restored_app['id'],
-        expected_image=go['current_image'],
-        expected_revision=go['current_revision'],
-        expected_appdata=go['appdata'],
-        pg_pin=go['pg'],
-        redis_pin=go['redis'],
-    )
+    active = ops.routed_container()
+    original = ops.prepare_original(go, directory)
+    route = None
+    if active['id'] != original['id']:
+        route = ops.activate_slot(active['id'], original['id'], go['window'] + '-recover')
+        write_atomic(directory, 'recovery-traffic-switched.json', route)
+    else:
+        ops.make_canonical(original['id'], go['window'] + '-recover')
+    backup = rebind_daily_backup(
+        ops, directory, original['id'], original['image'], original['revision'],
+        go['appdata'], go['pg'], go['redis'])
+    if route:
+        ops.schedule_retirement(active['id'], route['retiring_workers'], directory)
     body = record_event(directory, 'recovered_to_previous_image', {
-        'window': go['window'],
-        'app': restored_app,
-        'pg_preserved': go['pg']['id'],
-        'redis_preserved': go['redis']['id'],
-        'appdata_preserved': go['appdata'],
-        'thought_policy': after_live['thought_policy'],
-        'backup': backup_receipt,
-        'old_gcp_touched': False,
-        'dns_applied_by_runner': False,
-        'worker_applied_by_runner': False,
-    })
+        'app': original, 'backup': backup, 'route': route, 'execution_id': go.get('execution_id'),
+        'pg_preserved': go['pg']['id'], 'redis_preserved': go['redis']['id']})
     write_atomic(directory, 'recover-terminal.json', body)
     return body
-
-
-def _reconcile_stop_after_lost_ack(ops, directory, current_id, retained_name):
-    """When stop_and_rename_current raises (e.g. lost SSH ACK), inspect live containers to record what happened."""
-    try:
-        state = ops.observe_containers(current_id, retained_name)
-    except Exception:
-        return None
-    orig = (state or {}).get('original_by_id')
-    if not isinstance(orig, dict):
-        return None
-    observed = {
-        'id': orig.get('id'),
-        'name': orig.get('name'),
-        'running': orig.get('running'),
-        'reconciled_from_live_observation': True,
-    }
-    write_atomic(directory, 'stop-observed-after-error.json', observed)
-    if orig.get('running') is False and orig.get('name') == retained_name and not (directory / 'current-stopped.json').exists():
-        claim(directory, 'current-stopped.json', {
-            'id': current_id,
-            'retained_name': retained_name,
-            'reconciled_after_lost_ack': True,
-        })
-    return observed
 
 
 def forward(go, ops, template_name=None, directory=None):
@@ -420,147 +319,82 @@ def forward(go, ops, template_name=None, directory=None):
     directory.mkdir(parents=True, exist_ok=True)
     if (directory / 'forward-started.json').exists():
         raise InplaceError('window_already_claimed')
-
     live = ops.observe_live(go['target_revision'])
     verify_dependencies_and_policy(live, go)
     verify_live_current_app(live, go)
-
+    ops.verify_peer_safe_image(go['target_image'], go['target_revision'])
+    if go.get('rollback_compatible'):
+        ops.verify_peer_safe_image(go['rollback_compatible']['image'], go['rollback_compatible']['revision'])
+        ops.admit_core_identity_pair(b'', go['rollback_compatible']['image'], go['rollback_compatible']['revision'])
+    if ops.routed_container()['id'] != go['current_container_id']:
+        raise InplaceError('routed_container_mismatch')
     if go.get('admit_core_identity_pair') is True:
-        admit_receipt = ops.admit_core_identity_pair(
-            CANDIDATE_CORE_IDENTITY.read_bytes(),
-            go['target_image'],
-            go['target_revision'],
-        )
-        claim(directory, 'core-identity-admitted.json', admit_receipt)
-
-    ops.allow_legacy_busy_after_wait = go.get('allow_legacy_busy_after_wait') is True
-    runtime_spec = ops.capture_current_container_spec(go['current_container_id'], go['appdata'])
-    claim(directory, 'forward-started.json', {
-        'window': go['window'],
-        'previous_container_id': go['current_container_id'],
-        'previous_image': go['current_image'],
-        'target_image': go['target_image'],
-        'target_revision': go['target_revision'],
-        'appdata': go['appdata'],
-    })
-
-    retained_name = archive_container_name(go['window'], go['current_container_id'])
+        receipt = ops.admit_core_identity_pair(CANDIDATE_CORE_IDENTITY.read_bytes(), go['target_image'], go['target_revision'])
+        claim(directory, 'core-identity-admitted.json', receipt)
+    spec = ops.capture_current_container_spec(go['current_container_id'], go['appdata'])
+    if spec['port'] != go['current_port']:
+        raise InplaceError('current_port_mismatch')
+    target_port = next(port for port in SLOT_PORTS if port != spec['port'])
+    claim(directory, 'forward-started.json', {'window': go['window'], 'old_id': go['current_container_id'],
+          'target_port': target_port, 'target_image': go['target_image']})
+    started = None
     try:
-        assert_stoppable(APP_NAME)
-        claim(directory, 'stop-intent.json', {'container_id': go['current_container_id'], 'retained_name': retained_name})
-        stopped = ops.stop_and_rename_current(go['current_container_id'], retained_name)
-        claim(directory, 'current-stopped.json', stopped)
-        record_event(directory, 'current_stopped', stopped)
-
-        claim(directory, 'start-intent.json', {'target_image': go['target_image'], 'target_revision': go['target_revision']})
-        started = ops.create_and_start_target(
-            window=go['window'],
-            target_image=go['target_image'],
-            target_revision=go['target_revision'],
-            env_list=runtime_spec['env'],
-            appdata=go['appdata'],
-        )
+        started = ops.create_and_start_target(go['window'], go['target_image'], go['target_revision'],
+                                               spec['env'], go['appdata'], target_port, directory)
         claim(directory, 'target-healthy.json', started)
-        record_event(directory, 'target_healthy', started)
-
-        after_live = ops.observe_live(go['target_revision'])
-        verify_dependencies_and_policy(after_live, go)
-
-        backup_receipt = rebind_daily_backup(
-            ops,
-            directory,
-            expected_app_id=started['id'],
-            expected_image=go['target_image'],
-            expected_revision=go['target_revision'],
-            expected_appdata=go['appdata'],
-            pg_pin=go['pg'],
-            redis_pin=go['redis'],
-        )
-        body = record_event(directory, 'forward_terminal', {
-            'window': go['window'],
-            'app': started,
-            'retained_previous_container': {'id': go['current_container_id'], 'name': retained_name},
-            'pg_preserved': go['pg']['id'],
-            'redis_preserved': go['redis']['id'],
-            'axon_preserved': go['axon_nailong']['id'],
-            'appdata_preserved': go['appdata'],
-            'thought_policy': after_live['thought_policy'],
-            'backup': backup_receipt,
-            'old_gcp_touched': False,
-            'dns_applied_by_runner': False,
-            'worker_applied_by_runner': False,
-        })
-        claim(directory, 'forward-terminal.json', body)
-        return body
+        record_event(directory, 'target_healthy_old_still_serving', started)
+        verify_dependencies_and_policy(ops.observe_live(go['target_revision']), go)
+        claim(directory, 'switch-intent.json', {'old_id': go['current_container_id'], 'new_id': started['id']})
+        route = ops.activate_slot(go['current_container_id'], started['id'], go['window'])
+        started['name'] = APP_NAME
+        claim(directory, 'traffic-switched.json', route)
+        record_event(directory, 'traffic_switched', route)
+        backup = rebind_daily_backup(ops, directory, started['id'], go['target_image'], go['target_revision'],
+                                     go['appdata'], go['pg'], go['redis'])
+        if go.get('verify_rollback') is True:
+            # Commissioning round-trip while BOTH slots remain warm. No old
+            # image restart is needed, and the final active slot is the target.
+            back = ops.activate_slot(started['id'], go['current_container_id'], go['window'] + '-rollback-check')
+            rebind_daily_backup(ops, directory, go['current_container_id'], go['current_image'], go['current_revision'],
+                                go['appdata'], go['pg'], go['redis'])
+            again = ops.activate_slot(go['current_container_id'], started['id'], go['window'] + '-resume')
+            backup = rebind_daily_backup(ops, directory, started['id'], go['target_image'], go['target_revision'],
+                                         go['appdata'], go['pg'], go['redis'])
+            claim(directory, 'rollback-verified.json', {'back': back, 'forward': again, 'backup': backup})
+            route['retiring_workers'] = sorted(set(route['retiring_workers'] + back['retiring_workers'] + again['retiring_workers']))
     except Exception as error:
-        label = error_label(error)
-        write_atomic(directory, 'forward-error.json', {'error': label})
-        record_event(directory, 'forward_error_triggering_recover', {'error': label})
-        # Key fix (1): If stop-intent.json was written, never skip recover merely because
-        # current-stopped.json is absent (e.g. lost SSH ACK after stop/rename succeeded).
-        if (directory / 'stop-intent.json').exists() or (directory / 'current-stopped.json').exists():
-            if not (directory / 'current-stopped.json').exists():
-                _reconcile_stop_after_lost_ack(ops, directory, go['current_container_id'], retained_name)
-            recover_go = dict(go, action='recover')
-            recover(recover_go, ops, directory=directory)
+        write_atomic(directory, 'forward-error.json', {'error': error_label(error)})
+        # Reconcile actual routing, not an ACK marker: reload/rename may have
+        # succeeded even if its acknowledgement or the receipt write was lost.
+        recovered = recover(dict(go, action='recover'), ops, directory)
+        intent_path = directory / 'target-created.json'
+        if intent_path.exists() and not recovered.get('route'):
+            candidate = json.loads(intent_path.read_text())
+            ops.discard_unrouted_candidate(candidate['id'], directory)
         raise
+    # A retirement failure must never roll back a healthy new release. It leaves
+    # the old container available, on both networks, for explicit recovery.
+    retirement = ops.schedule_retirement(go['current_container_id'], route['retiring_workers'], directory)
+    body = record_event(directory, 'forward_terminal', {
+        'window': go['window'], 'app': started, 'route': route, 'retirement': retirement, 'execution_id': go.get('execution_id'),
+        'retained_previous_container': {'id': go['current_container_id']},
+        'pg_preserved': go['pg']['id'], 'redis_preserved': go['redis']['id'],
+        'axon_preserved': go['axon_nailong']['id'], 'appdata_preserved': go['appdata'],
+        'backup': backup, 'old_gcp_touched': False, 'dns_applied_by_runner': False,
+        'worker_applied_by_runner': False})
+    claim(directory, 'forward-terminal.json', body)
+    return body
 
 
 def ready(ops, template):
     live = ops.observe_live(template['target_revision'])
-    deps_ok = True
-    try:
-        verify_dependencies_and_policy(live, template)
-        verify_live_current_app(live, template)
-    except InplaceError:
-        deps_ok = False
-    source_check = live.get('source_check') or {}
-    backup_ok = (live.get('backup_timer') == 'active'
-                 and source_check.get('stage') == 'core_backup_source_bound'
-                 and ((source_check.get('source') or {}).get('app') or {}).get('id') == template['current_container_id'])
-    candidate_bytes = CANDIDATE_CORE_IDENTITY.read_bytes()
-    candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
-    identity_admitted_for_target = (
-        live.get('nailong_identity_sha') == candidate_sha
-        and live.get('lag_identity_sha') == candidate_sha
-    )
-    host_carrier = live.get('host_carrier') or {}
-    carrier_staged = (
-        host_carrier.get('runner_sha256') == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-        and host_carrier.get('unit_present') is True
-    )
-    docker_api141 = live.get('docker_api141_probe') or {}
-    api141_ok = (
-        docker_api141.get('ok') is True
-        and docker_api141.get('app_id') == template['current_container_id']
-        and docker_api141.get('target_image_id') == template['target_image']
-    )
-    return {
-        'stage': (
-            'inplace_stage_verified_awaiting_parent_go'
-            if (deps_ok and backup_ok and identity_admitted_for_target and carrier_staged and api141_ok)
-            else 'inplace_not_ready'
-        ),
-        'go_executed': False,
-        'app_restarted': False,
-        'dependencies_and_current_app_match': deps_ok,
-        'current_backup_bound_and_active': backup_ok,
-        'docker_api141_verified': api141_ok,
-        'target_image_staged_on_nailong': live.get('loaded_target'),
-        'core_identity_status': {
-            'nailong_sha256': live.get('nailong_identity_sha'),
-            'lag_sha256': live.get('lag_identity_sha'),
-            'candidate_sha256': candidate_sha,
-            'target_pair_already_admitted': identity_admitted_for_target,
-        },
-        'host_carrier_status': {
-            'staged_on_nailong': carrier_staged,
-            'root': NAILONG_INPLACE_ROOT,
-            'systemd_unit': 'sub2-nailong-inplace@.service',
-            **host_carrier,
-        },
-        'live': live,
-    }
+    verify_dependencies_and_policy(live, template)
+    verify_live_current_app(live, template)
+    if live['app']['port'] != template['current_port']:
+        raise InplaceError('current_port_mismatch')
+    if live['backup_timer'] != 'active' or live['source_check'].get('stage') != 'core_backup_source_bound':
+        raise InplaceError('backup_not_ready')
+    return {'stage': 'bluegreen_ready', 'live': live}
 
 
 def bind_nailong_docker_api141(migration_mod, contract_mod):
@@ -638,6 +472,8 @@ class LocalNailongOps:
             'health': (d['State'].get('Health') or {}).get('Status'),
             'started_at': d['State'].get('StartedAt'),
             'restart_count': d.get('RestartCount', 0),
+            'port': self.container_port(d),
+            'networks': sorted((d.get('NetworkSettings') or {}).get('Networks') or {}),
             'appdata': mounts[0] if len(mounts) == 1 else None,
         }
 
@@ -722,233 +558,190 @@ class LocalNailongOps:
         env_map = dict(item.split('=', 1) for item in env if '=' in item)
         if not env_map.get('JWT_SECRET') or not env_map.get('TOTP_ENCRYPTION_KEY'):
             raise InplaceError('jwt_or_totp_missing')
-        return {'id': d['Id'], 'env': env, 'appdata': mounts[0]}
+        return {'id': d['Id'], 'env': env, 'appdata': mounts[0], 'port': self.container_port(d)}
 
-    def health_telemetry(self):
-        with urllib.request.urlopen('http://127.0.0.1:17861/health', timeout=5) as response:
-            return json.load(response)
+    @staticmethod
+    def container_port(d):
+        bindings = (d.get('NetworkSettings', {}).get('Ports', {}).get('8080/tcp') or
+                    d.get('HostConfig', {}).get('PortBindings', {}).get('8080/tcp') or [])
+        ports = [int(p['HostPort']) for p in bindings if p['HostIp'] == '127.0.0.1']
+        return ports[0] if len(ports) == 1 else None
 
-    def concurrency_snapshot(self):
-        # Same local Redis slot projection as the standard pre-release sampler.
-        # Authentication stays in this host process and child environment.
-        app = self.inspect_via_api141(APP_NAME)
-        values = dict(item.split('=', 1) for item in app['Config']['Env'] if '=' in item)
-        env = os.environ.copy()
-        command = ['docker', 'exec']
-        if values.get('REDIS_PASSWORD'):
-            env['REDISCLI_AUTH'] = values['REDIS_PASSWORD']
-            command += ['-e', 'REDISCLI_AUTH']
-        lua = """
-local patterns = {'concurrency:account:*', 'concurrency:user:*', 'concurrency:live:account:*', 'concurrency:live:user:*', 'concurrency:wait:*', 'wait:account:*'}
-local result = {}
-for _, pattern in ipairs(patterns) do
-    local cursor = '0'
-    local total = 0
-    repeat
-        local page = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
-        cursor = page[1]
-        for _, key in ipairs(page[2]) do
-            if string.match(key, ':%d+$') then
-                local typ = redis.call('TYPE', key).ok
-                if typ == 'zset' then total = total + redis.call('ZCARD', key)
-                elseif typ == 'string' then total = total + (tonumber(redis.call('GET', key)) or 0) end
-            end
-        end
-    until cursor == '0'
-    table.insert(result, total)
-end
-return cjson.encode(result)
-"""
-        result = subprocess.run(command + [REDIS_NAME, 'redis-cli', '--raw', 'EVAL', lua, '0'],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-        if result.returncode != 0:
-            raise InplaceError('legacy_slot_probe_failed')
-        counts = json.loads(result.stdout)
-        if len(counts) != 6:
-            raise InplaceError('legacy_slot_probe_shape')
-        sample = dict(zip(('account_slots', 'user_slots', 'live_account_slots', 'live_user_slots', 'user_waiting', 'account_waiting'), counts))
-        sample['at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        return sample
+    def routed_container(self):
+        port = slot_routing.active_port()
+        rows = json.loads(self.api141('GET', '/containers/json'))
+        for row in rows:
+            if any(p.get('IP') == '127.0.0.1' and p.get('PublicPort') == port for p in row.get('Ports', [])):
+                return self._inspect_container(row['Id'])
+        raise InplaceError('active_slot_container_missing')
 
-    def acquire_release_idle(self, app):
-        try:
-            health = self.health_telemetry()
-        except (OSError, ValueError):
-            health = {}
-        if isinstance(health.get('draining'), bool) and isinstance(health.get('in_flight'), int):
-            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR1')
-            deadline = time.monotonic() + 180
-            try:
-                while time.monotonic() < deadline:
-                    telemetry = self.health_telemetry()
-                    if telemetry.get('draining') is True and telemetry.get('in_flight') == 0:
-                        return {'mode': 'application_admission_hold', **telemetry}
-                    time.sleep(1)
-                raise InplaceError('inflight_drain_timeout_no_stop')
-            except Exception:
-                self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR2')
-                raise
-        # Legacy bootstrap has no request-level telemetry. Idle HTTP keep-alive
-        # sockets do not represent active requests; Shutdown closes them itself.
-        samples = []
-        deadline = time.monotonic() + 60
-        while True:
-            sample = self.concurrency_snapshot()
-            samples.append(sample)
-            busy = any(value for key, value in sample.items() if key != 'at')
-            if not busy:
-                return {'mode': 'legacy_zero_concurrency_slots', 'samples': samples}
-            if time.monotonic() >= deadline:
-                if getattr(self, 'allow_legacy_busy_after_wait', False):
-                    return {'mode': 'legacy_explicit_bounded_forward', 'samples': samples,
-                            'active_slots_at_stop': sample, 'explicit_parent_go': True}
-                raise InplaceError('legacy_active_slots_timeout_no_stop')
-            time.sleep(1)
-
-    def cancel_release_hold(self, app):
-        if not app['State']['Running']:
-            return
-        try:
-            health = self.health_telemetry()
-        except (OSError, ValueError):
-            health = {}
-        if health.get('draining') is True:
-            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR2')
-
-    def stop_and_rename_current(self, expected_id, retained_name):
-        app = self.inspect_via_api141(APP_NAME)
-        if app['Id'] != expected_id:
-            raise InplaceError('stop_identity_mismatch')
-        idle = self.acquire_release_idle(app)
-        self.api141('POST', '/containers/' + app['Id'] + '/update', {'RestartPolicy': {'Name': 'no'}})
-        if app['State']['Running']:
-            self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGTERM')
-        deadline = time.monotonic() + 360
-        while time.monotonic() < deadline:
-            cur = self.inspect_via_api141(app['Id'])
-            if not cur['State']['Running']:
-                self.api141('POST', '/containers/' + app['Id'] + '/rename?name=' + retained_name)
-                return {'id': app['Id'], 'retained_name': retained_name, 'exit_code': cur['State']['ExitCode'], 'drain': idle}
-            time.sleep(2)
-        raise InplaceError('graceful_stop_timeout')
-
-    def create_and_start_target(self, window, target_image, target_revision, env_list, appdata):
-        img_info = json.loads(self.api141('GET', '/images/' + target_image + '/json'))
-        rev = ((img_info.get('Config') or {}).get('Labels') or {}).get('org.opencontainers.image.revision')
-        if img_info.get('Id') != target_image or rev != target_revision:
-            raise InplaceError('target_image_verify_failed')
-
-        mount = appdata + ':/app/data:rw'
-        body = self._contract.api141_create_body(
-            target_image,
-            env_list,
-            {'task53.inplace_window': window},
-            [mount],
-            APP_NETWORK,
-            'unless-stopped',
-        )
-        body['StopTimeout'] = 360
-        # Explicit process budget and Docker grace must stay ordered.
-        body['Env'] = [v for v in env_list if not v.startswith('SERVER_SHUTDOWN_TIMEOUT_SECONDS=')] + ['SERVER_SHUTDOWN_TIMEOUT_SECONDS=300']
-        created = json.loads(self.api141('POST', '/containers/create?name=' + APP_NAME, body))
-        cid = created['Id']
-        self.api141('POST', '/networks/' + DEPENDENCY_NETWORK + '/connect', {
-            'Container': cid,
-            'EndpointConfig': {'Aliases': [ALIAS]},
-        })
-        self.api141('POST', '/containers/' + cid + '/start')
-
+    def wait_ready(self, cid, image, revision):
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            cur = self.inspect_via_api141(cid)
-            if not cur['State']['Running'] or cur.get('RestartCount', 0) > 0:
+            info = self._inspect_container(cid)
+            if info['image'] != image or info['revision'] != revision:
+                raise InplaceError('target_identity_changed')
+            if not info['running'] or info['restart_count']:
                 raise InplaceError('target_exited_or_restarted')
-            if (cur['State'].get('Health') or {}).get('Status') == 'healthy':
+            if info['health'] == 'healthy':
                 try:
-                    status = urllib.request.urlopen('http://127.0.0.1:17861/health', timeout=5).status
-                except Exception:
-                    status = 0
-                if status == 200:
-                    return {
-                        'id': cur['Id'],
-                        'name': APP_NAME,
-                        'image': cur['Image'],
-                        'revision': rev,
-                        'started_at': cur['State']['StartedAt'],
-                        'health': 'healthy',
-                        'loopback_http': status,
-                    }
-            time.sleep(2)
-        raise InplaceError('target_health_timeout')
+                    for path in ('/health', '/readyz'):
+                        with urllib.request.urlopen(f"http://127.0.0.1:{info['port']}{path}", timeout=5) as response:
+                            if response.status != 200:
+                                raise InplaceError('target_not_ready')
+                    return info
+                except OSError:
+                    pass
+            time.sleep(1)
+        raise InplaceError('target_readiness_timeout')
 
-    def observe_containers(self, original_id, retained_name):
-        return {
-            'active_sub2': self._inspect_container(APP_NAME),
-            'original_by_id': self._inspect_container(original_id),
-            'retained': self._inspect_container(retained_name),
-        }
+    def verify_peer_safe_image(self, image, revision):
+        img = json.loads(self.api141('GET', '/images/' + image + '/json'))
+        labels = img['Config'].get('Labels') or {}
+        if (img['Id'] != image or labels.get('org.opencontainers.image.revision') != revision
+                or labels.get('io.sub2api.peer-safe-startup') != 'true'):
+            raise InplaceError('peer_safe_image_required')
 
-    def stop_and_remove_new_container(self, new_container_id, failed_archive_name):
-        cur = self.inspect_via_api141(new_container_id)
-        if cur['State']['Running']:
-            self.acquire_release_idle(cur)
-        self.api141('POST', '/containers/' + new_container_id + '/update', {'RestartPolicy': {'Name': 'no'}})
-        if cur['State']['Running']:
-            self.api141('POST', '/containers/' + new_container_id + '/kill?signal=SIGTERM')
-        deadline = time.monotonic() + 360
-        info = cur
-        while time.monotonic() < deadline:
-            info = self.inspect_via_api141(new_container_id)
-            if not info['State']['Running']:
-                break
-            time.sleep(2)
-        if info['State']['Running']:
-            raise InplaceError('new_container_stop_timeout_still_running')
-        if info['Name'].lstrip('/') == APP_NAME:
-            self.api141('POST', '/containers/' + new_container_id + '/rename?name=' + failed_archive_name)
-        return {
-            'stopped_id': new_container_id,
-            'running': False,
-            'exit_code': info['State'].get('ExitCode'),
-            'archived_as': failed_archive_name,
-        }
-
-    def restore_and_start_original_container(self, original_id, retained_name):
-        active = self._inspect_container(APP_NAME)
-        if active is not None and active['id'] != original_id:
-            raise InplaceError('active_sub2_occupied_by_other_container')
-        info = self.inspect_via_api141(original_id)
-        if info['Name'].lstrip('/') != APP_NAME:
-            self.api141('POST', '/containers/' + original_id + '/rename?name=' + APP_NAME)
-        self.api141('POST', '/containers/' + original_id + '/update', {'RestartPolicy': {'Name': 'unless-stopped'}})
-        if info['State']['Running']:
-            self.cancel_release_hold(info)
+    def create_and_start_target(self, window, target_image, target_revision, env_list, appdata, port, directory, receipt_name='target-created.json'):
+        self.verify_peer_safe_image(target_image, target_revision)
+        name = f'sub2api-gcp-slot-{port}-{window}'
+        body = self._contract.api141_create_body(target_image, env_list,
+                  {'task53.inplace_window': window}, [appdata + ':/app/data:rw'], APP_NETWORK, 'unless-stopped')
+        body['StopTimeout'] = 360
+        body['Env'] = [v for v in env_list if not v.startswith('SERVER_SHUTDOWN_TIMEOUT_SECONDS=')] + ['SERVER_SHUTDOWN_TIMEOUT_SECONDS=300']
+        body['HostConfig']['PortBindings']['8080/tcp'][0]['HostPort'] = str(port)
+        # Standby must never resolve under the active service alias. Network
+        # membership stays intact through retirement to preserve outbound SSE.
+        body['NetworkingConfig']['EndpointsConfig'][APP_NETWORK]['Aliases'] = [name]
+        existing = self._inspect_container(name)
+        if existing is None:
+            created = json.loads(self.api141('POST', '/containers/create?name=' + name, body))
+            cid = created['Id']
+            write_atomic(directory, receipt_name, {'id': cid, 'port': port, 'name': name})
+            existing = self._inspect_container(cid)
         else:
-            self.api141('POST', '/containers/' + original_id + '/start')
+            cid = existing['id']
+            if (existing['image'], existing['revision'], existing['port'], existing['appdata']) != (target_image, target_revision, port, appdata):
+                raise InplaceError('standby_container_identity_mismatch')
+            write_atomic(directory, receipt_name, {'id': cid, 'port': port, 'name': name, 'resumed': True})
+        if DEPENDENCY_NETWORK not in existing['networks']:
+            self.api141('POST', '/networks/' + DEPENDENCY_NETWORK + '/connect', {'Container': cid, 'EndpointConfig': {'Aliases': [name]}})
+        if not existing['running']:
+            self.api141('POST', '/containers/' + cid + '/start')
+        return self.wait_ready(cid, target_image, target_revision)
 
-        deadline = time.monotonic() + 180
+    def make_canonical(self, target_id, window):
+        current = self._inspect_container(APP_NAME)
+        if current and current['id'] != target_id:
+            self.api141('POST', '/containers/' + current['id'] + '/rename?name=' + archive_container_name(window, current['id']))
+        target = self._inspect_container(target_id)
+        if target['name'] != APP_NAME:
+            self.api141('POST', '/containers/' + target_id + '/rename?name=' + APP_NAME)
+
+    def activate_slot(self, expected_id, target_id, window):
+        active = self.routed_container()
+        if active['id'] != expected_id:
+            raise InplaceError('active_slot_changed')
+        target = self._inspect_container(target_id)
+        self.wait_ready(target_id, target['image'], target['revision'])
+        # A retained old slot must not reboot itself beside the new active slot.
+        # In particular the bootstrap legacy image has a destructive startup sweep.
+        self.api141('POST', '/containers/' + expected_id + '/update', {'RestartPolicy': {'Name': 'no'}})
+        image = json.loads(self.api141('GET', '/images/' + target['image'] + '/json'))
+        peer_safe = (image['Config'].get('Labels') or {}).get('io.sub2api.peer-safe-startup') == 'true'
+        self.api141('POST', '/containers/' + target_id + '/update',
+                    {'RestartPolicy': {'Name': 'unless-stopped' if peer_safe else 'no'}})
+        self.make_canonical(target_id, window)
+        try:
+            route = slot_routing.switch(active['port'], target['port'])
+        except Exception:
+            self.make_canonical(expected_id, window + '-aborted')
+            raise
+        return dict(route, old_id=expected_id, new_id=target_id)
+
+    def prepare_original(self, go, directory):
+        cid, image, revision = go['current_container_id'], go['current_image'], go['current_revision']
+        original = self._inspect_container(cid)
+        if not original or original['image'] != image or original['revision'] != revision:
+            raise InplaceError('original_container_identity_mismatch')
+        if original['running']:
+            return self.wait_ready(cid, image, revision)
+        img = json.loads(self.api141('GET', '/images/' + image + '/json'))
+        if (img['Config'].get('Labels') or {}).get('io.sub2api.peer-safe-startup') == 'true':
+            self.api141('POST', '/containers/' + cid + '/update', {'RestartPolicy': {'Name': 'unless-stopped'}})
+            self.api141('POST', '/containers/' + cid + '/start')
+            return self.wait_ready(cid, image, revision)
+        # A cold legacy boot erases the serving peer's live Redis slots.
+        compatible = go.get('rollback_compatible')
+        if not compatible:
+            raise InplaceError('cold_rollback_requires_peer_safe_image')
+        active = self.routed_container()
+        if (active['image'], active['revision']) == (compatible['image'], compatible['revision']):
+            return active
+        self.admit_core_identity_pair(b'', compatible['image'], compatible['revision'])
+        spec = self.capture_current_container_spec(active['id'], go['appdata'])
+        return self.create_and_start_target(go['window'] + '-rollback', compatible['image'], compatible['revision'],
+                                            spec['env'], go['appdata'], original['port'], directory,
+                                            receipt_name='rollback-target-created.json')
+
+    def active_request_count(self, port):
+        with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=5) as response:
+            return json.load(response)['in_flight']
+
+    def schedule_retirement(self, cid, workers, directory):
+        info = self._inspect_container(cid)
+        unit = f'sub2-slot-retire-{cid[:12]}-{time.time_ns()}'
+        workers = sorted(set(workers) | slot_routing.retiring_worker_pids())
+        subprocess.run(['systemd-run', '--quiet', '--collect', '--unit=' + unit,
+                        '--property=TimeoutStartSec=0', '--property=UMask=0077',
+                        '/usr/bin/python3', '-B', str(Path(NAILONG_INPLACE_ROOT) / 'inplace_window.py'),
+                        'retire', '--container-id', cid, '--started-at', info['started_at'],
+                        '--workers', ','.join(map(str, workers)), '--directory', str(directory)],
+                       check=True, capture_output=True)
+        receipt = {'unit': unit, 'id': cid, 'started_at': info['started_at'], 'retiring_workers': workers}
+        write_atomic(directory, 'retirement-scheduled-' + cid[:12] + '.json', receipt)
+        return receipt
+
+    def drain_retired_slot(self, cid, retiring_workers, directory, expected_started_at):
+        workers = set(retiring_workers)
+        status_file = 'retirement-status-' + cid[:12] + '.json'
+        write_atomic(directory, status_file, {'stage': 'waiting_for_retiring_workers', 'id': cid})
+        while True:
+            # Wait OUTSIDE the transition lock so a rollback can reactivate a warm
+            # old slot immediately. A recovered/restarted epoch cancels retirement.
+            while workers & slot_routing.worker_pids():
+                time.sleep(1)
+            with release_lock():
+                info = self._inspect_container(cid)
+                if self.routed_container()['id'] == cid or info['started_at'] != expected_started_at:
+                    write_atomic(directory, status_file, {'stage': 'retirement_cancelled_reactivated', 'id': cid})
+                    return
+                if not info['running']:
+                    write_atomic(directory, status_file, {'stage': 'retired', 'id': cid, 'running': False})
+                    return
+                # Include generations retired by compensating reloads / rollback
+                # checks. Being unrouted alone never proves a slot has no SSEs.
+                workers = slot_routing.retiring_worker_pids()
+                # The commissioning release can have pre-migration Channel 50
+                # requests that bypassed Nginx; retain them until completion too.
+                if not workers and self.active_request_count(info['port']) == 0:
+                    self.api141('POST', '/containers/' + cid + '/update', {'RestartPolicy': {'Name': 'no'}})
+                    self.api141('POST', '/containers/' + cid + '/kill?signal=SIGTERM')
+                    break
+            time.sleep(1)
+        deadline = time.monotonic() + 360
         while time.monotonic() < deadline:
-            cur = self.inspect_via_api141(original_id)
-            if not cur['State']['Running']:
-                raise InplaceError('original_container_not_running')
-            if (cur['State'].get('Health') or {}).get('Status') == 'healthy':
-                try:
-                    status = urllib.request.urlopen('http://127.0.0.1:17861/health', timeout=5).status
-                except Exception:
-                    status = 0
-                if status == 200:
-                    labels = cur['Config'].get('Labels') or {}
-                    return {
-                        'id': cur['Id'],
-                        'name': cur['Name'].lstrip('/'),
-                        'image': cur['Image'],
-                        'revision': labels.get('org.opencontainers.image.revision') or '',
-                        'started_at': cur['State']['StartedAt'],
-                        'health': 'healthy',
-                        'loopback_http': status,
-                    }
-            time.sleep(2)
-        raise InplaceError('original_container_health_timeout')
+            info = self._inspect_container(cid)
+            if not info['running']:
+                write_atomic(directory, status_file, {'stage': 'retired', 'id': cid, 'running': False})
+                return
+            time.sleep(1)
+        raise InplaceError('retired_slot_stop_timeout_no_kill')
+
+    def discard_unrouted_candidate(self, cid, directory):
+        if self.routed_container()['id'] == cid:
+            raise InplaceError('refusing_to_discard_active_slot')
+        return self.schedule_retirement(cid, [], directory)
 
     def inspect_backup_roles(self):
         path = Path(BACKUP_SOURCE_JSON)
@@ -1028,145 +821,60 @@ print(json.dumps(ops.observe_live(%r)))
         return data
 
     def admit_core_identity_pair(self, candidate_bytes, target_image, target_revision):
-        digest = hashlib.sha256(candidate_bytes).hexdigest()
-        b64 = base64.b64encode(candidate_bytes).decode('ascii')
+        # Preserve the current policy on each endpoint, including releases newer
+        # than the historical candidate file bundled with this carrier.
         script = r'''
-import base64, hashlib, json, os
+import json
 from pathlib import Path
-
-payload = base64.b64decode(%r)
-want_sha = %r
-old_sha = %r
-want_pair = (%r, %r)
-if hashlib.sha256(payload).hexdigest() != want_sha:
-    raise SystemExit("candidate_sha_mismatch")
-
-path = Path("/opt/sub2-core-backup/core-backup/core_identity.py")
-checkpoint_dir = Path("/opt/sub2-core-backup/compat-nailong-config-before")
-checkpoint_dir.mkdir(mode=0o700, exist_ok=True)
-os.chmod(checkpoint_dir, 0o700)
-current_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-if current_sha not in (old_sha, want_sha):
-    raise SystemExit("unexpected_existing_identity_sha")
-
-if current_sha == old_sha:
-    saved = checkpoint_dir / ("core_identity.before-" + old_sha[:12] + ".py")
-    if not saved.exists():
-        saved.write_bytes(path.read_bytes())
-        os.chmod(saved, 0o600)
-    tmp = path.with_suffix(".py.tmp")
-    tmp.write_bytes(payload)
-    os.chmod(tmp, 0o644)
-    tmp.replace(path)
-    os.chmod(path, 0o644)
-
+path = Path('/opt/sub2-core-backup/core-backup/core_identity.py')
+source = path.read_text()
 ns = {}
-exec(compile(path.read_text(encoding="utf8"), str(path), "exec"), ns)
-if not ns["admits"](*want_pair) or not ns["admits"](*ns["FC899_NAILONG_PAIR"]) or not ns["admits"](*ns["NAILONG_CONFIG_PAIR"]):
-    raise SystemExit("admits_check_failed")
-fd = os.open(path, os.O_RDONLY)
-os.fsync(fd)
-os.close(fd)
-print(json.dumps({"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}))
-''' % (b64, digest, PARENT_CORE_IDENTITY_SHA, target_image, target_revision)
-        nailong_res = self._json_py(self.TARGET_SSH, script, timeout=30)
-        lag_res = self._json_py(self.LAG_SSH, script, timeout=30)
-        return {'nailong_sha256': nailong_res['sha256'], 'lag_sha256': lag_res['sha256'], 'pair': [target_image, target_revision]}
+exec(compile(source, str(path), 'exec'), ns)
+before = ns['ADMITTED_PAIRS']
+pair = (%r, %r)
+if pair not in before:
+    source += '\n# Blue-green release; preserve every prior admitted image/revision pair.\nADMITTED_PAIRS = ADMITTED_PAIRS | frozenset((' + repr(pair) + ',))\n'
+    check = {}
+    exec(compile(source, str(path), 'exec'), check)
+    assert check['ADMITTED_PAIRS'] == before | {pair}
+    tmp = path.with_suffix('.py.new')
+    tmp.write_text(source, encoding='utf8')
+    tmp.chmod(0o644)
+    tmp.replace(path)
+print(json.dumps({'admitted': True, 'pair': pair, 'previous_pairs_preserved': len(before)}))
+''' % (target_image, target_revision)
+        return {'nailong': self._json_py(self.TARGET_SSH, script, timeout=30),
+                'lag': self._json_py(self.LAG_SSH, script, timeout=30)}
 
     def stage_host_carrier(self, template):
-        """Pre-stage the host-resident runner, systemd unit, and dual-end core_identity admission without touching live Sub2."""
-        candidate_bytes = CANDIDATE_CORE_IDENTITY.read_bytes()
-        admit_res = self.admit_core_identity_pair(candidate_bytes, template['target_image'], template['target_revision'])
-
-        runner_bytes = Path(__file__).read_bytes()
-        runner_sha = hashlib.sha256(runner_bytes).hexdigest()
-        template_bytes = (HERE / 'go.template.json').read_bytes()
-
-        install_script = r'''
-import base64, hashlib, json, os, subprocess
+        admitted = self.admit_core_identity_pair(b'', template['target_image'], template['target_revision'])
+        compatible = template.get('rollback_compatible')
+        if compatible:
+            admitted['rollback_compatible'] = self.admit_core_identity_pair(b'', compatible['image'], compatible['revision'])
+        files = {name: base64.b64encode((HERE / name).read_bytes()).decode('ascii')
+                 for name in ('inplace_window.py', 'slot_routing.py', 'core_identity_candidate.py', 'go.template.json')}
+        script = r'''
+import base64, json
 from pathlib import Path
-
-runner_b64 = %r
-runner_sha = %r
-candidate_b64 = %r
-template_b64 = %r
-unit_b64 = %r
-
-root = Path("/opt/sub2api-nailong/inplace")
-(root / "windows").mkdir(mode=0o700, parents=True, exist_ok=True)
-os.chmod(root, 0o700)
-os.chmod(root / "windows", 0o700)
-
-runner = base64.b64decode(runner_b64)
-if hashlib.sha256(runner).hexdigest() != runner_sha:
-    raise SystemExit("runner_sha_mismatch")
-
-old_runner = root / "inplace_window.py"
-backup_runner = root / "inplace_window.py.before-drain-20261115"
-if old_runner.is_file() and not backup_runner.exists():
-    backup_runner.write_bytes(old_runner.read_bytes())
-    os.chmod(backup_runner, 0o700)
-for name, raw, mode in (
-    ("inplace_window.py", runner, 0o700),
-    ("core_identity_candidate.py", base64.b64decode(candidate_b64), 0o644),
-    ("go.template.json", base64.b64decode(template_b64), 0o600),
-):
+root = Path('/opt/sub2api-nailong/inplace')
+files = %r
+for name, payload in files.items():
     target = root / name
-    tmp = root / (name + ".tmp")
-    tmp.write_bytes(raw)
-    os.chmod(tmp, mode)
+    if target.exists():
+        backup = root / (name + '.before-bluegreen-20261115')
+        if not backup.exists():
+            backup.write_bytes(target.read_bytes())
+            backup.chmod(0o600)
+    tmp = root / (name + '.new')
+    tmp.write_bytes(base64.b64decode(payload))
+    tmp.chmod(0o700 if name.endswith('.py') else 0o600)
     tmp.replace(target)
-
-unit_text = base64.b64decode(unit_b64).decode("utf8")
-unit_path = Path("/etc/systemd/system/sub2-nailong-inplace@.service")
-if not unit_path.is_file():
-    raise SystemExit("existing_systemd_unit_missing")
-current_unit = unit_path.read_text(encoding="utf8")
-if current_unit not in (unit_text, unit_text.replace("TimeoutStartSec=0", "TimeoutStartSec=600")):
-    raise SystemExit("existing_systemd_unit_mismatch")
-unit_backup = root / "sub2-nailong-inplace@.service.before-drain-20261115"
-if current_unit != unit_text:
-    if not unit_backup.exists():
-        unit_backup.write_text(current_unit, encoding="utf8")
-        os.chmod(unit_backup, 0o600)
-    unit_tmp = unit_path.with_suffix(".service.tmp")
-    unit_tmp.write_text(unit_text, encoding="utf8")
-    os.chmod(unit_tmp, 0o644)
-    unit_tmp.replace(unit_path)
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
-print(json.dumps({
-    "runner_sha256": hashlib.sha256((root / "inplace_window.py").read_bytes()).hexdigest(),
-    "unit_present": unit_path.is_file(),
-    "unit_timeout_start_sec": 0,
-    "previous_unit_backup": str(unit_backup),
-}))
-''' % (
-            base64.b64encode(runner_bytes).decode('ascii'),
-            runner_sha,
-            base64.b64encode(candidate_bytes).decode('ascii'),
-            base64.b64encode(template_bytes).decode('ascii'),
-            base64.b64encode(SYSTEMD_UNIT_CONTENT.encode('utf8')).decode('ascii'),
-        )
-        staged_info = self._json_py(self.TARGET_SSH, install_script, timeout=60)
-
-        # Verify live Sub2 container, daily backup source-check, and LocalNailongOps /v1.41 API probe are healthy.
-        live_after = self.observe_live(template['target_revision'])
-        verify_dependencies_and_policy(live_after, template)
-        verify_live_current_app(live_after, template)
-        if (live_after.get('source_check') or {}).get('stage') != 'core_backup_source_bound':
-            raise InplaceError('source_check_broken_after_stage')
-        if (live_after.get('docker_api141_probe') or {}).get('ok') is not True:
-            raise InplaceError('docker_api141_probe_failed')
-
-        return {
-            'stage': 'host_carrier_and_identity_staged_without_restart',
-            'admitted_identity': admit_res,
-            'host_carrier': staged_info,
-            'docker_api141_probe': live_after['docker_api141_probe'],
-            'live_app_unchanged': live_after['app'],
-            'backup_timer': live_after['backup_timer'],
-            'source_check': live_after['source_check'],
-        }
+unit = Path('/etc/systemd/system/sub2-nailong-inplace@.service').read_text()
+assert 'TimeoutStartSec=0' in unit
+print(json.dumps({'stage': 'bluegreen_carrier_staged', 'files': sorted(files)}))
+''' % files
+        staged = self._json_py(self.TARGET_SSH, script, timeout=60)
+        return dict(staged, admitted=admitted)
 
     def launch_via_systemd(self, go, action, local_window_dir):
         """Upload signed GO to Nailong and start `sub2-nailong-inplace@<window>.service`."""
@@ -1175,21 +883,37 @@ print(json.dumps({
         local_window_dir = Path(local_window_dir)
         local_window_dir.mkdir(parents=True, exist_ok=True)
 
-        payload = (json.dumps(go, indent=2) + '\n').encode('utf8')
+        execution_id = str(time.time_ns())
+        go = dict(go, execution_id=execution_id)
         remote_dir = f'{NAILONG_INPLACE_ROOT}/windows/{window}'
-        cmd = (
-            f'umask 077; mkdir -p {remote_dir} && '
-            f'tee {remote_dir}/go.json >/dev/null && chmod 600 {remote_dir}/go.json && '
-            f'systemctl start --no-block sub2-nailong-inplace@{window}.service'
-        )
-        self._call(self.TARGET_SSH, cmd, data=payload, timeout=30)
+        script = r'''
+import fcntl, json, subprocess
+from pathlib import Path
+go = %r
+unit = 'sub2-nailong-inplace@' + go['window'] + '.service'
+with open('/opt/sub2api-nailong/inplace/launch.lock', 'a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    state = dict(line.split('=', 1) for line in subprocess.check_output(['systemctl','show',unit,'-p','ActiveState','-p','Job'], text=True).splitlines())
+    if state['ActiveState'] not in ('inactive','failed') or state.get('Job') not in ('','0',None):
+        raise SystemExit('window_already_running')
+    root = Path(%r)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if (root / 'status.json').exists():
+        (root / 'status.json').replace(root / ('status-before-' + go['execution_id'] + '.json'))
+    path = root / 'go.json'
+    path.write_text(json.dumps(go, indent=2) + '\n')
+    path.chmod(0o600)
+    subprocess.run(['systemctl','start','--no-block',unit],check=True)
+print(json.dumps({'execution_id':go['execution_id']}))
+''' % (go, remote_dir)
+        self._json_py(self.TARGET_SSH, script, timeout=30)
         write_atomic(local_window_dir, 'systemd-launched.json', {
             'unit': f'sub2-nailong-inplace@{window}.service',
             'remote_window_dir': remote_dir,
             'action': action,
         })
 
-        deadline = time.monotonic() + 360
+        deadline = time.monotonic() + 1800
         while time.monotonic() < deadline:
             poll_script = r'''
 import json, subprocess
@@ -1203,10 +927,11 @@ print(json.dumps({"status": status, "unit_state": active}))
             status = polled.get('status')
             if status:
                 write_atomic(local_window_dir, 'status.json', status)
-                if status.get('stage') in TERMINAL_STAGES:
+                terminal = 'forward_terminal' if action == 'forward' else 'recovered_to_previous_image'
+                if status.get('stage') == terminal and status.get('execution_id') == execution_id:
                     return status
-            if polled.get('unit_state') in ('failed', 'inactive') and status and status.get('stage') not in TERMINAL_STAGES:
-                raise InplaceError(status.get('error') or status.get('reason') or status.get('stage') or 'systemd_unit_failed')
+            if polled.get('unit_state') in ('failed', 'inactive'):
+                raise InplaceError((status or {}).get('error') or (status or {}).get('reason') or (status or {}).get('stage') or 'systemd_unit_failed')
             time.sleep(2)
         raise InplaceError('systemd_window_poll_timeout')
 
@@ -1218,19 +943,27 @@ def host_run(go_path):
     action = go.get('action')
     directory = go_path.parent
     ops = LocalNailongOps()
-    if action == 'forward':
-        return forward(go, ops, template_name=go_path.name, directory=directory)
-    if action == 'recover':
-        return recover(go, ops, directory=directory)
+    with release_lock():
+        if action == 'forward':
+            return forward(go, ops, template_name=go_path.name, directory=directory)
+        if action == 'recover':
+            return recover(go, ops, directory=directory)
     raise InplaceError('go_action_mismatch')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('ready', 'stage-carrier', 'forward', 'recover', 'host-run'))
-    parser.add_argument('--go', type=Path, help='Signed parent GO file for forward/recover/host-run')
-    parser.add_argument('--direct-ssh', action='store_true', help='Run forward/recover steps directly over SSH instead of Nailong systemd unit')
+    parser.add_argument('action', choices=('ready', 'stage-carrier', 'forward', 'recover', 'host-run', 'retire'))
+    parser.add_argument('--go', type=Path, help='Authorized GO file for forward/recover/host-run')
+    parser.add_argument('--container-id')
+    parser.add_argument('--started-at')
+    parser.add_argument('--workers', default='')
+    parser.add_argument('--directory', type=Path)
     args = parser.parse_args()
+
+    if args.action == 'retire':
+        LocalNailongOps().drain_retired_slot(args.container_id, [int(p) for p in args.workers.split(',') if p], args.directory, args.started_at)
+        return
 
     if args.action == 'host-run':
         if args.go is None:
@@ -1239,7 +972,7 @@ def main():
         print(json.dumps(result, indent=2))
         return
 
-    template = json.loads((HERE / 'go.template.json').read_text(encoding='utf8'))
+    template = json.loads((args.go or HERE / 'go.template.json').read_text(encoding='utf8'))
     ops = RemoteNailongOps()
     if args.action == 'ready':
         result = ready(ops, template)
@@ -1257,10 +990,7 @@ def main():
     go = json.loads(args.go.read_text(encoding='utf8'))
     validate_go(go, args.action, filename=args.go.name)
     local_dir = HERE / 'windows' / go['window']
-    if not args.direct_ssh:
-        result = ops.launch_via_systemd(go, args.action, local_dir)
-    else:
-        result = forward(go, ops, template_name=args.go.name, directory=local_dir) if args.action == 'forward' else recover(go, ops, directory=local_dir)
+    result = ops.launch_via_systemd(go, args.action, local_dir)
     print(json.dumps(result, indent=2))
 
 

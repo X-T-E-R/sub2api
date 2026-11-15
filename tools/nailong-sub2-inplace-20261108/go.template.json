@@ -1,12 +1,11 @@
 {
-  "schema": "nailong-sub2-inplace-go-1",
+  "schema": "nailong-sub2-bluegreen-go-2",
   "explicit_parent_go": false,
   "action": "forward",
   "window": "nailong-9dac8d131-TEMPLATE",
   "host": "136.66.61.218",
   "app_name": "sub2api-gcp",
   "alias": "sub2api-gcp",
-  "loopback": "127.0.0.1:17861",
   "app_network": "sub2api-nailong-app",
   "dependency_network": "sub2api-nailong",
   "appdata": "/opt/sub2api-nailong/runs/nailong-fc899-20261108t0659z/appdata",
@@ -36,12 +35,13 @@
     "continue_thought_only": false,
     "continue_zero_output": false
   },
-  "single_app_only": true,
   "stop_only_sub2": true,
   "preserve_pg_redis_appdata": true,
   "forbid_old_gcp_fallback": true,
   "dns_apply": false,
   "worker_apply": false,
   "rebind_daily_backup": true,
-  "admit_core_identity_pair": true
+  "admit_core_identity_pair": true,
+  "current_port": 17861,
+  "dual_slot": true
 }

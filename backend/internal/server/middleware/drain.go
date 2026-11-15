@@ -46,7 +46,7 @@ func (d *DrainState) Middleware() gin.HandlerFunc {
 			return
 		}
 		if !d.acquire() {
-			c.Header("Retry-After", "1")
+			c.Header("Retry-After", "5")
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "server_draining"})
 			return
 		}
