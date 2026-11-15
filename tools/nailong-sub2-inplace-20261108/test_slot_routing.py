@@ -19,9 +19,9 @@ class RoutingTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def test_bootstrap_changes_only_sub2_proxy_pass_and_access_logs(self):
-        public = 'location / {\n    proxy_pass http://127.0.0.1:17861;\n}\n'
+        public = 'server {\n client_max_body_size 100m;\n location / {\n    proxy_pass http://127.0.0.1:17861;\n}\n}\n'
         axon = 'location / {\n    proxy_pass http://axon_active_slot; # sibling owns this\n}\n'
-        private = 'location = /__task49_personal_sub2/v1/messages {\n    proxy_pass http://127.0.0.1:17861/v1/messages;\n}\n' + axon
+        private = 'server {\n client_max_body_size 100m;\n location = /__task49_personal_sub2/v1/messages {\n    proxy_pass http://127.0.0.1:17861/v1/messages;\n}\n' + axon + '}\n'
         routing.PUBLIC.write_text(public)
         routing.PRIVATE.write_text(private)
         with mock.patch.object(routing, 'worker_pids', return_value={1}), mock.patch.object(routing, 'reload_nginx'):
@@ -31,7 +31,18 @@ class RoutingTests(unittest.TestCase):
         self.assertIn('listen 172.20.0.1:17860;', routing.BRIDGE.read_text())
         self.assertEqual(result['bridge_base_url'], 'http://172.20.0.1:17860/v1')
         self.assertEqual(routing.active_port(), 17861)
+        for path in (routing.PUBLIC, routing.PRIVATE, routing.BRIDGE):
+            self.assertEqual(path.read_text().count('server {'), 1)
+            self.assertIn('client_max_body_size 100m;', path.read_text(), str(path))
         self.assertNotIn('$request', routing.LOG_FORMAT.split('$request_time')[0])
+
+    def test_install_refuses_any_sub2_server_missing_100m_body_limit(self):
+        routing.PUBLIC.write_text('server { location / { proxy_pass http://127.0.0.1:17861; } }')
+        routing.PRIVATE.write_text('server { client_max_body_size 100m; location = /__task49_personal_sub2/v1/messages { proxy_pass http://127.0.0.1:17861/v1/messages; } }')
+        with self.assertRaisesRegex(RuntimeError, 'sub2_body_limit_missing'), mock.patch.object(routing, 'reload_nginx') as reload:
+            routing.install(17861, '172.20.0.1')
+        reload.assert_not_called()
+        self.assertFalse(routing.UPSTREAM.exists())
 
     def test_switch_under_lock_rejects_stale_slot(self):
         routing.UPSTREAM.write_text(routing.upstream_text(17861))

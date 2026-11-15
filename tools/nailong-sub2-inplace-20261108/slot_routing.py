@@ -119,6 +119,7 @@ def install(port, bridge_gateway):
             'server {\n'
             f'    listen {bridge_gateway}:17860;\n'
             '    server_name _;\n'
+            '    client_max_body_size 100m;\n'
             f'    access_log {ACCESS_LOG} sub2_slot_safe;\n'
             '    location / {\n'
             '        proxy_pass http://sub2api_active_slot;\n'
@@ -131,6 +132,11 @@ def install(port, bridge_gateway):
             '        proxy_send_timeout 3600s;\n'
             '        proxy_next_upstream off;\n'
             '    }\n}\n')
+        for path in (public, private, bridge):
+            # These Sub2 vhosts each contain one server block. Preserve the
+            # existing 100 MiB request contract, including the bridge hop.
+            if not re.search(r'^\s*client_max_body_size\s+100m;', updates[path], re.MULTILINE):
+                raise RuntimeError('sub2_body_limit_missing')
         workers = worker_pids()
         try:
             for path, text in updates.items():
