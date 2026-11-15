@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	proxyURL := flag.String("proxy", "", "SOCKS5/SOCKS5h URL; empty uses direct TCP")
+	proxyURL := flag.String("proxy", os.Getenv("SUB2_TLS_FINGERPRINT_PROBE_PROXY"), "SOCKS5/SOCKS5h URL; defaults to SUB2_TLS_FINGERPRINT_PROBE_PROXY, empty uses direct TCP")
 	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
