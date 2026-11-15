@@ -26,6 +26,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -432,6 +433,7 @@ def forward(go, ops, template_name=None, directory=None):
         )
         claim(directory, 'core-identity-admitted.json', admit_receipt)
 
+    ops.allow_legacy_busy_after_wait = go.get('allow_legacy_busy_after_wait') is True
     runtime_spec = ops.capture_current_container_spec(go['current_container_id'], go['appdata'])
     claim(directory, 'forward-started.json', {
         'window': go['window'],
@@ -726,49 +728,56 @@ class LocalNailongOps:
         with urllib.request.urlopen('http://127.0.0.1:17861/health', timeout=5) as response:
             return json.load(response)
 
-    @staticmethod
-    def socket_count(path, port, both_ends=False):
-        count = 0
-        for table in ('tcp', 'tcp6'):
-            for line in (Path(path) / table).read_text().splitlines()[1:]:
-                fields = line.split()
-                local = int(fields[1].rsplit(':', 1)[1], 16)
-                remote = int(fields[2].rsplit(':', 1)[1], 16)
-                # LISTEN/TIME_WAIT/CLOSED carry no active request. Include
-                # half-closed connections and handshakes conservatively.
-                if (local == port or (both_ends and remote == port)) and fields[3] not in ('0A', '06', '07'):
-                    count += 1
-        return count
-
-    def connection_counts(self, app):
-        return {
-            'container_8080': self.socket_count('/proc/%d/net' % app['State']['Pid'], 8080),
-            'host_17861': self.socket_count('/proc/net', 17861, True),
-        }
-
-    def syn_hold(self, app, install):
-        # This is the application's network namespace, not the host firewall.
-        # Existing streams are never filtered. Only install after observing zero
-        # connections; verify zero again under this hold to close the race.
-        for binary in ('iptables', 'ip6tables'):
-            command = ['nsenter', '--target', str(app['State']['Pid']), '--net', binary, '-w', '5',
-                       '-I' if install else '-D', 'INPUT', '-p', 'tcp', '--dport', '8080', '--syn',
-                       '-m', 'comment', '--comment', 'sub2-release-idle', '-j', 'DROP']
-            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if install and result.returncode != 0:
-                self.syn_hold(app, False)
-                raise InplaceError('admission_hold_install_failed')
+    def concurrency_snapshot(self):
+        # Same local Redis slot projection as the standard pre-release sampler.
+        # Authentication stays in this host process and child environment.
+        app = self.inspect_via_api141(APP_NAME)
+        values = dict(item.split('=', 1) for item in app['Config']['Env'] if '=' in item)
+        env = os.environ.copy()
+        command = ['docker', 'exec']
+        if values.get('REDIS_PASSWORD'):
+            env['REDISCLI_AUTH'] = values['REDIS_PASSWORD']
+            command += ['-e', 'REDISCLI_AUTH']
+        lua = """
+local patterns = {'concurrency:account:*', 'concurrency:user:*', 'concurrency:live:account:*', 'concurrency:live:user:*', 'concurrency:wait:*', 'wait:account:*'}
+local result = {}
+for _, pattern in ipairs(patterns) do
+    local cursor = '0'
+    local total = 0
+    repeat
+        local page = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
+        cursor = page[1]
+        for _, key in ipairs(page[2]) do
+            if string.match(key, ':%d+$') then
+                local typ = redis.call('TYPE', key).ok
+                if typ == 'zset' then total = total + redis.call('ZCARD', key)
+                elseif typ == 'string' then total = total + (tonumber(redis.call('GET', key)) or 0) end
+            end
+        end
+    until cursor == '0'
+    table.insert(result, total)
+end
+return cjson.encode(result)
+"""
+        result = subprocess.run(command + [REDIS_NAME, 'redis-cli', '--raw', 'EVAL', lua, '0'],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        if result.returncode != 0:
+            raise InplaceError('legacy_slot_probe_failed')
+        counts = json.loads(result.stdout)
+        if len(counts) != 6:
+            raise InplaceError('legacy_slot_probe_shape')
+        sample = dict(zip(('account_slots', 'user_slots', 'live_account_slots', 'live_user_slots', 'user_waiting', 'account_waiting'), counts))
+        sample['at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        return sample
 
     def acquire_release_idle(self, app):
         try:
             health = self.health_telemetry()
         except (OSError, ValueError):
-            # An unhealthy candidate must remain recoverable: use the same
-            # socket-level quiet proof instead of guessing it has no requests.
             health = {}
-        deadline = time.monotonic() + 180
         if isinstance(health.get('draining'), bool) and isinstance(health.get('in_flight'), int):
             self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR1')
+            deadline = time.monotonic() + 180
             try:
                 while time.monotonic() < deadline:
                     telemetry = self.health_telemetry()
@@ -779,24 +788,26 @@ class LocalNailongOps:
             except Exception:
                 self.api141('POST', '/containers/' + app['Id'] + '/kill?signal=SIGUSR2')
                 raise
-        # Bootstrap from the legacy 5s binary: do not signal until BOTH ingress
-        # paths have no active/half-closed TCP connection, under a SYN hold.
-        while time.monotonic() < deadline:
-            counts = self.connection_counts(app)
-            if not any(counts.values()):
-                self.syn_hold(app, True)
-                time.sleep(1)
-                counts = self.connection_counts(app)
-                if not any(counts.values()):
-                    return {'mode': 'legacy_verified_idle_syn_hold', **counts}
-                self.syn_hold(app, False)
+        # Legacy bootstrap has no request-level telemetry. Idle HTTP keep-alive
+        # sockets do not represent active requests; Shutdown closes them itself.
+        samples = []
+        deadline = time.monotonic() + 60
+        while True:
+            sample = self.concurrency_snapshot()
+            samples.append(sample)
+            busy = any(value for key, value in sample.items() if key != 'at')
+            if not busy:
+                return {'mode': 'legacy_zero_concurrency_slots', 'samples': samples}
+            if time.monotonic() >= deadline:
+                if getattr(self, 'allow_legacy_busy_after_wait', False):
+                    return {'mode': 'legacy_explicit_bounded_forward', 'samples': samples,
+                            'active_slots_at_stop': sample, 'explicit_parent_go': True}
+                raise InplaceError('legacy_active_slots_timeout_no_stop')
             time.sleep(1)
-        raise InplaceError('legacy_idle_timeout_no_stop')
 
     def cancel_release_hold(self, app):
         if not app['State']['Running']:
             return
-        self.syn_hold(app, False)
         try:
             health = self.health_telemetry()
         except (OSError, ValueError):
