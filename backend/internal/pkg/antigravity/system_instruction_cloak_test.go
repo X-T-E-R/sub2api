@@ -11,7 +11,7 @@ import (
 
 func TestDefaultSystemInstructionRewritePhrases(t *testing.T) {
 	rules := DefaultSystemInstructionRewritePhrases()
-	require.Len(t, rules, 10)
+	require.Len(t, rules, 17)
 	require.NoError(t, ValidateSystemInstructionRewritePhrases(rules))
 	rewriter := NewCompiledSystemInstructionRewriter(rules)
 	for _, line := range rules {
@@ -82,6 +82,13 @@ func TestCompiledSystemInstructionSemanticRewrite(t *testing.T) {
 		{"You are a helper built on ANTHROPIC'S Claude Agent SDK.", "You are a helper built on the Claude Agent SDK by Anthropic."},
 		{"İstanbul ✓ You are Codex, an agent based on GPT-5.4.", "İstanbul ✓ You are Codex, an agent built on GPT-5.4."},
 		{"You are an AI agent running in OpenCode, a coding agent harness.", "You are an AI coding assistant, a coding agent harness."},
+		{"You are Kiki, an interactive general AI agent running on a user's computer.", "Help users directly with software, research, writing, and system tasks on their computer."},
+		{"Kiki product documentation is installed under C:/Users/xxoy1/.kiki/docs.", "Local product documentation is installed under C:/Users/xxoy1/.kiki/docs."},
+		{"Here <home> means the absolute Kiki home (server host): /home/user/.kiki", "Here <home> means the absolute local home (server host): /home/user/.kiki"},
+		{"Read relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation.", "Read relevant available local skills for configuration questions rather than consulting external upstream CLI sites."},
+		{"# Kimi Code User Instructions\nFollow repo conventions.", "# Workspace Engineering Instructions\nFollow repo conventions."},
+		{"You are Claude Code, Anthropic's official CLI for Claude.", "You are an interactive coding assistant."},
+		{"You are an expert coding assistant operating inside pi, a coding agent harness.", "You are an expert coding assistant."},
 		{"RFC\u00a02119\tkeywords:\r\nMUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", "RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."},
 		{"You\u2028are\u2029Codex,\van\fagent\tbased\non\r\nGPT-5", "You are Codex, an agent built on GPT-5"},
 		{"You are Codex, based on GPT-5. Hermes Agent, built by Nous Research. running within the Claude Agent SDK.", "You are Codex, based on GPT-5. Hermes Agent, built by Nous Research. running within the Claude Agent SDK."},
@@ -222,6 +229,45 @@ func TestTransformClaudeToGeminiSystemInstructionRewrite(t *testing.T) {
 	wire, err = TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
 	require.NoError(t, err)
 	require.Contains(t, gjson.GetBytes(wire, "request.systemInstruction.parts.0.text").String(), "cc_version=2")
+}
+
+func TestDefaultSystemInstructionRewritePreservesAntigravityIdentityPatch(t *testing.T) {
+	rewriter := NewCompiledSystemInstructionRewriter(DefaultSystemInstructionRewritePhrases())
+	identity := GetDefaultIdentityPatch()
+	require.Equal(t, identity, rewriter.Rewrite(identity))
+
+	req := &ClaudeRequest{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: 1024,
+		System: json.RawMessage(`[{"type":"text","text":"You are Kiki, an interactive general AI agent running on a user's computer.\nKiki product documentation is installed under /docs.\nHere <home> means the absolute Kiki home (server host).\nRead relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation.\n# Kimi Code User Instructions\nYou are Claude Code, Anthropic's official CLI for Claude.\nYou are an expert coding assistant operating inside pi, a coding agent harness."}]`),
+		Messages:  []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+	}
+	opts := TransformOptions{
+		EnableIdentityPatch:             true,
+		SystemInstructionRewriteEnabled: true,
+		SystemInstructionRewriter:       rewriter,
+	}
+	wire, err := TransformClaudeToGeminiWithOptions(req, "project", req.Model, opts)
+	require.NoError(t, err)
+
+	parts := gjson.GetBytes(wire, "request.systemInstruction.parts").Array()
+	require.GreaterOrEqual(t, len(parts), 4)
+	require.Equal(t, identity, parts[0].Get("text").String())
+	require.Contains(t, parts[1].Get("text").String(), "Never mention \"Antigravity\", \"Google Deepmind\"")
+
+	rewrittenSystem := parts[2].Get("text").String()
+	require.Contains(t, rewrittenSystem, "Help users directly with software, research, writing, and system tasks on their computer.")
+	require.Contains(t, rewrittenSystem, "Local product documentation is installed under /docs.")
+	require.Contains(t, rewrittenSystem, "Here <home> means the absolute local home (server host).")
+	require.Contains(t, rewrittenSystem, "Read relevant available local skills for configuration questions rather than consulting external upstream CLI sites.")
+	require.Contains(t, rewrittenSystem, "# Workspace Engineering Instructions")
+	require.Contains(t, rewrittenSystem, "You are an interactive coding assistant.")
+	require.Contains(t, rewrittenSystem, "You are an expert coding assistant.")
+	for _, leaked := range []string{"You are Kiki", "Kiki product documentation", "absolute Kiki home", "Kimi Code", "Claude Code, Anthropic's official CLI", "operating inside pi"} {
+		require.NotContains(t, rewrittenSystem, leaked)
+	}
+	// Verify idempotence on the whole rewritten wire payload.
+	require.Equal(t, wire, RewriteV1InternalSystemInstructionWire(wire, true, rewriter))
 }
 
 func TestUserRewritePreservesOriginalFallbackSessionID(t *testing.T) {

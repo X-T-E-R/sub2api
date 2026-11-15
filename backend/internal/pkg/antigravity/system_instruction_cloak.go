@@ -30,6 +30,13 @@ var defaultSystemInstructionRewritePhrases = []string{
 	`RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`,
 	`You are an AI agent running in OpenCode => You are an AI coding assistant`,
 	`Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces. => When the user writes @ followed by a path, they are pointing at that file or folder. Relative paths start at the workspace root; absolute paths are host paths. A path ending in a slash is a folder, so list it if its contents matter; otherwise it is a file, so open it with the read tool before relying on it. Paths with spaces appear as @"...".`,
+	`You are Kiki, an interactive general AI agent running on a user's computer. => Help users directly with software, research, writing, and system tasks on their computer.`,
+	`Kiki product documentation is installed under => Local product documentation is installed under`,
+	`Here <home> means the absolute Kiki home (server host) => Here <home> means the absolute local home (server host)`,
+	`Read relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation. => Read relevant available local skills for configuration questions rather than consulting external upstream CLI sites.`,
+	`Kimi Code User Instructions => Workspace Engineering Instructions`,
+	`You are Claude Code, Anthropic's official CLI for Claude => You are an interactive coding assistant`,
+	`You are an expert coding assistant operating inside pi, a coding agent harness => You are an expert coding assistant`,
 }
 
 // DefaultSystemInstructionRewritePhrases returns a defensive copy of the rules.
