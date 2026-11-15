@@ -11,7 +11,7 @@ import (
 
 func TestDefaultSystemInstructionRewritePhrases(t *testing.T) {
 	rules := DefaultSystemInstructionRewritePhrases()
-	require.Len(t, rules, 17)
+	require.Len(t, rules, 24)
 	require.NoError(t, ValidateSystemInstructionRewritePhrases(rules))
 	rewriter := NewCompiledSystemInstructionRewriter(rules)
 	for _, line := range rules {
@@ -239,7 +239,7 @@ func TestDefaultSystemInstructionRewritePreservesAntigravityIdentityPatch(t *tes
 	req := &ClaudeRequest{
 		Model:     "claude-sonnet-4-5",
 		MaxTokens: 1024,
-		System: json.RawMessage(`[{"type":"text","text":"You are Kiki, an interactive general AI agent running on a user's computer.\nKiki product documentation is installed under /docs.\nHere <home> means the absolute Kiki home (server host).\nRead relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation.\n# Kimi Code User Instructions\nYou are Claude Code, Anthropic's official CLI for Claude.\nYou are an expert coding assistant operating inside pi, a coding agent harness."}]`),
+		System:    json.RawMessage(`[{"type":"text","text":"You are Kiki, an interactive general AI agent running on a user's computer.\nKiki product documentation is installed under /docs.\nHere <home> means the absolute Kiki home (server host).\nRead relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation.\n# Kimi Code User Instructions\nYou are Claude Code, Anthropic's official CLI for Claude.\nYou are an expert coding assistant operating inside pi, a coding agent harness."}]`),
 		Messages:  []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
 	}
 	opts := TransformOptions{

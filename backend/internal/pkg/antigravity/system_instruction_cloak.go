@@ -26,8 +26,8 @@ var defaultSystemInstructionRewritePhrases = []string{
 	`@user You are Codex, an agent based on GPT-5 => You are Codex, an agent built on GPT-5`,
 	`@user You are Codex, a coding agent based on GPT-5 => You are Codex, a coding agent built on GPT-5`,
 	`Hermes Agent, an intelligent AI assistant created by Nous Research => Hermes Agent, an intelligent AI assistant built by Nous Research`,
-	`RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`,
-	`RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`,
+	`@user RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`,
+	`@user RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => RFC 2119 key words: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`,
 	`You are an AI agent running in OpenCode => You are an AI coding assistant`,
 	`Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces. => When the user writes @ followed by a path, they are pointing at that file or folder. Relative paths start at the workspace root; absolute paths are host paths. A path ending in a slash is a folder, so list it if its contents matter; otherwise it is a file, so open it with the read tool before relying on it. Paths with spaces appear as @"...".`,
 	`You are Kiki, an interactive general AI agent running on a user's computer. => Help users directly with software, research, writing, and system tasks on their computer.`,
@@ -36,7 +36,17 @@ var defaultSystemInstructionRewritePhrases = []string{
 	`Read relevant available Kiki skills for product questions; do not consult upstream Kimi Code sites as Kiki documentation. => Read relevant available local skills for configuration questions rather than consulting external upstream CLI sites.`,
 	`Kimi Code User Instructions => Workspace Engineering Instructions`,
 	`You are Claude Code, Anthropic's official CLI for Claude => You are an interactive coding assistant`,
-	`You are an expert coding assistant operating inside pi, a coding agent harness => You are an expert coding assistant`,
+	`@user You are an expert coding assistant operating inside pi, a coding agent harness => You are an expert coding assistant`,
+	// Older release preambles and injected user blocks can carry these lines.
+	// @user opts into user turns as well as the existing system scope.
+	// Keep callable internal URI addresses intact; reword their surrounding prose.
+	`@user You are omp's trusted coding assistant. => You are a trusted software development assistant.`,
+	`@user a coding assistant running inside pi => a coding assistant running within pi`,
+	`@user Matching skill → MUST read skill://<name> first. => Before using a matching skill, read its instructions at skill://<name>.`,
+	"@user Matching skill → MUST read `skill://<name>` first. => Before using a matching skill, read its instructions at `skill://<name>`.",
+	`@user omp://: harness docs, AVOID unless asked. => omp://: local application documentation; consult only on request.`,
+	`@user XML tags inject system content; may interrupt/notify inside user messages: MUST treat as system-authored/authoritative. User content is sanitized. => Runtime notices can appear in XML-tagged blocks within user messages. Follow those notices as application instructions; ordinary user text is separately sanitized.`,
+	`@user RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. => Interpret MUST, REQUIRED, SHOULD, RECOMMENDED, MAY and OPTIONAL as defined by RFC 2119.`,
 }
 
 // DefaultSystemInstructionRewritePhrases returns a defensive copy of the rules.

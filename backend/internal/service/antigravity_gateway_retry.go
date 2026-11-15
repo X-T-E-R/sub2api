@@ -101,6 +101,13 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 
 	// 判断是否触发智能重试
 	shouldSmartRetry, shouldRateLimitModel, waitDuration, modelName, isModelCapacityExhausted := shouldTriggerAntigravitySmartRetry(p.account, respBody)
+	if resp.StatusCode == http.StatusTooManyRequests && (shouldSmartRetry || shouldRateLimitModel) {
+		if delay, explicit := antigravityExplicitRetryDelay(resp.Header, respBody); explicit && delay > waitDuration {
+			waitDuration = delay
+			shouldRateLimitModel = delay >= antigravityRateLimitThreshold
+			shouldSmartRetry = !shouldRateLimitModel
+		}
+	}
 
 	// AI Credits 超量请求：
 	// 仅在上游明确返回免费配额耗尽时才允许切换到 credits。
@@ -1104,6 +1111,7 @@ type handleModelRateLimitParams struct {
 	account         *Account
 	statusCode      int
 	body            []byte
+	headers         http.Header
 	cache           GatewayCache
 	groupID         int64
 	sessionHash     string
@@ -1140,6 +1148,12 @@ func (s *AntigravityGatewayService) handleModelRateLimit(p *handleModelRateLimit
 			p.prefix, p.statusCode, info.ModelName)
 		return &handleModelRateLimitResult{
 			Handled: true,
+		}
+	}
+
+	if p.statusCode == http.StatusTooManyRequests {
+		if delay, explicit := antigravityExplicitRetryDelay(p.headers, p.body); explicit && delay > info.RetryDelay {
+			info.RetryDelay = delay
 		}
 	}
 
@@ -1226,6 +1240,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 		account:         account,
 		statusCode:      statusCode,
 		body:            body,
+		headers:         headers,
 		cache:           s.cache,
 		groupID:         groupID,
 		sessionHash:     sessionHash,
@@ -1247,8 +1262,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity-Debug] 429 response body: %s", truncateString(string(body), maxBytes))
 		}
 
-		resetAt := ParseGeminiRateLimitResetTime(body)
-		defaultDur := s.getDefaultRateLimitDuration()
+		resetAt := time.Now().Add(s.antigravity429Cooldown(headers, body))
 
 		// 尝试解析模型 key 并设置模型级限流
 		//
@@ -1262,7 +1276,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 			modelKey = resolveAntigravityModelKey(requestedModel)
 		}
 		if modelKey != "" {
-			ra := s.resolveResetTime(resetAt, defaultDur)
+			ra := resetAt
 			if !s.setAntigravityModelRateLimits(ctx, s.accountRepo, account, modelKey, prefix, statusCode, ra, false) {
 				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limit_set_failed model=%s", prefix, modelKey)
 			} else {
@@ -1273,7 +1287,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 		}
 
 		// 无法解析模型 key，兜底为账号级限流
-		ra := s.resolveResetTime(resetAt, defaultDur)
+		ra := resetAt
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 rate_limited account=%d reset_at=%v reset_in=%v (fallback)",
 			prefix, account.ID, ra.Format("15:04:05"), time.Until(ra).Truncate(time.Second))
 		if err := s.accountRepo.SetRateLimited(ctx, account.ID, ra); err != nil {
@@ -1302,12 +1316,4 @@ func (s *AntigravityGatewayService) getDefaultRateLimitDuration() time.Duration 
 		defaultDur = override
 	}
 	return defaultDur
-}
-
-// resolveResetTime 根据解析的重置时间或默认时长计算重置时间点
-func (s *AntigravityGatewayService) resolveResetTime(resetAt *int64, defaultDur time.Duration) time.Time {
-	if resetAt != nil {
-		return time.Unix(*resetAt, 0)
-	}
-	return time.Now().Add(defaultDur)
 }

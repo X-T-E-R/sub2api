@@ -253,6 +253,11 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 	if rateLimitDuration <= 0 {
 		rateLimitDuration = antigravityDefaultRateLimitDuration
 	}
+	if statusCode == http.StatusTooManyRequests {
+		if delay, explicit := antigravityExplicitRetryDelay(headers, respBody); explicit && delay > rateLimitDuration {
+			rateLimitDuration = delay
+		}
+	}
 	resetAt := time.Now().Add(rateLimitDuration)
 	if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, statusCode, resetAt, false) {
 		return false
