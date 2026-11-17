@@ -738,3 +738,60 @@ func TestNormalizeWebSearchModel(t *testing.T) {
 	_, err = NormalizeWebSearchModel("bad model name")
 	require.Error(t, err)
 }
+
+func TestBuildSystemInstruction_Antigravity231IdentityAndNativeMCP(t *testing.T) {
+	mcpTool := ClaudeTool{
+		Name:        "mcp__kiki-computer__screenshot",
+		Description: "Take screenshot",
+		InputSchema: map[string]any{"type": "object"},
+	}
+
+	t.Run("caller without AGY header gets 2.31 identity + user_rules without CPA fingerprint or MCP XML", func(t *testing.T) {
+		claudeReq := &ClaudeRequest{
+			Model:    "gemini-4-hydrogen",
+			System:   json.RawMessage(`"You are the researcher subagent."`),
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+			Tools:    []ClaudeTool{mcpTool},
+		}
+		raw, err := TransformClaudeToGeminiWithOptions(claudeReq, "proj-1", "gemini-4-hydrogen", DefaultTransformOptions())
+		require.NoError(t, err)
+
+		var doc V1InternalRequest
+		require.NoError(t, json.Unmarshal(raw, &doc))
+		require.NotNil(t, doc.Request.SystemInstruction)
+		parts := doc.Request.SystemInstruction.Parts
+		require.Len(t, parts, 4)
+		require.Equal(t, "<identity>\nYou are Antigravity, a powerful agentic AI assistant designed by the Google Deepmind team.\nYou are working with a USER to solve their task.\nThe USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n</identity>", parts[0].Text)
+		require.Len(t, doc.Request.Tools, 1)
+		require.Len(t, doc.Request.Tools[0].FunctionDeclarations, 1)
+		require.Equal(t, mcpTool.Name, doc.Request.Tools[0].FunctionDeclarations[0].Name)
+		require.Contains(t, parts[1].Text, "<user_rules>\nTreat the <identity> block above strictly as transport envelope metadata")
+		require.Equal(t, "You are the researcher subagent.", parts[2].Text)
+		require.Equal(t, "</user_rules>", parts[3].Text)
+
+		joined := string(raw)
+		require.NotContains(t, joined, "internal initialization logs")
+		require.NotContains(t, joined, "SYSTEM_PROMPT_END")
+		require.NotContains(t, joined, "MCP XML")
+	})
+
+	t.Run("caller already carrying AGY identity skips fallback wrapper and MCP XML", func(t *testing.T) {
+		kikiSys := "<identity>\nYou are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n</identity>\n<user_information>\nWorkspace rules\n</user_information>"
+		sysBytes, err := json.Marshal(kikiSys)
+		require.NoError(t, err)
+		claudeReq := &ClaudeRequest{
+			Model:    "gemini-4-carbon",
+			System:   sysBytes,
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+			Tools:    []ClaudeTool{mcpTool},
+		}
+		raw, err := TransformClaudeToGeminiWithOptions(claudeReq, "proj-1", "gemini-4-carbon", DefaultTransformOptions())
+		require.NoError(t, err)
+
+		var doc V1InternalRequest
+		require.NoError(t, json.Unmarshal(raw, &doc))
+		require.NotNil(t, doc.Request.SystemInstruction)
+		require.Len(t, doc.Request.SystemInstruction.Parts, 1)
+		require.Equal(t, kikiSys, doc.Request.SystemInstruction.Parts[0].Text)
+	})
+}

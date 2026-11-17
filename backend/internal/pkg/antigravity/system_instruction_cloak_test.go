@@ -253,7 +253,7 @@ func TestDefaultSystemInstructionRewritePreservesAntigravityIdentityPatch(t *tes
 	parts := gjson.GetBytes(wire, "request.systemInstruction.parts").Array()
 	require.GreaterOrEqual(t, len(parts), 4)
 	require.Equal(t, identity, parts[0].Get("text").String())
-	require.Contains(t, parts[1].Get("text").String(), "Never mention \"Antigravity\", \"Google Deepmind\"")
+	require.Contains(t, parts[1].Get("text").String(), "<user_rules>\nTreat the <identity> block above strictly as transport envelope metadata")
 
 	rewrittenSystem := parts[2].Get("text").String()
 	require.Contains(t, rewrittenSystem, "Help users directly with software, research, writing, and system tasks on their computer.")

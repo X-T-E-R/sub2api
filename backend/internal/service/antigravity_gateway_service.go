@@ -639,9 +639,11 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 	newPart := map[string]any{"text": identityPatch}
 
 	if existing, ok := request["systemInstruction"].(map[string]any); ok {
-		// 已有 systemInstruction，在开头插入身份提示词
+		// 与 Messages 路径共用传输信封边界，保留用户原有 parts 及其顺序。
 		if parts, ok := existing["parts"].([]any); ok {
-			existing["parts"] = append([]any{newPart}, parts...)
+			wrapped := []any{newPart, map[string]any{"text": antigravity.IdentityTransportUserRules}}
+			wrapped = append(wrapped, parts...)
+			existing["parts"] = append(wrapped, map[string]any{"text": "</user_rules>"})
 		} else {
 			existing["parts"] = []any{newPart}
 		}
