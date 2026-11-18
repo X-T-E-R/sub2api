@@ -441,6 +441,7 @@ export default {
         thresholdPlaceholder: 'Enter percentage',
       },
       testConnection: 'Test Connection',
+      warmupQuota: 'Warm Up Quota',
       reAuthorize: 'Re-Authorize',
       refreshToken: 'Refresh Token',
       noAccountsYet: 'No accounts yet',
@@ -468,6 +469,7 @@ export default {
         disableScheduling: 'Disable Scheduling',
         resetStatus: 'Reset Status',
         refreshToken: 'Refresh Token',
+        warmup: 'Batch Warmup',
         probeUpstreamBilling: 'Probe Upstream Rate',
         resetStatusSuccess: 'Successfully reset {count} account(s) status',
         refreshTokenSuccess: 'Successfully refreshed {count} account(s) token',
@@ -1639,7 +1641,37 @@ export default {
       linkCopied: 'Link Copied',
       needsReauth: 'Re-auth Required',
       rateLimited: 'Rate Limited',
-      usageError: 'Fetch Error'
+      usageError: 'Fetch Error',
+      warmup: {
+        titleSingle: 'Warm Up Quota — {name}',
+        titleBatch: 'Batch Warmup ({count})',
+        targetAccounts: 'Target Accounts ({count})',
+        pausedBadge: 'Paused',
+        bucketModeLabel: 'Quota Buckets',
+        modes: {
+          autoBuckets: 'Dual Pool (Gemini + Claude)',
+          geminiOnly: 'Gemini Pool Only',
+          claudeOnly: 'Claude Pool Only',
+          customModels: 'Custom Models'
+        },
+        customModelsLabel: 'Models (comma-separated)',
+        customModelsPlaceholder: 'gemini-4-carbon, claude-opus-5-5',
+        effortLabel: 'Effort',
+        refreshUsageLabel: 'Refresh 5h/7d quota immediately after warmup',
+        runButton: 'Run Warmup',
+        runningButton: 'Warming up...',
+        summary: 'Processed {total} account(s): {succeeded} succeeded, {failed} failed',
+        statusSucceeded: 'Succeeded',
+        statusFailed: 'Failed',
+        answerMatched: 'Verified',
+        answerUnmatched: 'Completed',
+        windowsRefreshed: '5h/7d Windows',
+        windowPending: 'Not started',
+        noEligibleSelected: 'None of the selected accounts support Antigravity quota warmup',
+        completedToast: 'Quota warmup completed: {succeeded}/{total} succeeded',
+        partialToast: 'Quota warmup partially completed: {succeeded} succeeded, {failed} failed',
+        failedToast: 'Quota warmup failed'
+      }
     },
 
     // Scheduled Tests

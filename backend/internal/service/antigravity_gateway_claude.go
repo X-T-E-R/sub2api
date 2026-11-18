@@ -56,6 +56,19 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Missing model")
 	}
 
+	safetyStreakSessionHash := antigravitySafetyStreakSessionHash(c, &claudeReq)
+	if abortErr := s.checkAntigravitySafetyStreakAdmission(ctx, c, safetyStreakSessionHash); abortErr != nil {
+		return nil, abortErr
+	}
+	var safetyStreakObs *antigravitySafetyStreakObserver
+	var safetyStreakCont *antigravityThoughtContinuation
+	if safetyStreakSessionHash != "" {
+		safetyStreakObs = beginAntigravitySafetyStreakObservation(c)
+		defer func() {
+			s.recordAntigravitySafetyStreakOutcome(ctx, safetyStreakSessionHash, safetyStreakObs, safetyStreakCont, forwardResult, forwardErr)
+		}()
+	}
+
 	originalModel := claudeReq.Model
 	ctx = WithAntigravityRequestEffort(ctx, body)
 	if message := antigravityEffortRequestError(ctx, account, originalModel); message != "" {
@@ -457,6 +470,12 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 				}
 			}
 
+			if isAntigravityUpstreamSafetyBlock(resp.StatusCode, respBody) {
+				safetyStreakObs.markUpstreamSafetyHTTP()
+				PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "", respBody)
+				return nil, s.writeMappedClaudeError(c, account, resp.StatusCode, ExtractUpstreamRequestID(resp.Header, respBody), respBody)
+			}
+
 			s.handleUpstreamError(ctx, prefix, account, resp.StatusCode, resp.Header, respBody, originalModel, 0, "", isStickySession)
 
 			// 精确匹配服务端配置类 400 错误，触发同账号重试 + failover
@@ -507,6 +526,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)
 	cacheContinuation = cont
+	safetyStreakCont = cont
 	cont.malformedRecovery = malformedRecovery
 	defer cont.startResponse(c, "messages", claudeReq.Stream)()
 	defer func() {

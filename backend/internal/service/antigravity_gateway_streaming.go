@@ -43,6 +43,7 @@ func (s *AntigravityGatewayService) observeAntigravityGeminiSSELine(c *gin.Conte
 	// unwrap the same line for business processing, so unwrapping here would be
 	// duplicate work on every SSE event.
 	observer.ObserveGemini([]byte(payload))
+	observeAntigravitySafetyStreakSSEPayload(c, []byte(payload))
 }
 
 // antigravityClientWriter 封装流式响应的客户端写入，自动检测断开并标记。

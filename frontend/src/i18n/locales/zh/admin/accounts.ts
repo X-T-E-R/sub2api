@@ -289,6 +289,7 @@ export default {
         thresholdPlaceholder: '输入百分比',
       },
       testConnection: '测试连接',
+      warmupQuota: '预热配额',
       reAuthorize: '重新授权',
       refreshToken: '刷新令牌',
       noAccountsYet: '暂无账号',
@@ -572,6 +573,7 @@ export default {
         disableScheduling: '批量停止调度',
         resetStatus: '批量重置状态',
         refreshToken: '批量刷新令牌',
+        warmup: '批量预热',
         probeUpstreamBilling: '探测上游倍率',
         resetStatusSuccess: '已成功重置 {count} 个账号状态',
         refreshTokenSuccess: '已成功刷新 {count} 个账号令牌',
@@ -1609,6 +1611,36 @@ export default {
         todayCost: '今日费用',
         usageTrend: '30天费用与请求趋势',
         noData: '该账号暂无使用数据'
+      },
+      warmup: {
+        titleSingle: '预热配额 — {name}',
+        titleBatch: '批量预热配额（{count}）',
+        targetAccounts: '目标账号（{count}）',
+        pausedBadge: '已暂停调度',
+        bucketModeLabel: '预热范围',
+        modes: {
+          autoBuckets: '双池预热 (Gemini + Claude)',
+          geminiOnly: '仅 Gemini 池',
+          claudeOnly: '仅 Claude 池',
+          customModels: '自定义模型'
+        },
+        customModelsLabel: '模型列表（逗号分隔）',
+        customModelsPlaceholder: 'gemini-4-carbon, claude-opus-5-5',
+        effortLabel: '推理档位',
+        refreshUsageLabel: '预热后立即刷新 5h/7d 配额',
+        runButton: '开始预热',
+        runningButton: '正在预热...',
+        summary: '已完成 {total} 个账号：{succeeded} 成功，{failed} 失败',
+        statusSucceeded: '成功',
+        statusFailed: '失败',
+        answerMatched: '核对一致',
+        answerUnmatched: '已响应',
+        windowsRefreshed: '5h/7d 窗口',
+        windowPending: '未启动',
+        noEligibleSelected: '当前所选账号中没有支持预热的 Antigravity 账号',
+        completedToast: '配额预热完成：{succeeded}/{total} 个账号成功',
+        partialToast: '配额预热部分完成：{succeeded} 成功，{failed} 失败',
+        failedToast: '配额预热失败'
       }
     },
 

@@ -136,6 +136,8 @@ type AntigravityGatewayService struct {
 	cacheContinuity              *antigravityCacheContinuity
 	malformedFunctionRetries     *antigravityMalformedRetryCache
 	malformedFunctionRetriesOnce sync.Once
+	safetyStreakFallbackOnce     sync.Once
+	safetyStreakFallback         *antigravityMemorySafetyStreakStore
 }
 
 func (s *AntigravityGatewayService) upstreamErrorBodyReadLimit() int64 {

@@ -34,6 +34,10 @@ func (s *AntigravityGatewayService) doAntigravityInference(p antigravityRetryLoo
 			return body
 		}
 		status := response.StatusCode
+		if isAntigravityUpstreamSafetyBlock(status, body) {
+			antigravitySafetyStreakObserverFromContext(p.c).markUpstreamSafetyHTTP()
+			return body
+		}
 		if handled, _, _ := s.applyErrorPolicy(p, status, response.Header, body); !handled &&
 			!s.handleAntigravityModelRateLimitBeforePolicy(p, status, response.Header, body) {
 			s.handleUpstreamError(p.ctx, p.prefix, p.account, status, response.Header, body,

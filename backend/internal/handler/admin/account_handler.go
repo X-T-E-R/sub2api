@@ -64,6 +64,7 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+	accountWarmup           *service.AccountWarmupService
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -73,6 +74,11 @@ func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamB
 
 func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUsageService) {
 	h.ollamaCloudUsage = usage
+}
+
+// SetAccountWarmupService attaches the standalone Antigravity account warmup service.
+func (h *AccountHandler) SetAccountWarmupService(warmup *service.AccountWarmupService) {
+	h.accountWarmup = warmup
 }
 
 // NewAccountHandler creates a new admin account handler

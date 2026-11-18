@@ -484,3 +484,32 @@ func (c *gatewayCache) MarkLiveCallClosed(ctx context.Context, callHash string, 
 	result, err := markLiveCallClosedScript.Run(ctx, c.rdb, []string{liveCallKey(callHash)}, int64(ttl.Seconds())).Int()
 	return result == 1, err
 }
+
+func antigravitySafetyStreakKey(sessionHash string) string {
+	return "agy:safety_streak:" + sessionHash
+}
+
+func (c *gatewayCache) GetAntigravitySafetyStreak(ctx context.Context, sessionHash string) ([]byte, error) {
+	if c == nil || c.rdb == nil || sessionHash == "" {
+		return nil, service.ErrAntigravitySafetyStreakNotFound
+	}
+	raw, err := c.rdb.Get(ctx, antigravitySafetyStreakKey(sessionHash)).Bytes()
+	if err == redis.Nil {
+		return nil, service.ErrAntigravitySafetyStreakNotFound
+	}
+	return raw, err
+}
+
+func (c *gatewayCache) SetAntigravitySafetyStreak(ctx context.Context, sessionHash string, payload []byte, ttl time.Duration) error {
+	if c == nil || c.rdb == nil || sessionHash == "" {
+		return nil
+	}
+	return c.rdb.Set(ctx, antigravitySafetyStreakKey(sessionHash), payload, ttl).Err()
+}
+
+func (c *gatewayCache) DeleteAntigravitySafetyStreak(ctx context.Context, sessionHash string) error {
+	if c == nil || c.rdb == nil || sessionHash == "" {
+		return nil
+	}
+	return c.rdb.Del(ctx, antigravitySafetyStreakKey(sessionHash)).Err()
+}

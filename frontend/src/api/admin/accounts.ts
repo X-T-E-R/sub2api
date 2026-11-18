@@ -1073,6 +1073,73 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
   return data
 }
 
+export type WarmupBucketMode = 'auto_buckets' | 'gemini_only' | 'claude_only' | 'custom_models'
+
+export interface WarmupAccountsRequest {
+  account_ids?: number[]
+  bucket_mode?: WarmupBucketMode
+  models?: string[]
+  effort?: string
+  concurrency?: number
+  refresh_usage?: boolean
+}
+
+export interface WarmupBucketRunResult {
+  bucket: string
+  requested_model: string
+  resolved_model: string
+  prompt_summary: string
+  expected_answer: string
+  response_excerpt: string
+  answer_matched: boolean
+  status_code: number
+  duration_ms: number
+  error: string
+}
+
+export interface WarmupAccountResult {
+  account_id: number
+  account_name: string
+  platform: string
+  schedulable: boolean
+  success: boolean
+  error: string
+  runs: WarmupBucketRunResult[]
+  usage?: AccountUsageInfo | null
+  usage_error: string
+}
+
+export interface WarmupAccountsResponse {
+  total_accounts: number
+  succeeded_accounts: number
+  failed_accounts: number
+  bucket_mode: WarmupBucketMode | string
+  results: WarmupAccountResult[]
+}
+
+export async function warmupAccount(
+  id: number,
+  payload: Omit<WarmupAccountsRequest, 'account_ids'> = {}
+): Promise<WarmupAccountsResponse> {
+  const { data } = await apiClient.post<WarmupAccountsResponse>(
+    `/admin/accounts/${id}/warmup`,
+    payload,
+    { timeout: 300_000 }
+  )
+  return data
+}
+
+export async function batchWarmupAccounts(
+  payload: WarmupAccountsRequest
+): Promise<WarmupAccountsResponse> {
+  const { data } = await apiClient.post<WarmupAccountsResponse>(
+    '/admin/accounts/batch-warmup',
+    payload,
+    { timeout: 300_000 }
+  )
+  return data
+}
+
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -1135,7 +1202,9 @@ export const accountsAPI = {
   saveOllamaCloudUsageSession,
   deleteOllamaCloudUsageSession,
   setOllamaCloudUsageAutoRefresh,
-  refreshOllamaCloudUsage
+  refreshOllamaCloudUsage,
+  warmupAccount,
+  batchWarmupAccounts
 }
 
 export default accountsAPI
