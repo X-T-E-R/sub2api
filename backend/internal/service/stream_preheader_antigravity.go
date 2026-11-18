@@ -62,6 +62,15 @@ func antigravityPreheaderIncomplete(c *gin.Context, g *antigravityThoughtGenerat
 	return !(cont != nil && cont.hasExtraGeneration() && !g.sawPayload)
 }
 
+func antigravityIncompleteStreamFailure(c *gin.Context) (string, streamPreheaderResponseMeta) {
+	if antigravitySoftSafetyBlockedInContext(c) {
+		return "Upstream stream ended after Gemini soft safety filter block", streamPreheaderResponseMeta{
+			body: []byte(`{"error":{"code":"antigravity_soft_safety_stream_cut","retryable":false}}`),
+		}
+	}
+	return "Upstream stream ended before a terminal event", streamPreheaderResponseMeta{}
+}
+
 func antigravityPreheaderHasUsage(res *antigravityStreamResult) bool {
 	return res != nil && res.usage != nil && *res.usage != (ClaudeUsage{})
 }

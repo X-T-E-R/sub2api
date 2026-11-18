@@ -298,15 +298,15 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱
 	errorEventSent := false
-	sendErrorEvent := func(reason string) {
+	sendErrorEvent := func(reason string, meta ...streamPreheaderResponseMeta) {
 		if errorEventSent || cw.Disconnected() {
 			return
 		}
 		errorEventSent = true
 		if StreamPreheaderConfigured(c) {
 			if !c.Writer.Written() {
-				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason)
-			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason); frame != "" {
+				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, meta...)
+			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason, meta...); frame != "" {
 				cw.Write([]byte(frame))
 			}
 			return
@@ -375,7 +375,8 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				}
 				if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !cw.Disconnected() && c.Writer.Written() {
 					flushHeld(true)
-					sendErrorEvent("Upstream stream ended before a terminal event")
+					reason, meta := antigravityIncompleteStreamFailure(c)
+					sendErrorEvent(reason, meta)
 					return result(false), errStreamPreheaderTerminal
 				}
 				if !sawUpstreamObject && !cw.Disconnected() {
@@ -1564,15 +1565,15 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱
 	errorEventSent := false
-	sendErrorEvent := func(reason string) {
+	sendErrorEvent := func(reason string, meta ...streamPreheaderResponseMeta) {
 		if errorEventSent || cw.Disconnected() {
 			return
 		}
 		errorEventSent = true
 		if StreamPreheaderConfigured(c) {
 			if !c.Writer.Written() {
-				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason)
-			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason); frame != "" {
+				_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, meta...)
+			} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason, meta...); frame != "" {
 				cw.Write([]byte(frame))
 			}
 			return
@@ -1608,7 +1609,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	// finalize 发送结束事件并返回结果。
 	finalize := func() (*antigravityStreamResult, error) {
 		if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !cw.Disconnected() {
-			sendErrorEvent("Upstream stream ended before a terminal event")
+			reason, meta := antigravityIncompleteStreamFailure(c)
+			sendErrorEvent(reason, meta)
 			return &antigravityStreamResult{usage: finishUsage(), firstTokenMs: firstTokenMs}, errStreamPreheaderTerminal
 		}
 		noAnswer := !cw.Disconnected() && cont.completeNoUsableAnswer(c, "claude_stream")

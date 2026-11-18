@@ -476,7 +476,8 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 				proxyGeneration.complete(proxyResponse)
 				cont := session.continuation
 				if antigravityPreheaderIncomplete(c, terminalGeneration, cont) && !writer.Disconnected() {
-					writeAntigravityCompatStreamError(c, adapter, writer, "Upstream stream ended before a terminal event")
+					reason, meta := antigravityIncompleteStreamFailure(c)
+					writeAntigravityCompatStreamError(c, adapter, writer, reason, meta.body)
 					return session.collectResult(false), errStreamPreheaderTerminal
 				}
 				eligibleNoAnswer := cont != nil && (cont.effectiveGeneration().failureCode(cont.policy) != "" || cont.zeroOutputContinuationUsed())
@@ -702,9 +703,13 @@ func writeAntigravityCompatStreamError(
 	adapter antigravityCompatStreamAdapter,
 	writer *antigravityClientWriter,
 	reason string,
+	diagnosticBody ...[]byte,
 ) {
 	if StreamPreheaderConfigured(c) {
 		meta := antigravityCompatFailureMeta(adapter)
+		if len(diagnosticBody) > 0 {
+			meta.body = diagnosticBody[0]
+		}
 		if !c.Writer.Written() {
 			_ = writeConfiguredStreamFailure(c, http.StatusBadGateway, "upstream_error", reason, meta)
 		} else if frame := configuredStreamFailureFrame(c, http.StatusBadGateway, "upstream_error", reason, meta); frame != "" {

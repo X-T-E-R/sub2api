@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type antigravityAccountSwitchedKey struct{}
@@ -530,8 +531,11 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	cont.malformedRecovery = malformedRecovery
 	defer cont.startResponse(c, "messages", claudeReq.Stream)()
 	defer func() {
-		malformedRecovery.finish(cont.effectiveGeneration(), forwardErr == nil && forwardResult != nil &&
-			!forwardResult.ClientDisconnect && c.Request.Context().Err() == nil)
+		if malformedRecovery != nil {
+			malformedRecovery.effectiveMode = gjson.GetBytes(cont.body, antigravityFunctionModePath).String()
+			malformedRecovery.finish(cont.generation, forwardErr == nil && forwardResult != nil &&
+				!forwardResult.ClientDisconnect && c.Request.Context().Err() == nil)
+		}
 	}()
 
 	var usage *ClaudeUsage

@@ -285,10 +285,18 @@ func antigravitySafetyStreakObserverFromContext(c *gin.Context) *antigravitySafe
 	return obs
 }
 
+func antigravitySoftSafetyBlockedInContext(c *gin.Context) bool {
+	return antigravitySafetyStreakObserverFromContext(c).summary().softSafetyBlocked
+}
+
 func observeAntigravitySafetyStreakSSEPayload(c *gin.Context, payload []byte) {
-	obs := antigravitySafetyStreakObserverFromContext(c)
-	if obs == nil || len(payload) == 0 {
+	if c == nil || len(payload) == 0 {
 		return
+	}
+	obs := antigravitySafetyStreakObserverFromContext(c)
+	if obs == nil && StreamPreheaderConfigured(c) {
+		// Stream diagnostics also apply to compatibility and sessionless requests.
+		obs = beginAntigravitySafetyStreakObservation(c)
 	}
 	obs.observeGeminiPayload(payload)
 }

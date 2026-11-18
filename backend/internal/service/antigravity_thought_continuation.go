@@ -634,13 +634,19 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	var err error
 	replayMissingTerminal := c.canReplayMissingTerminal()
 	if replayMissingTerminal {
-		// No model tail or invented Continue. For a malformed default VALIDATED
-		// decoder, relax only mode; missing-terminal recovery stays byte-identical.
+		// A plain missing terminal replays the prepared bytes. A malformed call
+		// advances recovery before spending the same one-generation budget.
 		body = c.body
-		if c.generation.malformedFunctionZeroOutput() && c.malformedRecovery != nil &&
-			gjson.GetBytes(body, antigravityFunctionModePath).String() == "VALIDATED" {
-			body, err = antigravityAutoFunctionMode(body)
-			c.malformedRecovery.autoReason = "zero_output_malformed_function_call"
+		if r := c.malformedRecovery; c.generation.malformedFunctionZeroOutput() && r != nil {
+			r.effectiveMode = gjson.GetBytes(c.body, antigravityFunctionModePath).String()
+			switch {
+			case r.effectiveMode == "VALIDATED":
+				body, err = antigravityAutoFunctionMode(body)
+				r.autoReason = "zero_output_malformed_function_call"
+			case r.effectiveMode == "AUTO" && r.autoReason != antigravityMalformedSingleToolReason:
+				body, err = appendAntigravityMalformedSingleToolNote(body)
+				r.autoReason = antigravityMalformedSingleToolReason
+			}
 		}
 	} else if c.policy.ContinueZeroOutput && c.generation.zeroOutputSuccessful() {
 		body, err = appendAntigravityUserContinue(c.body)
@@ -658,6 +664,9 @@ func (c *antigravityThoughtContinuation) continueOnce(ctx context.Context, previ
 	c.mergeBaseRawUsage(c.generation.rawUsageMetadata)
 	c.extraUsed = true
 	c.missingTerminalReplayed = replayMissingTerminal
+	// Record a malformed first generation before replacing it; Forward finishes
+	// the actual in-flight generation, not the one reused for downstream output.
+	c.malformedRecovery.finish(c.generation, false)
 	c.finishedGeneration = c.generation
 	c.generation = newAntigravityThoughtGeneration()
 	c.generation.nativeGemini = c.delivery.Protocol == "gemini"
