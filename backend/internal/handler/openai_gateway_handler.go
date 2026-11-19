@@ -2468,8 +2468,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if previous := turnChannelMapping.Load(); previous != nil && previous.turn < turn {
 					mappedModelUnchanged = strings.TrimSpace(previous.mapping.MappedModel) == strings.TrimSpace(mapping.MappedModel)
 				}
-				if turn > 1 && !mappedModelUnchanged && !account.IsModelSupported(model) && !account.IsModelSupported(mapping.MappedModel) {
-					return "", newOpenAIWSUnsupportedModelSwitchError(mapping.MappedModel)
+				if turn > 1 && !mappedModelUnchanged {
+					turnRouteCtx := service.WithOpenAIForwardModelRoute(ctx, model, mapping.MappedModel, false)
+					if !service.IsOpenAIAccountModelSupportedForContext(turnRouteCtx, account, model) {
+						return "", newOpenAIWSUnsupportedModelSwitchError(mapping.MappedModel)
+					}
 				}
 				turnChannelMapping.Store(&openAIWSTurnChannelMappingSnapshot{turn: turn, mapping: mapping})
 				return mapping.MappedModel, nil

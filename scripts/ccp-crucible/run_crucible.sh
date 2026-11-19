@@ -15,9 +15,9 @@ export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 export GOTOOLCHAIN=auto
 export CI=true
 
-# Hermetic offline guard: strip live external API credentials so no test can ever
-# hit a real third-party endpoint or alter skip counts based on host env.
-unset OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY SUB2API_RUN_LIVE_OPENAI_COMPARE || true
+# Hermetic offline guard: strip live external API credentials and ambient GOFLAGS
+# so no test can hit a real third-party endpoint or have -run/-skip silently prune tests.
+unset OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY SUB2API_RUN_LIVE_OPENAI_COMPARE GOFLAGS || true
 
 export SUB2API_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/sub2api_test?sslmode=disable&TimeZone=UTC"
 export CODEX_DAILY_SESSION_TEST_DSN="postgres://postgres:postgres@127.0.0.1:5432/codex_daily_session_test?sslmode=disable&TimeZone=UTC"
@@ -61,16 +61,32 @@ allowlist_a2 = {
 required_gate_b = (
     "TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects",
     "TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects",
+    "TestAntigravityMessages_Stage2MalformedReapplyOn400SignatureAndBudgetRetries",
+    "TestOpenAI_UnifiedChannelAndAccountModelMappingMatrix",
+    "TestOpenAIResponses_LoopbackWebSocketUpstreamRewriteParity",
 )
+expected_pkgs = {
+    "zero_skip": (
+        "github.com/Wei-Shaw/sub2api/internal/repository",
+        "github.com/Wei-Shaw/sub2api/internal/middleware",
+        "github.com/Wei-Shaw/sub2api/internal/server/routes",
+    ),
+    "gate_b": (
+        "github.com/Wei-Shaw/sub2api/internal/integration",
+    ),
+}
 
 pass_cnt = 0
 fail_cnt = 0
 skip_cnt = 0
 race_cnt = 0
 pkg_fails = []
+pkg_skips = []
+pkg_passes = set()
 failed_tests = []
 skipped_tests = []
 passed_by_name = Counter()
+passed_by_pkg = Counter()
 non_json_errors = []
 
 with open(logfile, "r", encoding="utf-8", errors="replace") as fh:
@@ -94,6 +110,8 @@ with open(logfile, "r", encoding="utf-8", errors="replace") as fh:
             if action == "pass":
                 pass_cnt += 1
                 passed_by_name[test_name] += 1
+                if pkg:
+                    passed_by_pkg[pkg] += 1
             elif action == "fail":
                 fail_cnt += 1
                 failed_tests.append(f"{pkg}:{test_name}")
@@ -103,6 +121,10 @@ with open(logfile, "r", encoding="utf-8", errors="replace") as fh:
         else:
             if action == "fail":
                 pkg_fails.append(pkg or "<unknown-pkg>")
+            elif action == "skip":
+                pkg_skips.append(pkg or "<unknown-pkg>")
+            elif action == "pass" and pkg:
+                pkg_passes.add(pkg)
 
 summary_line = f"{label:<36} PASS={pass_cnt:<5} FAIL={fail_cnt:<3} SKIP={skip_cnt:<3} RACES={race_cnt:<3}\n"
 sys.stdout.write(summary_line)
@@ -116,10 +138,18 @@ if fail_cnt > 0:
     errors.append(f"{label}: {fail_cnt} test(s) failed: {failed_tests[:10]}")
 if pkg_fails:
     errors.append(f"{label}: package failure(s): {pkg_fails[:10]}")
+if pkg_skips:
+    errors.append(f"{label}: package-level skip(s) detected: {pkg_skips[:10]}")
 if race_cnt > 0:
     errors.append(f"{label}: {race_cnt} DATA RACE warning(s) detected")
 if non_json_errors:
     errors.append(f"{label}: non-JSON error lines: {non_json_errors[:5]}")
+
+for exp_pkg in expected_pkgs.get(mode, ()):
+    if exp_pkg not in pkg_passes:
+        errors.append(f"{label}: expected package did not record Action==pass: {exp_pkg}")
+    elif passed_by_pkg[exp_pkg] == 0:
+        errors.append(f"{label}: expected package ran 0 passing tests: {exp_pkg}")
 
 if mode in ("zero_skip", "gate_b"):
     if skipped_tests:

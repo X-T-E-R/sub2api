@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,11 +54,38 @@ func isExplicitOpenAICompactRequest(c *gin.Context, body []byte) bool {
 // for the client-visible model. The process-wide fallback is used only when
 // that account has no matching compact rule.
 func (s *OpenAIGatewayService) resolveOpenAICompactFallbackModel(account *Account, requestedModel string) string {
-	requestedModel = strings.TrimSpace(requestedModel)
+	return s.resolveOpenAICompactFallbackModelWithContext(context.Background(), account, requestedModel)
+}
+
+// resolveOpenAICompactFallbackModelWithContext resolves account-level
+// compact_model_mapping checking the channel-mapped forward model first and the
+// original client alias second before falling back to the global compact model.
+func (s *OpenAIGatewayService) resolveOpenAICompactFallbackModelWithContext(ctx context.Context, account *Account, requestedModel string) string {
+	effective := strings.TrimSpace(requestedModel)
+	var originalAlias string
+	if fwd, ok := openAIForwardModelFromContext(ctx); ok {
+		if fwd.model != "" {
+			effective = fwd.model
+		}
+		if fwd.requestedModel != "" && fwd.requestedModel != effective {
+			originalAlias = fwd.requestedModel
+		} else if strings.TrimSpace(requestedModel) != "" && strings.TrimSpace(requestedModel) != effective {
+			originalAlias = strings.TrimSpace(requestedModel)
+		}
+	}
 	if account != nil {
-		if mapped, matched := account.ResolveCompactMappedModel(requestedModel); matched {
-			if mapped = strings.TrimSpace(mapped); mapped != "" {
-				return mapped
+		if effective != "" {
+			if mapped, matched := account.ResolveCompactMappedModel(effective); matched {
+				if mapped = strings.TrimSpace(mapped); mapped != "" {
+					return mapped
+				}
+			}
+		}
+		if originalAlias != "" {
+			if mapped, matched := account.ResolveCompactMappedModel(originalAlias); matched {
+				if mapped = strings.TrimSpace(mapped); mapped != "" {
+					return mapped
+				}
 			}
 		}
 	}

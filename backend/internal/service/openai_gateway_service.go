@@ -637,7 +637,7 @@ func (s *OpenAIGatewayService) isUpstreamModelRestrictedByChannel(ctx context.Co
 	if compactForwardModel, ok := openAIForwardModelFromContext(ctx); ok {
 		requireCompact = compactForwardModel.useCompactModelMapping
 	}
-	upstreamModel := resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
+	upstreamModel := s.resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
 	if upstreamModel == "" {
 		return false
 	}

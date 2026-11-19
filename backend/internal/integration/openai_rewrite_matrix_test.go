@@ -674,6 +674,181 @@ func TestOpenAI_UnifiedChannelAndAccountModelMappingMatrix(t *testing.T) {
 			})
 		})
 	}
+
+	// Seam 2: HTTP /v1/responses -> raw /v1/chat/completions fallback adapter preserves alias-only mapping.
+	t.Run("responses_raw_chat_fallback_alias_only", func(t *testing.T) {
+		const (
+			gid                int64 = 374
+			clientAlias              = "client-alias-gpt"
+			channelMappedModel       = "channel-canon-gpt"
+			upstreamModelA           = "vendor-a-model"
+		)
+		acc := newOpenAIAPIKeyAccount(375, "oa-resp-rawcc", 1, "https://rawcc.example.test/v1", "sk-rawcc", map[string]any{
+			clientAlias: upstreamModelA,
+		}, false)
+		h := newGatewayHarness(t, gatewayHarnessConfig{
+			Group:    openAIGroup(gid),
+			Accounts: []*service.Account{acc},
+			Channels: []service.Channel{{
+				ID:       3704,
+				Name:     "ch-rawcc-fallback",
+				Status:   service.StatusActive,
+				GroupIDs: []int64{gid},
+				ModelMapping: map[string]map[string]string{
+					service.PlatformOpenAI: {clientAlias: channelMappedModel},
+				},
+			}},
+			Respond: func(_ int, req capturedUpstreamRequest) (*http.Response, error) {
+				m := gjson.GetBytes(req.Body, "model").String()
+				return jsonHTTPResponse(http.StatusOK, `{"id":"chatcmpl_fb","object":"chat.completion","model":"`+m+`","choices":[{"index":0,"message":{"role":"assistant","content":"raw-cc-fallback-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":6,"total_tokens":24}}`), nil
+			},
+		})
+
+		rec := h.post(t, "/v1/responses", nil, `{"model":"`+clientAlias+`","stream":false,"input":[{"role":"user","content":"fallback"}]}`)
+		require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+		reqs := h.requests()
+		require.Len(t, reqs, 1)
+		require.True(t, strings.HasSuffix(reqs[0].URL, "/chat/completions"))
+		require.Equal(t, upstreamModelA, gjson.GetBytes(reqs[0].Body, "model").String(),
+			"responses->raw-chat fallback adapter must resolve clientAlias via ctx route identically to scheduler")
+		h.assertSlotsBalanced(t)
+	})
+
+	// Seam 3: HTTP /v1/chat/completions on a passthrough-enabled account aligns upstream channel restriction with chat wire model.
+	t.Run("chat_completions_passthrough_account_restriction_matches_wire_model", func(t *testing.T) {
+		const (
+			clientAlias        = "client-alias-gpt"
+			channelMappedModel = "channel-canon-gpt"
+			upstreamModelA     = "vendor-a-model"
+		)
+
+		t.Run("allows_when_actual_mapped_model_in_allowlist", func(t *testing.T) {
+			const gid int64 = 376
+			acc := newOpenAIAPIKeyAccount(377, "oa-chat-pt-allow", 1, "https://chat-pt.example.test/v1", "sk-pt", map[string]any{
+				clientAlias: upstreamModelA,
+			}, true)
+			acc.Extra["openai_passthrough"] = true
+
+			h := newGatewayHarness(t, gatewayHarnessConfig{
+				Group:    openAIGroup(gid),
+				Accounts: []*service.Account{acc},
+				Channels: []service.Channel{{
+					ID:                 3706,
+					Name:               "ch-chat-pt-allow",
+					Status:             service.StatusActive,
+					GroupIDs:           []int64{gid},
+					RestrictModels:     true,
+					BillingModelSource: service.BillingModelSourceUpstream,
+					ModelMapping: map[string]map[string]string{
+						service.PlatformOpenAI: {clientAlias: channelMappedModel},
+					},
+					ModelPricing: []service.ChannelModelPricing{
+						{Platform: service.PlatformOpenAI, Models: []string{upstreamModelA}},
+					},
+				}},
+				Respond: func(_ int, req capturedUpstreamRequest) (*http.Response, error) {
+					m := gjson.GetBytes(req.Body, "model").String()
+					return sseHTTPResponse(
+						`event: response.completed`,
+						`data: {"type":"response.completed","response":{"id":"resp_pt_allow","status":"completed","model":"`+m+`","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pt-allow-ok"}]}],"usage":{"input_tokens":15,"output_tokens":5}}}`,
+						``,
+					), nil
+				},
+			})
+
+			rec := h.post(t, "/v1/chat/completions", nil, `{"model":"`+clientAlias+`","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+			reqs := h.requests()
+			require.Len(t, reqs, 1)
+			require.Equal(t, upstreamModelA, gjson.GetBytes(reqs[0].Body, "model").String())
+			h.assertSlotsBalanced(t)
+		})
+
+		t.Run("blocks_when_only_canonical_allowed_but_chat_would_send_vendor_a", func(t *testing.T) {
+			const gid int64 = 378
+			acc := newOpenAIAPIKeyAccount(379, "oa-chat-pt-deny", 1, "https://chat-pt-deny.example.test/v1", "sk-pt-deny", map[string]any{
+				clientAlias: upstreamModelA,
+			}, true)
+			acc.Extra["openai_passthrough"] = true
+
+			h := newGatewayHarness(t, gatewayHarnessConfig{
+				Group:    openAIGroup(gid),
+				Accounts: []*service.Account{acc},
+				Channels: []service.Channel{{
+					ID:                 3708,
+					Name:               "ch-chat-pt-deny",
+					Status:             service.StatusActive,
+					GroupIDs:           []int64{gid},
+					RestrictModels:     true,
+					BillingModelSource: service.BillingModelSourceUpstream,
+					ModelMapping: map[string]map[string]string{
+						service.PlatformOpenAI: {clientAlias: channelMappedModel},
+					},
+					ModelPricing: []service.ChannelModelPricing{
+						{Platform: service.PlatformOpenAI, Models: []string{channelMappedModel}},
+					},
+				}},
+			})
+
+			rec := h.post(t, "/v1/chat/completions", nil, `{"model":"`+clientAlias+`","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+			require.NotEqual(t, http.StatusOK, rec.Code, "restricted vendor-a must not bypass BillingModelSourceUpstream")
+			require.Empty(t, h.requests(), "blocked passthrough chat account must never reach upstream")
+			h.assertSlotsBalanced(t)
+		})
+	})
+
+	// Seam 4: Legacy /v1/responses/compact resolves compact_model_mapping[clientAlias] ahead of global fallback
+	// and agrees with BillingModelSourceUpstream channel restriction.
+	t.Run("legacy_responses_compact_alias_mapping_beats_global_fallback", func(t *testing.T) {
+		const (
+			gid                int64 = 383
+			clientAlias              = "public-compact"
+			channelMappedModel       = "canonical-compact"
+			vendorCompactModel       = "vendor-compact-model"
+		)
+		cfg := &config.Config{}
+		cfg.Gateway.OpenAICompactModel = "gpt-5.4"
+
+		acc := newOpenAIAPIKeyAccount(384, "oa-compact-alias", 1, "https://compact.example.test/v1", "sk-compact", map[string]any{
+			channelMappedModel: "vendor-normal-model",
+		}, true)
+		acc.Credentials["compact_model_mapping"] = map[string]any{
+			clientAlias: vendorCompactModel,
+		}
+
+		h := newGatewayHarness(t, gatewayHarnessConfig{
+			Group:    openAIGroup(gid),
+			Accounts: []*service.Account{acc},
+			Config:   cfg,
+			Channels: []service.Channel{{
+				ID:                 3803,
+				Name:               "ch-compact-alias",
+				Status:             service.StatusActive,
+				GroupIDs:           []int64{gid},
+				RestrictModels:     true,
+				BillingModelSource: service.BillingModelSourceUpstream,
+				ModelMapping: map[string]map[string]string{
+					service.PlatformOpenAI: {clientAlias: channelMappedModel},
+				},
+				ModelPricing: []service.ChannelModelPricing{
+					{Platform: service.PlatformOpenAI, Models: []string{vendorCompactModel}},
+				},
+			}},
+			Respond: func(_ int, req capturedUpstreamRequest) (*http.Response, error) {
+				m := gjson.GetBytes(req.Body, "model").String()
+				return jsonHTTPResponse(http.StatusOK, `{"id":"resp_compact_1","object":"response.compaction","model":"`+m+`","output":[{"type":"compaction","encrypted_content":"enc_abc"}],"usage":{"input_tokens":22,"output_tokens":8}}`), nil
+			},
+		})
+
+		rec := h.post(t, "/v1/responses/compact", nil, `{"model":"`+clientAlias+`","input":[{"role":"user","content":"compact me"}]}`)
+		require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+		reqs := h.requests()
+		require.Len(t, reqs, 1)
+		require.True(t, strings.HasSuffix(reqs[0].URL, "/responses/compact"))
+		require.Equal(t, vendorCompactModel, gjson.GetBytes(reqs[0].Body, "model").String(),
+			"legacy /v1/responses/compact must apply compact_model_mapping[clientAlias] rather than global fallback or ordinary mapping")
+		h.assertSlotsBalanced(t)
+	})
 }
 
 func TestOpenAI_NonRetryable400AndPostContentStreamFailureNoFailover(t *testing.T) {
@@ -739,163 +914,189 @@ func TestOpenAI_NonRetryable400AndPostContentStreamFailureNoFailover(t *testing.
 }
 
 func TestOpenAIResponses_LoopbackWebSocketUpstreamRewriteParity(t *testing.T) {
-	receivedCh := make(chan string, 1)
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade upstream websocket failed: %v", err)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-
-		var frame map[string]any
-		if err := conn.ReadJSON(&frame); err != nil {
-			t.Errorf("read upstream ws frame failed: %v", err)
-			return
-		}
-		raw, _ := json.Marshal(frame)
-		receivedCh <- string(raw)
-
-		_ = conn.WriteJSON(map[string]any{
-			"type": "response.created",
-			"response": map[string]any{
-				"id":    "resp_ws_loopback_1",
-				"model": "gpt-5.3-codex",
+	cases := []struct {
+		name           string
+		groupID        int64
+		accountID      int64
+		accountMapping map[string]any
+	}{
+		{
+			name:      "channel_mapped_key",
+			groupID:   390,
+			accountID: 391,
+			accountMapping: map[string]any{
+				"canonical-ws-model": "gpt-5.3-codex",
 			},
-		})
-		_ = conn.WriteJSON(map[string]any{
-			"type":  "response.output_text.delta",
-			"delta": "ws-loopback-ok",
-		})
-		_ = conn.WriteJSON(map[string]any{
-			"type": "response.completed",
-			"response": map[string]any{
-				"id":     "resp_ws_loopback_1",
-				"model":  "gpt-5.3-codex",
-				"status": "completed",
-				"output": []any{map[string]any{
-					"type": "message",
-					"role": "assistant",
-					"content": []any{map[string]any{
-						"type": "output_text",
-						"text": "ws-loopback-ok",
-					}},
-				}},
-				"usage": map[string]any{
-					"input_tokens":  33,
-					"output_tokens": 11,
-				},
-			},
-		})
-		// Keep upstream connection open briefly until client closes gracefully.
-		_, _, _ = conn.ReadMessage()
-	}))
-	defer wsServer.Close()
-
-	cfg := &config.Config{}
-	cfg.RunMode = config.RunModeSimple
-	cfg.Default.RateMultiplier = 1
-	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
-	cfg.Gateway.OpenAIWS.Enabled = true
-	cfg.Gateway.OpenAIWS.APIKeyEnabled = true
-	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
-	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
-	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
-	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
-	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
-	cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
-	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
-	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 5
-	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
-
-	const gid int64 = 390
-	acc := newOpenAIAPIKeyAccount(391, "oa-ws-loopback", 1, wsServer.URL, "sk-ws-test", map[string]any{
-		"canonical-ws-model": "gpt-5.3-codex",
-	}, true)
-	acc.Extra["openai_apikey_responses_websockets_v2_enabled"] = true
-	acc.Extra["openai_apikey_responses_websockets_v2_mode"] = service.OpenAIWSIngressModeCtxPool
-
-	h := newGatewayHarness(t, gatewayHarnessConfig{
-		Group:    openAIGroup(gid),
-		Accounts: []*service.Account{acc},
-		Config:   cfg,
-		Channels: []service.Channel{{
-			ID:                 3901,
-			Name:               "ch-ws-rewrite",
-			Status:             service.StatusActive,
-			GroupIDs:           []int64{gid},
-			BillingModelSource: service.BillingModelSourceChannelMapped,
-			ModelMapping: map[string]map[string]string{
-				service.PlatformOpenAI: {"client-ws-alias": "canonical-ws-model"},
-			},
-		}},
-	})
-
-	gwServer := httptest.NewServer(h.router)
-	defer gwServer.Close()
-
-	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	wsURL := "ws" + strings.TrimPrefix(gwServer.URL, "http") + "/v1/responses"
-	clientConn, resp, err := coderws.Dial(dialCtx, wsURL, &coderws.DialOptions{
-		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + h.apiKey.Key},
-			"User-Agent":    []string{"codex_cli_rs/0.114.0"},
 		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
-
-	err = clientConn.Write(dialCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"client-ws-alias","reasoning":{"effort":"high"},"input":[{"role":"user","content":"hello ws"}]}`))
-	require.NoError(t, err)
-
-	var seenDelta, seenCompleted bool
-	for !seenCompleted {
-		_, msg, readErr := clientConn.Read(dialCtx)
-		require.NoError(t, readErr)
-		evType := gjson.GetBytes(msg, "type").String()
-		if evType == "response.output_text.delta" && gjson.GetBytes(msg, "delta").String() == "ws-loopback-ok" {
-			seenDelta = true
-		}
-		if evType == "response.completed" {
-			seenCompleted = true
-		}
-	}
-	require.True(t, seenDelta, "client WS must receive output_text delta")
-	_ = clientConn.Close(coderws.StatusNormalClosure, "done")
-
-	var wsFrame string
-	select {
-	case wsFrame = <-receivedCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for loopback WebSocket response.create frame")
+		{
+			name:      "client_alias_only_key",
+			groupID:   392,
+			accountID: 393,
+			accountMapping: map[string]any{
+				"client-ws-alias": "gpt-5.3-codex",
+			},
+		},
 	}
 
-	require.Equal(t, "response.create", gjson.Get(wsFrame, "type").String())
-	require.Equal(t, "gpt-5.3-codex", gjson.Get(wsFrame, "model").String(),
-		"WS wire payload must apply channel + account model mapping identically to HTTP")
-	require.Equal(t, "high", gjson.Get(wsFrame, "reasoning.effort").String(),
-		"WS wire payload must preserve reasoning.effort")
-	require.Empty(t, h.requests(), "WS v2 route must bypass HTTP upstream transport and dial loopback WS server")
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			receivedCh := make(chan string, 1)
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("upgrade upstream websocket failed: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
 
-	// Wait briefly for server-side defer slot release + async usage persistence after client close.
-	require.Eventually(t, func() bool {
-		return len(h.usageRecords()) == 1 &&
-			h.concurrency.userAcquires.Load() == h.concurrency.userReleases.Load() &&
-			h.concurrency.accountAcquires.Load() == h.concurrency.accountReleases.Load()
-	}, 3*time.Second, 10*time.Millisecond, "usage log and concurrency slots must settle after WS close")
+				var frame map[string]any
+				if err := conn.ReadJSON(&frame); err != nil {
+					t.Errorf("read upstream ws frame failed: %v", err)
+					return
+				}
+				raw, _ := json.Marshal(frame)
+				receivedCh <- string(raw)
 
-	logs := h.usageRecords()
-	require.Len(t, logs, 1)
-	require.Equal(t, acc.ID, logs[0].AccountID)
-	require.Equal(t, "client-ws-alias", logs[0].RequestedModel)
-	require.Equal(t, "client-ws-alias", logs[0].Model)
-	requireUpstreamModel(t, logs[0], "gpt-5.3-codex")
-	require.NotNil(t, logs[0].ModelMappingChain)
-	require.Equal(t, "client-ws-alias→canonical-ws-model→gpt-5.3-codex", *logs[0].ModelMappingChain)
-	require.Equal(t, 33, logs[0].InputTokens)
-	require.Equal(t, 11, logs[0].OutputTokens)
-	h.assertSlotsBalanced(t)
+				_ = conn.WriteJSON(map[string]any{
+					"type": "response.created",
+					"response": map[string]any{
+						"id":    "resp_ws_loopback_1",
+						"model": "gpt-5.3-codex",
+					},
+				})
+				_ = conn.WriteJSON(map[string]any{
+					"type":  "response.output_text.delta",
+					"delta": "ws-loopback-ok",
+				})
+				_ = conn.WriteJSON(map[string]any{
+					"type": "response.completed",
+					"response": map[string]any{
+						"id":     "resp_ws_loopback_1",
+						"model":  "gpt-5.3-codex",
+						"status": "completed",
+						"output": []any{map[string]any{
+							"type": "message",
+							"role": "assistant",
+							"content": []any{map[string]any{
+								"type": "output_text",
+								"text": "ws-loopback-ok",
+							}},
+						}},
+						"usage": map[string]any{
+							"input_tokens":  33,
+							"output_tokens": 11,
+						},
+					},
+				})
+				// Keep upstream connection open briefly until client closes gracefully.
+				_, _, _ = conn.ReadMessage()
+			}))
+			defer wsServer.Close()
+
+			cfg := &config.Config{}
+			cfg.RunMode = config.RunModeSimple
+			cfg.Default.RateMultiplier = 1
+			cfg.Security.URLAllowlist.Enabled = false
+			cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+			cfg.Gateway.OpenAIWS.Enabled = true
+			cfg.Gateway.OpenAIWS.APIKeyEnabled = true
+			cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+			cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 1
+			cfg.Gateway.OpenAIWS.QueueLimitPerConn = 8
+			cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
+			cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 5
+			cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
+
+			acc := newOpenAIAPIKeyAccount(tc.accountID, "oa-ws-"+tc.name, 1, wsServer.URL, "sk-ws-test", tc.accountMapping, true)
+			acc.Extra["openai_apikey_responses_websockets_v2_enabled"] = true
+			acc.Extra["openai_apikey_responses_websockets_v2_mode"] = service.OpenAIWSIngressModeCtxPool
+
+			h := newGatewayHarness(t, gatewayHarnessConfig{
+				Group:    openAIGroup(tc.groupID),
+				Accounts: []*service.Account{acc},
+				Config:   cfg,
+				Channels: []service.Channel{{
+					ID:                 3900 + tc.groupID,
+					Name:               "ch-ws-" + tc.name,
+					Status:             service.StatusActive,
+					GroupIDs:           []int64{tc.groupID},
+					BillingModelSource: service.BillingModelSourceChannelMapped,
+					ModelMapping: map[string]map[string]string{
+						service.PlatformOpenAI: {"client-ws-alias": "canonical-ws-model"},
+					},
+				}},
+			})
+
+			gwServer := httptest.NewServer(h.router)
+			defer gwServer.Close()
+
+			dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			wsURL := "ws" + strings.TrimPrefix(gwServer.URL, "http") + "/v1/responses"
+			clientConn, resp, err := coderws.Dial(dialCtx, wsURL, &coderws.DialOptions{
+				HTTPHeader: http.Header{
+					"Authorization": []string{"Bearer " + h.apiKey.Key},
+					"User-Agent":    []string{"codex_cli_rs/0.114.0"},
+				},
+			})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+			err = clientConn.Write(dialCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"client-ws-alias","reasoning":{"effort":"high"},"input":[{"role":"user","content":"hello ws"}]}`))
+			require.NoError(t, err)
+
+			var seenDelta, seenCompleted bool
+			for !seenCompleted {
+				_, msg, readErr := clientConn.Read(dialCtx)
+				require.NoError(t, readErr)
+				evType := gjson.GetBytes(msg, "type").String()
+				if evType == "response.output_text.delta" && gjson.GetBytes(msg, "delta").String() == "ws-loopback-ok" {
+					seenDelta = true
+				}
+				if evType == "response.completed" {
+					seenCompleted = true
+				}
+			}
+			require.True(t, seenDelta, "client WS must receive output_text delta")
+			_ = clientConn.Close(coderws.StatusNormalClosure, "done")
+
+			var wsFrame string
+			select {
+			case wsFrame = <-receivedCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for loopback WebSocket response.create frame")
+			}
+
+			require.Equal(t, "response.create", gjson.Get(wsFrame, "type").String())
+			require.Equal(t, "gpt-5.3-codex", gjson.Get(wsFrame, "model").String(),
+				"WS wire payload must apply channel + account model mapping identically to HTTP")
+			require.Equal(t, "high", gjson.Get(wsFrame, "reasoning.effort").String(),
+				"WS wire payload must preserve reasoning.effort")
+			require.Empty(t, h.requests(), "WS v2 route must bypass HTTP upstream transport and dial loopback WS server")
+
+			// Wait briefly for server-side defer slot release + async usage persistence after client close.
+			require.Eventually(t, func() bool {
+				return len(h.usageRecords()) == 1 &&
+					h.concurrency.userAcquires.Load() == h.concurrency.userReleases.Load() &&
+					h.concurrency.accountAcquires.Load() == h.concurrency.accountReleases.Load()
+			}, 3*time.Second, 10*time.Millisecond, "usage log and concurrency slots must settle after WS close")
+
+			logs := h.usageRecords()
+			require.Len(t, logs, 1)
+			require.Equal(t, acc.ID, logs[0].AccountID)
+			require.Equal(t, "client-ws-alias", logs[0].RequestedModel)
+			require.Equal(t, "client-ws-alias", logs[0].Model)
+			requireUpstreamModel(t, logs[0], "gpt-5.3-codex")
+			require.NotNil(t, logs[0].ModelMappingChain)
+			require.Equal(t, "client-ws-alias→canonical-ws-model→gpt-5.3-codex", *logs[0].ModelMappingChain)
+			require.Equal(t, 33, logs[0].InputTokens)
+			require.Equal(t, 11, logs[0].OutputTokens)
+			h.assertSlotsBalanced(t)
+		})
+	}
 }

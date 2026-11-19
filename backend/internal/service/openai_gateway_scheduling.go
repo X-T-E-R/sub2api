@@ -828,6 +828,7 @@ func resolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedMode
 func resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) string {
 	effective := strings.TrimSpace(requestedModel)
 	var originalAlias string
+	applyAccountMappingOnPassthrough := false
 	if fwd, ok := openAIForwardModelFromContext(ctx); ok {
 		if fwd.model != "" {
 			effective = fwd.model
@@ -837,6 +838,7 @@ func resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context,
 		} else if strings.TrimSpace(requestedModel) != "" && strings.TrimSpace(requestedModel) != effective {
 			originalAlias = strings.TrimSpace(requestedModel)
 		}
+		applyAccountMappingOnPassthrough = fwd.applyAccountMappingOnPassthrough
 	}
 
 	// Forward checks the raw Chat Completions fallback before passthrough.
@@ -847,16 +849,29 @@ func resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context,
 		return normalizeOpenAIModelForUpstream(account, upstreamModel)
 	}
 
-	// Passthrough accounts only replace authentication. Their Forward path
-	// keeps the channel-mapped model in the request body and does not apply the
-	// account's normal model_mapping. Legacy /responses/compact is the one
-	// exception: forwardOpenAIPassthrough applies compact_model_mapping
-	// directly to that channel-mapped model.
-	if account != nil && account.IsOpenAIPassthroughEnabled() {
+	// Passthrough accounts only replace authentication on /v1/responses. Their
+	// Forward path keeps the channel-mapped model in the request body and does
+	// not apply the account's normal model_mapping. Legacy /responses/compact
+	// is the one exception: forwardOpenAIPassthrough applies compact_model_mapping
+	// directly. Translated /v1/chat/completions sets applyAccountMappingOnPassthrough
+	// so restriction checks match chat forwarding's account model_mapping.
+	if account != nil && account.IsOpenAIPassthroughEnabled() && !applyAccountMappingOnPassthrough {
 		if effective == "" {
 			return ""
 		}
 		if requireCompact {
+			if compactModel, matched := account.ResolveCompactMappedModel(effective); matched {
+				if compactModel = strings.TrimSpace(compactModel); compactModel != "" {
+					return compactModel
+				}
+			}
+			if originalAlias != "" {
+				if compactModel, matched := account.ResolveCompactMappedModel(originalAlias); matched {
+					if compactModel = strings.TrimSpace(compactModel); compactModel != "" {
+						return compactModel
+					}
+				}
+			}
 			return resolveOpenAICompactForwardModel(account, effective)
 		}
 		return effective
@@ -904,6 +919,16 @@ func ResolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedMode
 // to handler-side outcome reporting.
 func ResolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) string {
 	return resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
+}
+
+func (s *OpenAIGatewayService) resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) string {
+	upstreamModel := resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
+	if requireCompact && !shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+		if compactModel := s.resolveOpenAICompactFallbackModelWithContext(ctx, account, requestedModel); compactModel != "" {
+			return compactModel
+		}
+	}
+	return upstreamModel
 }
 
 // resolveOpenAIForwardMappedModels is the shared account mapping chain for

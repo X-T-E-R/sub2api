@@ -8,9 +8,10 @@ import (
 type openAIForwardModelContextKey struct{}
 
 type openAIForwardModel struct {
-	model                  string
-	requestedModel         string
-	useCompactModelMapping bool
+	model                            string
+	requestedModel                   string
+	useCompactModelMapping           bool
+	applyAccountMappingOnPassthrough bool
 }
 
 // WithOpenAIForwardModel records the model present in the forwarded request
@@ -33,6 +34,20 @@ func WithOpenAIForwardModelRoute(ctx context.Context, requestedModel, forwardMod
 		model:                  strings.TrimSpace(forwardModel),
 		requestedModel:         strings.TrimSpace(requestedModel),
 		useCompactModelMapping: useCompactModelMapping,
+	})
+}
+
+// WithOpenAIChatForwardModelRoute records the /v1/chat/completions forward model
+// route where translated chat forwarding still applies explicit account
+// model_mapping even on passthrough-enabled accounts.
+func WithOpenAIChatForwardModelRoute(ctx context.Context, requestedModel, forwardModel string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openAIForwardModelContextKey{}, openAIForwardModel{
+		model:                            strings.TrimSpace(forwardModel),
+		requestedModel:                   strings.TrimSpace(requestedModel),
+		applyAccountMappingOnPassthrough: true,
 	})
 }
 
@@ -136,4 +151,10 @@ func isOpenAIAccountModelSupportedForContext(ctx context.Context, account *Accou
 	}
 	supported, _, _ := resolveOpenAIAccountModelForContext(ctx, account, requestedModel, "")
 	return supported
+}
+
+// IsOpenAIAccountModelSupportedForContext exposes the canonical context-aware
+// model support check for multi-turn handlers (such as Responses WebSocket).
+func IsOpenAIAccountModelSupportedForContext(ctx context.Context, account *Account, requestedModel string) bool {
+	return isOpenAIAccountModelSupportedForContext(ctx, account, requestedModel)
 }
