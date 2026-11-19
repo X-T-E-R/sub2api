@@ -822,11 +822,28 @@ func prioritizeOpenAICompactAccounts(accounts []*Account) []*Account {
 // would be sent for a given request, honoring the legacy compact-only mapping
 // when the caller is on the /responses/compact path.
 func resolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedModel string, requireCompact bool) string {
+	return resolveOpenAIAccountUpstreamModelForRequestWithContext(context.Background(), account, requestedModel, requireCompact)
+}
+
+func resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) string {
+	effective := strings.TrimSpace(requestedModel)
+	var originalAlias string
+	if fwd, ok := openAIForwardModelFromContext(ctx); ok {
+		if fwd.model != "" {
+			effective = fwd.model
+		}
+		if fwd.requestedModel != "" && fwd.requestedModel != effective {
+			originalAlias = fwd.requestedModel
+		} else if strings.TrimSpace(requestedModel) != "" && strings.TrimSpace(requestedModel) != effective {
+			originalAlias = strings.TrimSpace(requestedModel)
+		}
+	}
+
 	// Forward checks the raw Chat Completions fallback before passthrough.
 	// These API-key accounts therefore apply normal account model_mapping and
 	// upstream normalization, but never compact_model_mapping.
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
-		upstreamModel := resolveOpenAIForwardModel(account, requestedModel, "")
+		upstreamModel := resolveOpenAIForwardModelWithContext(ctx, account, requestedModel, "")
 		return normalizeOpenAIModelForUpstream(account, upstreamModel)
 	}
 
@@ -836,28 +853,34 @@ func resolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedMode
 	// exception: forwardOpenAIPassthrough applies compact_model_mapping
 	// directly to that channel-mapped model.
 	if account != nil && account.IsOpenAIPassthroughEnabled() {
-		upstreamModel := strings.TrimSpace(requestedModel)
-		if upstreamModel == "" {
+		if effective == "" {
 			return ""
 		}
 		if requireCompact {
-			return resolveOpenAICompactForwardModel(account, upstreamModel)
+			return resolveOpenAICompactForwardModel(account, effective)
 		}
-		return upstreamModel
+		return effective
 	}
 
 	// Compact mappings are keyed by the client-visible model. Prefer an exact
 	// compact rule before ordinary account mapping; otherwise a normal alias can
 	// hide the compact-specific rule and make scheduling disagree with Forward.
 	if requireCompact && account != nil {
-		if compactModel, matched := account.ResolveCompactMappedModel(strings.TrimSpace(requestedModel)); matched {
+		if compactModel, matched := account.ResolveCompactMappedModel(effective); matched {
 			if compactModel = strings.TrimSpace(compactModel); compactModel != "" {
 				return compactModel
 			}
 		}
+		if originalAlias != "" {
+			if compactModel, matched := account.ResolveCompactMappedModel(originalAlias); matched {
+				if compactModel = strings.TrimSpace(compactModel); compactModel != "" {
+					return compactModel
+				}
+			}
+		}
 	}
 
-	upstreamModel := resolveOpenAIForwardModel(account, requestedModel, "")
+	upstreamModel := resolveOpenAIForwardModelWithContext(ctx, account, requestedModel, "")
 	if upstreamModel == "" {
 		return ""
 	}
@@ -876,20 +899,31 @@ func ResolveOpenAIAccountUpstreamModelForRequest(account *Account, requestedMode
 	return resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, requireCompact)
 }
 
+// ResolveOpenAIAccountUpstreamModelForRequestWithContext exposes the
+// context-aware account mapping chain (including channel route alias fallback)
+// to handler-side outcome reporting.
+func ResolveOpenAIAccountUpstreamModelForRequestWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) string {
+	return resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
+}
+
 // resolveOpenAIForwardMappedModels is the shared account mapping chain for
 // Forward callers. billingModel retains the ordinary mapping used for usage
 // accounting, while upstreamModel is the model the scheduler has admitted.
 func resolveOpenAIForwardMappedModels(account *Account, requestedModel string, requireCompact bool) (billingModel, upstreamModel string) {
-	requestedModel = strings.TrimSpace(requestedModel)
-	if account != nil && account.IsOpenAIPassthroughEnabled() {
-		billingModel = requestedModel
-	} else if account != nil {
-		billingModel = strings.TrimSpace(account.GetMappedModel(requestedModel))
+	return resolveOpenAIForwardMappedModelsWithContext(context.Background(), account, requestedModel, requireCompact)
+}
+
+func resolveOpenAIForwardMappedModelsWithContext(ctx context.Context, account *Account, requestedModel string, requireCompact bool) (billingModel, upstreamModel string) {
+	_, effective, resolvedBilling := resolveOpenAIAccountModelForContext(ctx, account, requestedModel, "")
+	if account != nil && account.IsOpenAIPassthroughEnabled() && !shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+		billingModel = effective
+	} else {
+		billingModel = strings.TrimSpace(resolvedBilling)
+		if billingModel == "" {
+			billingModel = effective
+		}
 	}
-	if billingModel == "" {
-		billingModel = requestedModel
-	}
-	upstreamModel = resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, requireCompact)
+	upstreamModel = resolveOpenAIAccountUpstreamModelForRequestWithContext(ctx, account, requestedModel, requireCompact)
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = billingModel
 	}

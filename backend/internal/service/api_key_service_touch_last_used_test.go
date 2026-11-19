@@ -246,9 +246,9 @@ func TestAPIKeyService_TouchLastUsedAsync_SameKeyDoesNotExhaustSlotsOrBlockOther
 
 	close(blockCh)
 	require.Eventually(t, func() bool {
-		return len(svc.lastUsedTouchSlots) == 0
+		return len(svc.lastUsedTouchSlots) == 0 && len(repo.snapshotTouchedIDs()) == 2
 	}, time.Second, 5*time.Millisecond)
-	require.Len(t, repo.touchedIDs, 2)
+	require.Len(t, repo.snapshotTouchedIDs(), 2)
 }
 
 func TestAPIKeyService_TouchLastUsedAsync_StructLiteralInitializesBoundedSlots(t *testing.T) {

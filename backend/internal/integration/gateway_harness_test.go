@@ -52,9 +52,10 @@ type gatewayHarnessConfig struct {
 	Channels []service.Channel
 	Settings map[string]string
 	Config   *config.Config
-	APIKeyID int64
-	UserID   int64
-	Respond  upstreamResponder
+	APIKeyID        int64
+	UserID          int64
+	UnassignedGroup bool
+	Respond         upstreamResponder
 }
 
 // gatewayHarness wires the real Gin router, gateway middlewares, handlers,
@@ -266,6 +267,10 @@ func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness 
 			Status:      service.StatusActive,
 		},
 	}
+	if opts.UnassignedGroup {
+		apiKey.GroupID = nil
+		apiKey.Group = nil
+	}
 	apiKeyRepo := &memAPIKeyRepo{byKey: map[string]*service.APIKey{apiKey.Key: apiKey}}
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo, nil, groupRepo, nil, nil, nil, cfg)
 	openAIHandler := handler.NewOpenAIGatewayHandler(
@@ -351,6 +356,10 @@ func (h *gatewayHarness) assertSlotsBalanced(t *testing.T) {
 	t.Helper()
 	require.Equal(t, h.concurrency.userAcquires.Load(), h.concurrency.userReleases.Load(), "user concurrency slots leaked")
 	require.Equal(t, h.concurrency.accountAcquires.Load(), h.concurrency.accountReleases.Load(), "account concurrency slots leaked")
+	activeUsers, activeAccounts, violations := h.concurrency.auditSnapshot()
+	require.Empty(t, activeUsers, "unreleased user concurrency slot keys: %v", activeUsers)
+	require.Empty(t, activeAccounts, "unreleased account concurrency slot keys: %v", activeAccounts)
+	require.Empty(t, violations, "concurrency slot lifecycle violations (double release / mismatch): %v", violations)
 }
 
 func requireUpstreamModel(t *testing.T, log *service.UsageLog, want string) {
@@ -777,32 +786,90 @@ func (staticAntigravityTokenCache) AcquireRefreshLock(context.Context, string, t
 }
 func (staticAntigravityTokenCache) ReleaseRefreshLock(context.Context, string) error { return nil }
 
-type countingConcurrencyCache struct {
-	service.ConcurrencyCache
-	userAcquires    atomic.Int64
-	userReleases    atomic.Int64
-	accountAcquires atomic.Int64
-	accountReleases atomic.Int64
+type slotKey struct {
+	entityID  int64
+	requestID string
 }
 
-func (c *countingConcurrencyCache) AcquireAccountSlot(context.Context, int64, int, string) (bool, error) {
+type countingConcurrencyCache struct {
+	service.ConcurrencyCache
+	mu                 sync.Mutex
+	activeUserSlots    map[slotKey]struct{}
+	activeAccountSlots map[slotKey]struct{}
+	violations         []string
+	userAcquires       atomic.Int64
+	userReleases       atomic.Int64
+	accountAcquires    atomic.Int64
+	accountReleases    atomic.Int64
+}
+
+func (c *countingConcurrencyCache) AcquireAccountSlot(_ context.Context, accountID int64, _ int, requestID string) (bool, error) {
+	c.mu.Lock()
+	if c.activeAccountSlots == nil {
+		c.activeAccountSlots = make(map[slotKey]struct{})
+	}
+	k := slotKey{entityID: accountID, requestID: requestID}
+	if _, exists := c.activeAccountSlots[k]; exists {
+		c.violations = append(c.violations, "duplicate account slot acquire: "+itoa(int(accountID))+":"+requestID)
+	}
+	c.activeAccountSlots[k] = struct{}{}
+	c.mu.Unlock()
 	c.accountAcquires.Add(1)
 	return true, nil
 }
 
-func (c *countingConcurrencyCache) ReleaseAccountSlot(context.Context, int64, string) error {
+func (c *countingConcurrencyCache) ReleaseAccountSlot(_ context.Context, accountID int64, requestID string) error {
+	c.mu.Lock()
+	k := slotKey{entityID: accountID, requestID: requestID}
+	if _, exists := c.activeAccountSlots[k]; !exists {
+		c.violations = append(c.violations, "unexpected/double account slot release: "+itoa(int(accountID))+":"+requestID)
+	} else {
+		delete(c.activeAccountSlots, k)
+	}
+	c.mu.Unlock()
 	c.accountReleases.Add(1)
 	return nil
 }
 
-func (c *countingConcurrencyCache) AcquireUserSlot(context.Context, int64, int, string) (bool, error) {
+func (c *countingConcurrencyCache) AcquireUserSlot(_ context.Context, userID int64, _ int, requestID string) (bool, error) {
+	c.mu.Lock()
+	if c.activeUserSlots == nil {
+		c.activeUserSlots = make(map[slotKey]struct{})
+	}
+	k := slotKey{entityID: userID, requestID: requestID}
+	if _, exists := c.activeUserSlots[k]; exists {
+		c.violations = append(c.violations, "duplicate user slot acquire: "+itoa(int(userID))+":"+requestID)
+	}
+	c.activeUserSlots[k] = struct{}{}
+	c.mu.Unlock()
 	c.userAcquires.Add(1)
 	return true, nil
 }
 
-func (c *countingConcurrencyCache) ReleaseUserSlot(context.Context, int64, string) error {
+func (c *countingConcurrencyCache) ReleaseUserSlot(_ context.Context, userID int64, requestID string) error {
+	c.mu.Lock()
+	k := slotKey{entityID: userID, requestID: requestID}
+	if _, exists := c.activeUserSlots[k]; !exists {
+		c.violations = append(c.violations, "unexpected/double user slot release: "+itoa(int(userID))+":"+requestID)
+	} else {
+		delete(c.activeUserSlots, k)
+	}
+	c.mu.Unlock()
 	c.userReleases.Add(1)
 	return nil
+}
+
+func (c *countingConcurrencyCache) auditSnapshot() (activeUsers []slotKey, activeAccounts []slotKey, violations []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.activeUserSlots {
+		activeUsers = append(activeUsers, k)
+	}
+	for k := range c.activeAccountSlots {
+		activeAccounts = append(activeAccounts, k)
+	}
+	violations = append([]string(nil), c.violations...)
+	return activeUsers, activeAccounts, violations
 }
 
 func (c *countingConcurrencyCache) GetAccountConcurrency(context.Context, int64) (int, error) {

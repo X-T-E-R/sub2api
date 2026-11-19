@@ -9,6 +9,13 @@ export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[ccp-bootstrap] %s\n' "$*"; }
 
+# Safety guard: this script mutates local pg_hba.conf (trust auth on loopback),
+# resets the postgres superuser password, and provisions disposable test DBs.
+if [ "${SUB2API_CRUCIBLE_EPHEMERAL_VM:-}" != "1" ]; then
+  log "REFUSED: set SUB2API_CRUCIBLE_EPHEMERAL_VM=1 to confirm this host is a disposable crucible VM."
+  exit 1
+fi
+
 # 1. Base packages: gcc (for Go -race), postgresql, redis-server, curl, ca-certificates.
 log "Checking system packages (gcc, postgresql, redis-server)..."
 if ! command -v gcc >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1 || ! command -v redis-server >/dev/null 2>&1; then

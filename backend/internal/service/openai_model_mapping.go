@@ -1,23 +1,19 @@
 package service
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // resolveOpenAIForwardModel 解析 OpenAI 兼容转发使用的模型。
 // messagesDispatchMappedModel 是调用方已为 /v1/messages 解析的显式调度结果；
 // 普通 OpenAI 请求必须传空，避免将分组配置作为通用模型兜底。
 func resolveOpenAIForwardModel(account *Account, requestedModel, messagesDispatchMappedModel string) string {
-	messagesDispatchMappedModel = strings.TrimSpace(messagesDispatchMappedModel)
-	if account == nil {
-		if messagesDispatchMappedModel != "" {
-			return messagesDispatchMappedModel
-		}
-		return requestedModel
-	}
+	return resolveOpenAIForwardModelWithContext(context.Background(), account, requestedModel, messagesDispatchMappedModel)
+}
 
-	mappedModel, matched := account.ResolveMappedModel(requestedModel)
-	if !matched && messagesDispatchMappedModel != "" {
-		return messagesDispatchMappedModel
-	}
+func resolveOpenAIForwardModelWithContext(ctx context.Context, account *Account, requestedModel, messagesDispatchMappedModel string) string {
+	_, _, mappedModel := resolveOpenAIAccountModelForContext(ctx, account, requestedModel, messagesDispatchMappedModel)
 	return mappedModel
 }
 

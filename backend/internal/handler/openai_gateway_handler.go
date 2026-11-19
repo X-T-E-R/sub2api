@@ -171,6 +171,9 @@ func openAIAccountScheduleModel(c *gin.Context, account *service.Account, forwar
 			}
 		}
 	}
+	if c != nil && c.Request != nil {
+		return service.ResolveOpenAIAccountUpstreamModelForRequestWithContext(c.Request.Context(), account, forwardModel, requireCompact)
+	}
 	return service.ResolveOpenAIAccountUpstreamModelForRequest(account, forwardModel, requireCompact)
 }
 
@@ -543,8 +546,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if channelMapping.Mapped {
 		forwardModel = channelMapping.MappedModel
 	}
-	c.Request = c.Request.WithContext(service.WithOpenAIForwardModel(
+	c.Request = c.Request.WithContext(service.WithOpenAIForwardModelRoute(
 		c.Request.Context(),
+		reqModel,
 		forwardModel,
 		legacyCompact,
 	))
@@ -2240,7 +2244,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 继续按建连时刻的谷价计费。生图意图只影响能力路由与图片计费，不关门。
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
 	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
-	ctx = wsPricingCtx
+	ctx = service.WithOpenAIForwardModelRoute(wsPricingCtx, reqModel, wsForwardModel, false)
 
 	for {
 		if ctx.Err() != nil {

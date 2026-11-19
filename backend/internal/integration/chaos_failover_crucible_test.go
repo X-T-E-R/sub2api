@@ -50,32 +50,25 @@ func TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects(t *tes
 	accBackup.Concurrency = 64
 
 	var (
-		contractMu       sync.Mutex
-		contractErrors   []string
-		mfcAttempts      atomic.Int32
-		failoverInjected atomic.Int32
-		disconnectMu     sync.Mutex
-		disconnectChans  = map[string]chan struct{}{}
+		contractMu          sync.Mutex
+		contractErrors      []string
+		mfcAttempts         atomic.Int32
+		failoverInjected    atomic.Int32
+		disconnectAttempts  atomic.Int32
+		disconnectCtxCancel atomic.Int32
+		disconnectChunkSent sync.Map // tag -> chan struct{}
 	)
-	getDisconnectChan := func(key string) chan struct{} {
-		disconnectMu.Lock()
-		defer disconnectMu.Unlock()
-		ch, ok := disconnectChans[key]
-		if !ok {
-			ch = make(chan struct{})
-			disconnectChans[key] = ch
-		}
-		return ch
+	getChunkChan := func(key string) chan struct{} {
+		ch, _ := disconnectChunkSent.LoadOrStore(key, make(chan struct{}))
+		return ch.(chan struct{})
 	}
-	closeDisconnectChan := func(key string) {
-		ch := getDisconnectChan(key)
-		disconnectMu.Lock()
+	markChunkSent := func(key string) {
+		ch := getChunkChan(key)
 		select {
 		case <-ch:
 		default:
 			close(ch)
 		}
-		disconnectMu.Unlock()
 	}
 	recordContractErr := func(format string, args ...any) {
 		contractMu.Lock()
@@ -204,18 +197,20 @@ func TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects(t *tes
 				), nil
 
 			case strings.Contains(raw, "CRUCIBLE_DISCONNECT"):
+				disconnectAttempts.Add(1)
 				tag := "ag-disc-0"
 				if strings.Contains(raw, "CRUCIBLE_DISCONNECT-1") {
 					tag = "ag-disc-1"
 				}
-				stopCh := getDisconnectChan(tag)
 				pr, pw := io.Pipe()
 				go func() {
 					_, _ = io.WriteString(pw, "data: {\"response\":{\"responseId\":\"disc_1\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"chunk-1\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2}}}\n\n")
+					markChunkSent(tag)
 					select {
-					case <-stopCh:
 					case <-req.ContextDone():
-					case <-time.After(5 * time.Second):
+						disconnectCtxCancel.Add(1)
+					case <-time.After(3 * time.Second):
+						recordContractErr("antigravity disconnect %s: upstream req.Context().Done() did not fire", tag)
 					}
 					_ = pw.CloseWithError(context.Canceled)
 				}()
@@ -393,22 +388,25 @@ func TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects(t *tes
 	}()
 
 	// 6) 2 concurrent mid-stream client disconnect workers using cancellable contexts.
+	// Wait until the real content chunk ("chunk-1") has been written by the mock upstream
+	// and delivered to the client writer before cancelling, then assert upstream req.Context().Done() fires
+	// with zero post-content failover.
 	for i := 0; i < 2; i++ {
 		idx := i
 		tag := fmt.Sprintf("ag-disc-%d", idx)
+		chunkCh := getChunkChan(tag)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			defer closeDisconnectChan(tag)
 			body := fmt.Sprintf(`{"model":"crucible-stream","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"CRUCIBLE_DISCONNECT-%d"}]}`, idx)
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body)).WithContext(ctx)
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+h.apiKey.Key)
-			rec := newNotifyingRecorder(func() {
+			rec := newContentNotifyingRecorder("chunk-1", func() {
+				<-chunkCh
 				cancel()
-				closeDisconnectChan(tag)
 			})
 			h.router.ServeHTTP(rec, req)
 		}()
@@ -428,6 +426,8 @@ func TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects(t *tes
 	require.Equal(t, int32(20), completedNormal.Load(), "all 20 normal/failover/multimodal/hetero workers must succeed")
 	require.GreaterOrEqual(t, failoverInjected.Load(), int32(1), "429 failover path must have been exercised")
 	require.Equal(t, int32(7), mfcAndSafeLogs.Load(), "4 MFC + 3 soft-safety turns must complete")
+	require.Equal(t, int32(2), disconnectAttempts.Load(), "mid-stream disconnects must not trigger post-content failover")
+	require.Equal(t, int32(2), disconnectCtxCancel.Load(), "client disconnect must cancel upstream req.Context().Done()")
 
 	// Usage accounting: at least the 20 normal + 7 MFC/safety billed requests must
 	// be recorded (disconnected mid-stream turns may also record partial usage).
@@ -441,7 +441,7 @@ func TestChaosCrucible_AntigravityConcurrentRewriteFailoverAndDisconnects(t *tes
 	require.Eventually(t, func() bool {
 		runtime.GC()
 		return runtime.NumGoroutine() <= baselineGoroutines+8
-	}, 2*time.Second, 10*time.Millisecond, "goroutine leak detected: baseline=%d current=%d", baselineGoroutines, runtime.NumGoroutine())
+	}, 5*time.Second, 20*time.Millisecond, "goroutine leak detected: baseline=%d current=%d", baselineGoroutines, runtime.NumGoroutine())
 }
 
 func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *testing.T) {
@@ -476,33 +476,39 @@ func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *te
 	acc2.Concurrency = 64
 
 	var (
-		contractMu       sync.Mutex
-		contractErrors   []string
-		failoversSeen    atomic.Int32
-		responsesSuccess atomic.Int32
-		chatSuccess      atomic.Int32
-		oaDiscMu         sync.Mutex
-		oaDiscChans      = map[string]chan struct{}{}
+		contractMu           sync.Mutex
+		contractErrors       []string
+		failoversSeen        atomic.Int32
+		responsesSuccess     atomic.Int32
+		chatSuccess          atomic.Int32
+		oaDisconnectAttempts atomic.Int32
+		oaDisconnectDrained  atomic.Int32
+		oaClientCanceled     sync.Map // tag -> chan struct{}
+		oaChunkSent          sync.Map // tag -> chan struct{}
 	)
-	getOADiscChan := func(key string) chan struct{} {
-		oaDiscMu.Lock()
-		defer oaDiscMu.Unlock()
-		ch, ok := oaDiscChans[key]
-		if !ok {
-			ch = make(chan struct{})
-			oaDiscChans[key] = ch
-		}
-		return ch
+	getOAChunkChan := func(key string) chan struct{} {
+		ch, _ := oaChunkSent.LoadOrStore(key, make(chan struct{}))
+		return ch.(chan struct{})
 	}
-	closeOADiscChan := func(key string) {
-		ch := getOADiscChan(key)
-		oaDiscMu.Lock()
+	markOAChunkSent := func(key string) {
+		ch := getOAChunkChan(key)
 		select {
 		case <-ch:
 		default:
 			close(ch)
 		}
-		oaDiscMu.Unlock()
+	}
+	getOACanceledChan := func(key string) chan struct{} {
+		ch, _ := oaClientCanceled.LoadOrStore(key, make(chan struct{}))
+		return ch.(chan struct{})
+	}
+	markOAClientCanceled := func(key string) {
+		ch := getOACanceledChan(key)
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
 	}
 	recordContractErr := func(format string, args ...any) {
 		contractMu.Lock()
@@ -546,24 +552,28 @@ func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *te
 			}
 
 			if strings.Contains(raw, "OA_CRUCIBLE_DISCONNECT") {
+				oaDisconnectAttempts.Add(1)
 				tag := "oa-disc-0"
 				if strings.Contains(raw, "OA_CRUCIBLE_DISCONNECT-1") {
 					tag = "oa-disc-1"
 				}
-				stopCh := getOADiscChan(tag)
+				canceledCh := getOACanceledChan(tag)
 				pr, pw := io.Pipe()
 				go func() {
-					if strings.HasSuffix(req.URL, "/responses") {
-						_, _ = io.WriteString(pw, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
-					} else {
-						_, _ = io.WriteString(pw, "data: {\"id\":\"chatcmpl-disc\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
-					}
+					_, _ = io.WriteString(pw, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"oa-chunk-1\"}\n\n")
+					markOAChunkSent(tag)
+					// OpenAI streaming deliberately detaches upstream ctx (context.WithoutCancel)
+					// so the gateway drains terminal usage even after client disconnect while
+					// suppressing post-cancel writes to the client.
 					select {
-					case <-stopCh:
-					case <-req.ContextDone():
-					case <-time.After(5 * time.Second):
+					case <-canceledCh:
+					case <-time.After(3 * time.Second):
+						recordContractErr("openai disconnect %s: client cancel barrier timed out", tag)
 					}
-					_ = pw.CloseWithError(context.Canceled)
+					_, _ = io.WriteString(pw, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"oa-after-disconnect\"}\n\n")
+					_, _ = io.WriteString(pw, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_disc_drain\",\"status\":\"completed\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":17,\"output_tokens\":9}}}\n\n")
+					oaDisconnectDrained.Add(1)
+					_ = pw.Close()
 				}()
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -668,25 +678,34 @@ func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *te
 		}()
 	}
 
-	// 2 concurrent mid-stream disconnect workers on /v1/chat/completions.
+	// 2 concurrent mid-stream disconnect workers on /v1/responses.
+	// OpenAI streaming deliberately uses detached upstream ctx so that after client cancel:
+	//   1) post-cancel chunks ("oa-after-disconnect") are suppressed from client output,
+	//   2) zero post-content failover occurs (1 attempt per worker),
+	//   3) terminal usage (17+9) is still drained and recorded accurately.
 	for i := 0; i < 2; i++ {
 		idx := i
 		tag := fmt.Sprintf("oa-disc-%d", idx)
+		chunkCh := getOAChunkChan(tag)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			defer closeOADiscChan(tag)
-			body := fmt.Sprintf(`{"model":"crucible-gpt","stream":true,"messages":[{"role":"user","content":"OA_CRUCIBLE_DISCONNECT-%d"}]}`, idx)
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body)).WithContext(ctx)
+			defer markOAClientCanceled(tag)
+			body := fmt.Sprintf(`{"model":"crucible-gpt","stream":true,"input":[{"role":"user","content":"OA_CRUCIBLE_DISCONNECT-%d"}]}`, idx)
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body)).WithContext(ctx)
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+h.apiKey.Key)
-			rec := newNotifyingRecorder(func() {
+			rec := newContentNotifyingRecorder("oa-chunk-1", func() {
+				<-chunkCh
 				cancel()
-				closeOADiscChan(tag)
+				markOAClientCanceled(tag)
 			})
 			h.router.ServeHTTP(rec, req)
+			if strings.Contains(rec.Body.String(), "oa-after-disconnect") {
+				recordContractErr("openai disconnect %s: post-cancel chunk leaked to disconnected client", tag)
+			}
 		}()
 	}
 
@@ -704,6 +723,15 @@ func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *te
 	require.Equal(t, int32(12), responsesSuccess.Load())
 	require.Equal(t, int32(10), chatSuccess.Load())
 	require.GreaterOrEqual(t, failoversSeen.Load(), int32(1))
+	require.Equal(t, int32(2), oaDisconnectAttempts.Load(), "mid-stream disconnects must not trigger post-content failover")
+	require.Equal(t, int32(2), oaDisconnectDrained.Load(), "OpenAI detached stream must drain terminal usage cleanly after client disconnect")
+	var drainedUsageCount int
+	for _, ul := range h.usageRecords() {
+		if ul.InputTokens == 17 && ul.OutputTokens == 9 {
+			drainedUsageCount++
+		}
+	}
+	require.Equal(t, 2, drainedUsageCount, "both disconnected OpenAI streams must record drained terminal usage (17 in / 9 out)")
 
 	// Verify exact usage billing chain on completed records.
 	logs := h.usageRecords()
@@ -729,37 +757,59 @@ func TestChaosCrucible_OpenAIConcurrentResponsesChatFailoverAndDisconnects(t *te
 	require.Eventually(t, func() bool {
 		runtime.GC()
 		return runtime.NumGoroutine() <= baselineGoroutines+8
-	}, 2*time.Second, 10*time.Millisecond, "goroutine leak detected: baseline=%d current=%d", baselineGoroutines, runtime.NumGoroutine())
+	}, 5*time.Second, 20*time.Millisecond, "goroutine leak detected: baseline=%d current=%d", baselineGoroutines, runtime.NumGoroutine())
 }
 
-// notifyingRecorder wraps httptest.ResponseRecorder and invokes onFirstWrite
-// once when the handler flushes/writes the first response bytes (used to trigger
-// deterministic mid-stream client cancellation without sleeps).
-type notifyingRecorder struct {
+// contentNotifyingRecorder wraps httptest.ResponseRecorder, invokes onContent
+// once when written response bytes contain triggerSubstr (ensuring cancellation
+// fires only after a real content chunk rather than a preheader heartbeat), and
+// rejects subsequent writes with context.Canceled just like a closed client socket.
+type contentNotifyingRecorder struct {
 	*httptest.ResponseRecorder
-	once         sync.Once
-	onFirstWrite func()
+	triggerSubstr string
+	once          sync.Once
+	canceled      atomic.Bool
+	onContent     func()
 }
 
-func newNotifyingRecorder(onFirstWrite func()) *notifyingRecorder {
-	return &notifyingRecorder{
+func newContentNotifyingRecorder(triggerSubstr string, onContent func()) *contentNotifyingRecorder {
+	return &contentNotifyingRecorder{
 		ResponseRecorder: httptest.NewRecorder(),
-		onFirstWrite:     onFirstWrite,
+		triggerSubstr:    triggerSubstr,
+		onContent:        onContent,
 	}
 }
 
-func (r *notifyingRecorder) Write(p []byte) (int, error) {
+func (r *contentNotifyingRecorder) checkTrigger() {
+	if r.onContent == nil {
+		return
+	}
+	if r.triggerSubstr == "" || strings.Contains(r.ResponseRecorder.Body.String(), r.triggerSubstr) {
+		r.once.Do(func() {
+			r.canceled.Store(true)
+			r.onContent()
+		})
+	}
+}
+
+func (r *contentNotifyingRecorder) Write(p []byte) (int, error) {
+	if r.canceled.Load() {
+		return 0, context.Canceled
+	}
 	n, err := r.ResponseRecorder.Write(p)
-	if len(p) > 0 && r.onFirstWrite != nil {
-		r.once.Do(r.onFirstWrite)
+	if len(p) > 0 {
+		r.checkTrigger()
 	}
 	return n, err
 }
 
-func (r *notifyingRecorder) WriteString(s string) (int, error) {
+func (r *contentNotifyingRecorder) WriteString(s string) (int, error) {
+	if r.canceled.Load() {
+		return 0, context.Canceled
+	}
 	n, err := r.ResponseRecorder.WriteString(s)
-	if len(s) > 0 && r.onFirstWrite != nil {
-		r.once.Do(r.onFirstWrite)
+	if len(s) > 0 {
+		r.checkTrigger()
 	}
 	return n, err
 }

@@ -119,8 +119,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	if channelMapping.Mapped {
 		forwardModel = channelMapping.MappedModel
 	}
-	c.Request = c.Request.WithContext(service.WithOpenAIForwardModel(
+	c.Request = c.Request.WithContext(service.WithOpenAIForwardModelRoute(
 		c.Request.Context(),
+		reqModel,
 		forwardModel,
 		false,
 	))

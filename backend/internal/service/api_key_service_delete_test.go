@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,7 @@ type apiKeyRepoStub struct {
 	listAllByUserIDCalls   []int64
 	listAllByUserIDFilters []APIKeyListFilters
 	updateLastUsed         func(ctx context.Context, id int64, usedAt time.Time) error
+	touchMu                sync.Mutex
 	touchedIDs             []int64
 	touchedUsedAts         []time.Time
 }
@@ -212,12 +214,21 @@ func (s *apiKeyRepoStub) IncrementQuotaUsed(ctx context.Context, id int64, amoun
 }
 
 func (s *apiKeyRepoStub) UpdateLastUsed(ctx context.Context, id int64, usedAt time.Time) error {
+	s.touchMu.Lock()
 	s.touchedIDs = append(s.touchedIDs, id)
 	s.touchedUsedAts = append(s.touchedUsedAts, usedAt)
-	if s.updateLastUsed != nil {
-		return s.updateLastUsed(ctx, id, usedAt)
+	fn := s.updateLastUsed
+	s.touchMu.Unlock()
+	if fn != nil {
+		return fn(ctx, id, usedAt)
 	}
 	return nil
+}
+
+func (s *apiKeyRepoStub) snapshotTouchedIDs() []int64 {
+	s.touchMu.Lock()
+	defer s.touchMu.Unlock()
+	return append([]int64(nil), s.touchedIDs...)
 }
 
 func (s *apiKeyRepoStub) IncrementRateLimitUsage(ctx context.Context, id int64, cost float64) error {

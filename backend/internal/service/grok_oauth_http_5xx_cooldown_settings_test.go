@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -87,9 +88,16 @@ func TestGetGrokOAuthHTTP5xxCooldownSettingsEffectiveSourceAndFallbacks(t *testi
 			if tt.wantReason == "" {
 				require.NotContains(t, logs.String(), "grok_oauth_http_5xx_cooldown_settings_fallback")
 			} else {
-				require.Contains(t, logs.String(), `"msg":"grok_oauth_http_5xx_cooldown_settings_fallback"`)
-				require.Contains(t, logs.String(), `"reason":"`+tt.wantReason+`"`)
-				require.NotContains(t, logs.String(), "database unavailable")
+				var fallbackLine string
+				for _, line := range strings.Split(logs.String(), "\n") {
+					if strings.Contains(line, `"msg":"grok_oauth_http_5xx_cooldown_settings_fallback"`) {
+						fallbackLine = line
+						break
+					}
+				}
+				require.NotEmpty(t, fallbackLine, "expected fallback log line in %s", logs.String())
+				require.Contains(t, fallbackLine, `"reason":"`+tt.wantReason+`"`)
+				require.NotContains(t, fallbackLine, "database unavailable")
 			}
 		})
 	}

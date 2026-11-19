@@ -42,6 +42,22 @@ func TestE2E_GatewayAuthAndGroupEnforcementFlow(t *testing.T) {
 		h.assertSlotsBalanced(t)
 	})
 
+	t.Run("unassigned_group_api_key_rejected_with_403", func(t *testing.T) {
+		acc := newAntigravityAccount(414, "ag-auth-nogroup", 1, map[string]any{
+			"gemini-3-flash": "gemini-3-flash",
+		})
+		h := newGatewayHarness(t, gatewayHarnessConfig{
+			Accounts:        []*service.Account{acc},
+			UnassignedGroup: true,
+		})
+
+		rec := h.post(t, "/v1/messages", nil, `{"model":"gemini-3-flash","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body=%s", rec.Body.String())
+		require.Empty(t, h.requests(), "unassigned-group API key must be rejected before reaching upstream")
+		require.Empty(t, h.usageRecords())
+		h.assertSlotsBalanced(t)
+	})
+
 	t.Run("valid_key_full_user_journey_models_messages_and_usage", func(t *testing.T) {
 		acc := newAntigravityAccount(412, "ag-journey", 1, map[string]any{
 			"gemini-3-flash": "gemini-3-flash",

@@ -1,5 +1,3 @@
-//go:build unit
-
 package service
 
 import (
@@ -405,4 +403,58 @@ func TestOpenAISelectAccount_SupportsChannelMappedForwardModelWhitelist(t *testi
 	badCtx := WithOpenAIForwardModel(context.Background(), "other-model", false)
 	_, err = svc.SelectAccountForModelWithExclusions(badCtx, &groupID, "", "public-gpt", nil)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+}
+
+func TestOpenAISelectAccount_ChannelMappedPrecedenceAndOAuthSafety(t *testing.T) {
+	t.Parallel()
+
+	// 1. OAuth account with empty model_mapping must NOT be falsely admitted via
+	// clientAlias when channelMappedModel is an unsupported foreign model family.
+	oauthAcc := &Account{
+		ID:          21,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+	ctxForeign := WithOpenAIForwardModelRoute(context.Background(), "public-alias", "deepseek-r1", false)
+	require.False(t, isOpenAIAccountModelSupportedForContext(ctxForeign, oauthAcc, "public-alias"),
+		"OAuth account must evaluate unsupported channelMappedModel rather than clientAlias")
+
+	// 2. When an account maps BOTH clientAlias and channelMappedModel, channelMappedModel takes precedence.
+	bothAcc := &Account{
+		ID:          22,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"public-gpt":    "upstream-from-alias",
+				"channel-gpt-5": "upstream-from-channel",
+			},
+		},
+	}
+	ctxRoute := WithOpenAIForwardModelRoute(context.Background(), "public-gpt", "channel-gpt-5", false)
+	supported, _, mapped := resolveOpenAIAccountModelForContext(ctxRoute, bothAcc, "channel-gpt-5", "")
+	require.True(t, supported)
+	require.Equal(t, "upstream-from-channel", mapped)
+
+	// 3. When an account maps ONLY clientAlias, Forward & restriction resolve clientAlias -> upstreamA.
+	aliasOnlyAcc := &Account{
+		ID:          23,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"public-gpt": "upstream-only-alias",
+			},
+		},
+	}
+	supported, _, mapped = resolveOpenAIAccountModelForContext(ctxRoute, aliasOnlyAcc, "channel-gpt-5", "")
+	require.True(t, supported)
+	require.Equal(t, "upstream-only-alias", mapped)
+	require.Equal(t, "upstream-only-alias", resolveOpenAIAccountUpstreamModelForRequestWithContext(ctxRoute, aliasOnlyAcc, "public-gpt", false))
 }

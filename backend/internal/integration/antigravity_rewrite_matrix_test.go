@@ -398,6 +398,130 @@ func TestAntigravityMessages_TwoStageMalformedFunctionCallRecovery(t *testing.T)
 	h.assertSlotsBalanced(t)
 }
 
+func TestAntigravityMessages_Stage2MalformedReapplyOn400SignatureAndBudgetRetries(t *testing.T) {
+	const modePath = "request.toolConfig.functionCallingConfig.mode"
+	const noteMarker = "[System recovery note:"
+
+	t.Run("signature_400_retry_preserves_stage2_auto_and_single_tool_note_once", func(t *testing.T) {
+		acc := newAntigravityAccount(115, "ag-mfc-sig400", 1, map[string]any{
+			"sig-tool-model": "gemini-2.5-pro",
+		})
+		malformedSSE := func() *http.Response {
+			return sseHTTPResponse(
+				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5}}}`,
+			)
+		}
+
+		h := newGatewayHarness(t, gatewayHarnessConfig{
+			Accounts: []*service.Account{acc},
+			Respond: func(attempt int, _ capturedUpstreamRequest) (*http.Response, error) {
+				switch attempt {
+				case 0, 1:
+					// Seed Stage 1 -> Stage 2 malformed function recovery.
+					return malformedSSE(), nil
+				case 2:
+					// First Stage-2 attempt hits a signature-related 400.
+					return jsonHTTPResponse(http.StatusBadRequest, `{"error":{"code":400,"message":"Invalid signature in thinking block","status":"INVALID_ARGUMENT"}}`), nil
+				default:
+					// Re-transformed retry after stripping signatures succeeds.
+					return antigravityTextSSE("sig-retry-recovered", 12, 6, 0), nil
+				}
+			},
+		})
+
+		headers := map[string]string{"X-Session-Id": "sess-mfc-stage2-sig400"}
+		reqBody := `{
+			"model": "sig-tool-model",
+			"max_tokens": 4096,
+			"stream": true,
+			"thinking": {"type": "enabled", "budget_tokens": 1024},
+			"tools": [{"name": "lookup", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+			"messages": [
+				{"role": "user", "content": "start"},
+				{"role": "assistant", "content": [
+					{"type": "thinking", "thinking": "prior thought", "signature": "sig_bad_cross_account_123456789012345678901234567890"},
+					{"type": "text", "text": "checking"}
+				]},
+				{"role": "user", "content": "find docs"}
+			]
+		}`
+
+		require.Equal(t, http.StatusOK, h.post(t, "/v1/messages", headers, reqBody).Code)
+		require.Equal(t, http.StatusOK, h.post(t, "/v1/messages", headers, reqBody).Code)
+
+		rec3 := h.post(t, "/v1/messages", headers, reqBody)
+		require.Equal(t, http.StatusOK, rec3.Code, "body=%s", rec3.Body.String())
+		require.Contains(t, rec3.Body.String(), "sig-retry-recovered")
+
+		reqs := h.requests()
+		require.Len(t, reqs, 4, "expected 2 seed attempts + 1 Stage-2 400 + 1 Stage-2 signature-stripped retry")
+
+		retried := reqs[3].Body
+		require.Equal(t, "AUTO", gjson.GetBytes(retried, modePath).String(),
+			"signature-400 retry must preserve Stage-2 AUTO functionCallingConfig.mode")
+		require.Equal(t, 1, strings.Count(string(retried), noteMarker),
+			"signature-400 retry must preserve Stage-2 single-tool recovery note exactly once")
+		require.NotContains(t, string(retried), "sig_bad_cross_account_",
+			"signature-400 retry must strip the rejected thoughtSignature from history")
+		h.assertSlotsBalanced(t)
+	})
+
+	t.Run("budget_400_retry_preserves_stage2_auto_and_single_tool_note_once", func(t *testing.T) {
+		acc := newAntigravityAccount(116, "ag-mfc-budget400", 1, map[string]any{
+			"budget-tool-model": "gemini-2.5-pro",
+		})
+		malformedSSE := func() *http.Response {
+			return sseHTTPResponse(
+				`data: {"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5}}}`,
+			)
+		}
+
+		h := newGatewayHarness(t, gatewayHarnessConfig{
+			Accounts: []*service.Account{acc},
+			Respond: func(attempt int, _ capturedUpstreamRequest) (*http.Response, error) {
+				switch attempt {
+				case 0, 1:
+					return malformedSSE(), nil
+				case 2:
+					// First Stage-2 attempt hits a thinking.budget_tokens constraint 400.
+					return jsonHTTPResponse(http.StatusBadRequest, `{"error":{"code":400,"message":"thinking.budget_tokens: Input should be greater than or equal to 1024","status":"INVALID_ARGUMENT"}}`), nil
+				default:
+					return antigravityTextSSE("budget-retry-recovered", 12, 6, 0), nil
+				}
+			},
+		})
+
+		headers := map[string]string{"X-Session-Id": "sess-mfc-stage2-budget400"}
+		reqBody := `{
+			"model": "budget-tool-model",
+			"max_tokens": 512,
+			"stream": true,
+			"thinking": {"type": "enabled", "budget_tokens": 256},
+			"tools": [{"name": "lookup", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+			"messages": [{"role": "user", "content": "find docs"}]
+		}`
+
+		require.Equal(t, http.StatusOK, h.post(t, "/v1/messages", headers, reqBody).Code)
+		require.Equal(t, http.StatusOK, h.post(t, "/v1/messages", headers, reqBody).Code)
+
+		rec3 := h.post(t, "/v1/messages", headers, reqBody)
+		require.Equal(t, http.StatusOK, rec3.Code, "body=%s", rec3.Body.String())
+		require.Contains(t, rec3.Body.String(), "budget-retry-recovered")
+
+		reqs := h.requests()
+		require.Len(t, reqs, 4, "expected 2 seed attempts + 1 Stage-2 budget 400 + 1 Stage-2 rectified retry")
+
+		retried := reqs[3].Body
+		require.Equal(t, "AUTO", gjson.GetBytes(retried, modePath).String(),
+			"budget-400 retry must preserve Stage-2 AUTO functionCallingConfig.mode")
+		require.Equal(t, 1, strings.Count(string(retried), noteMarker),
+			"budget-400 retry must preserve Stage-2 single-tool recovery note exactly once")
+		require.Equal(t, int64(service.BudgetRectifyBudgetTokens), gjson.GetBytes(retried, "request.generationConfig.thinkingConfig.thinkingBudget").Int(),
+			"budget-400 retry must apply rectified thinkingBudget")
+		h.assertSlotsBalanced(t)
+	})
+}
+
 func TestAntigravityMessages_SoftSafetySubcodeAndSessionStreakGuard(t *testing.T) {
 	acc := newAntigravityAccount(107, "ag-safety", 1, map[string]any{
 		"safe-model": "gemini-4-hydrogen",
