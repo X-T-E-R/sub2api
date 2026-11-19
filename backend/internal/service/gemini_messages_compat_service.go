@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
@@ -632,7 +633,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
-	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body, mappedModel)
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
@@ -884,7 +885,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					stageName = "thinking+tools"
 					signatureRetryStage = 2
 				}
-				retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(strippedClaudeBody)
+				retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(strippedClaudeBody, mappedModel)
 				if txErr == nil {
 					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: detected signature-related 400, retrying with downgraded Claude blocks (%s)", account.ID, stageName)
 					geminiReq = retryGeminiReq
@@ -3367,7 +3368,7 @@ func mapGeminiFinishReasonToClaudeStopReason(finishReason string) string {
 	}
 }
 
-func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
+func convertClaudeMessagesToGeminiGenerateContent(body []byte, targetModel string) ([]byte, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
@@ -3376,7 +3377,7 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	toolUseIDToName := make(map[string]string)
 
 	systemText := extractClaudeSystemText(req["system"])
-	contents, err := convertClaudeMessagesToGeminiContents(req["messages"], toolUseIDToName)
+	contents, err := convertClaudeMessagesToGeminiContents(req["messages"], toolUseIDToName, antigravity.SupportsGeminiToolResultMedia(targetModel))
 	if err != nil {
 		return nil, err
 	}
@@ -3456,14 +3457,14 @@ func extractClaudeSystemText(system any) string {
 	}
 }
 
-func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[string]string) ([]any, error) {
+func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[string]string, toolResultMedia bool) ([]any, error) {
 	arr, ok := messages.([]any)
 	if !ok {
 		return nil, errors.New("messages must be an array")
 	}
 
 	out := make([]any, 0, len(arr))
-	for _, m := range arr {
+	for i, m := range arr {
 		mm, ok := m.(map[string]any)
 		if !ok {
 			continue
@@ -3484,7 +3485,7 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 			// 如果只有一个 block，不过滤空白（让上游 API 报错）
 			singleBlock := len(content) == 1
 
-			for _, block := range content {
+			for j, block := range content {
 				bm, ok := block.(map[string]any)
 				if !ok {
 					continue
@@ -3538,29 +3539,47 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 					if name == "" {
 						name = "tool"
 					}
-					parts = append(parts, map[string]any{
-						"functionResponse": map[string]any{
-							"name": name,
-							"response": map[string]any{
-								"content": extractClaudeContentText(bm["content"]),
-							},
+					response := map[string]any{
+						"name": name,
+						"response": map[string]any{
+							"content": extractClaudeContentText(bm["content"]),
 						},
-					})
-				case "image":
-					if src, ok := bm["source"].(map[string]any); ok {
-						if srcType, _ := src["type"].(string); srcType == "base64" {
-							mediaType, _ := src["media_type"].(string)
-							data, _ := src["data"].(string)
-							if mediaType != "" && data != "" {
-								parts = append(parts, map[string]any{
-									"inlineData": map[string]any{
-										"mimeType": mediaType,
-										"data":     data,
-									},
-								})
+					}
+					if content, ok := bm["content"].([]any); ok {
+						var media []antigravity.GeminiFunctionResponsePart
+						for k, raw := range content {
+							result, _ := raw.(map[string]any)
+							kind, _ := result["type"].(string)
+							switch kind {
+							case "image", "video", "audio":
+								inline := antigravity.ClaudeInlineMediaFromSourceMap(result["source"])
+								// Older requests already omit unsupported result images on this adapter.
+								if kind == "image" && (inline == nil || !toolResultMedia) {
+									continue
+								}
+								if inline == nil {
+									return nil, fmt.Errorf("messages[%d].content[%d].content[%d]: send the tool-result %s as a base64 source", i, j, k, kind)
+								}
+								if !toolResultMedia {
+									return nil, fmt.Errorf("messages[%d].content[%d].content[%d]: %s tool results require a Gemini 3+ final model", i, j, k, kind)
+								}
+								media = append(media, antigravity.GeminiFunctionResponsePart{InlineData: inline})
 							}
 						}
+						if len(media) > 0 {
+							response["parts"] = media
+						}
 					}
+					parts = append(parts, map[string]any{"functionResponse": response})
+				case "image", "video", "audio":
+					inline := antigravity.ClaudeInlineMediaFromSourceMap(bm["source"])
+					if inline == nil {
+						if bt == "image" {
+							continue
+						}
+						return nil, fmt.Errorf("messages[%d].content[%d]: send the %s as a base64 source for Gemini Messages", i, j, bt)
+					}
+					parts = append(parts, map[string]any{"inlineData": inline})
 				default:
 					// best-effort: preserve unknown blocks as text
 					if b, err := json.Marshal(bm); err == nil {

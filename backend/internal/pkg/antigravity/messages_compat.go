@@ -26,7 +26,7 @@ type GeminiMessagesCompatibilityOptions struct {
 
 type geminiMessagesConversionOptions struct {
 	enabled               bool
-	toolResultImages      bool
+	toolResultMedia       bool
 	terminalMessage       int
 	recoveredThinkingTail bool
 	// thinkingTailContinuation is set only for a terminal assistant run that is sent
@@ -39,7 +39,8 @@ type geminiMessagesConversionOptions struct {
 	preserveThoughtCarrier bool
 }
 
-func supportsGeminiToolResultImages(model string) bool {
+// SupportsGeminiToolResultMedia reports whether the final model supports inline media in function responses.
+func SupportsGeminiToolResultMedia(model string) bool {
 	version, ok := strings.CutPrefix(model, "gemini-")
 	if !ok {
 		return false
@@ -127,7 +128,7 @@ func geminiMessagesError(path, reason string) error {
 
 // Only the terminal input, or history used for a synthetic continuation, is
 // checked here. Ordinary user-ended requests keep their existing history policy.
-func validateGeminiMessageContent(content json.RawMessage, index int, toolResultImages bool) error {
+func validateGeminiMessageContent(content json.RawMessage, index int, toolResultMedia bool) error {
 	path := fmt.Sprintf("messages[%d].content", index)
 	if len(bytes.TrimSpace(content)) == 0 || bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
 		return geminiMessagesError(path, "send a string or content block array for Gemini Messages")
@@ -144,31 +145,32 @@ func validateGeminiMessageContent(content json.RawMessage, index int, toolResult
 		blockPath := fmt.Sprintf("%s[%d]", path, i)
 		switch block.Type {
 		case "text", "thinking", "tool_use":
-		case "image":
-			if block.Source == nil || block.Source.Type != "base64" {
-				return geminiMessagesError(blockPath, "send the image as a base64 source for Gemini Messages")
+		case "image", "video", "audio":
+			if block.Source.InlineData() == nil {
+				return geminiMessagesError(blockPath, "send the "+block.Type+" as a base64 source for Gemini Messages")
 			}
 		case "tool_result":
-			var resultBlocks []ContentBlock
+			var resultBlocks []map[string]any
 			if json.Unmarshal(block.Content, &resultBlocks) == nil {
 				for j, resultBlock := range resultBlocks {
 					resultPath := fmt.Sprintf("%s.content[%d]", blockPath, j)
-					switch resultBlock.Type {
+					kind, _ := resultBlock["type"].(string)
+					switch kind {
 					case "text":
-					case "image":
-						if resultBlock.Source == nil || resultBlock.Source.Type != "base64" {
-							return geminiMessagesError(resultPath, "send the tool-result image as a base64 source")
+					case "image", "video", "audio":
+						if ClaudeInlineMediaFromSourceMap(resultBlock["source"]) == nil {
+							return geminiMessagesError(resultPath, "send the tool-result "+kind+" as a base64 source")
 						}
-						if !toolResultImages {
-							return geminiMessagesError(resultPath, "image tool results require a Gemini 3+ final model")
+						if !toolResultMedia {
+							return geminiMessagesError(resultPath, kind+" tool results require a Gemini 3+ final model")
 						}
 					default:
-						return geminiMessagesError(resultPath, "send text or supported base64 images as tool-result content for Gemini Messages")
+						return geminiMessagesError(resultPath, "send text or supported base64 images, video, or audio as tool-result content for Gemini Messages")
 					}
 				}
 			}
 		default:
-			return geminiMessagesError(blockPath, "send text, base64 images, thinking, or tool blocks supported by Gemini Messages")
+			return geminiMessagesError(blockPath, "send text, base64 images, video, audio, thinking, or tool blocks supported by Gemini Messages")
 		}
 	}
 	return nil
@@ -300,7 +302,7 @@ func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, 
 	if !hasText || !inputHasText {
 		return nil, geminiMessagesError(path, "send a user message or a nonempty assistant text prefill for Gemini continuation")
 	}
-	if err := validateGeminiContinuationHistory(messages, options.toolResultImages); err != nil {
+	if err := validateGeminiContinuationHistory(messages, options.toolResultMedia); err != nil {
 		return nil, err
 	}
 	return append(contents, GeminiContent{Role: "user", Parts: []GeminiPart{{Text: geminiAssistantContinuation}}}), nil
@@ -308,12 +310,12 @@ func finalizeGeminiMessages(messages []ClaudeMessage, contents []GeminiContent, 
 
 // Validate pairing before synthesizing a user turn or recovering a partial
 // assistant suffix. Neither operation may hide a missing tool result.
-func validateGeminiContinuationHistory(messages []ClaudeMessage, toolResultImages bool) error {
+func validateGeminiContinuationHistory(messages []ClaudeMessage, toolResultMedia bool) error {
 	pending := make(map[string]string)
 	seen := make(map[string]bool)
 	previousRole := ""
 	for i, message := range messages {
-		if err := validateGeminiMessageContent(message.Content, i, toolResultImages); err != nil {
+		if err := validateGeminiMessageContent(message.Content, i, toolResultMedia); err != nil {
 			return err
 		}
 		if message.Role == "system" {

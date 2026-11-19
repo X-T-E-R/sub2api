@@ -691,7 +691,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_AddsThoughtSignatureForToo
 	}
 	b, _ := json.Marshal(claudeReq)
 
-	out, err := convertClaudeMessagesToGeminiGenerateContent(b)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(b, "gemini-3.8-flash")
 	if err != nil {
 		t.Fatalf("convert failed: %v", err)
 	}
@@ -701,6 +701,60 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_AddsThoughtSignatureForToo
 	}
 	if !strings.Contains(s, "\"thoughtSignature\":\""+geminiDummyThoughtSignature+"\"") {
 		t.Fatalf("expected injected thoughtSignature %q, got: %s", geminiDummyThoughtSignature, s)
+	}
+}
+
+func TestConvertClaudeMessagesToGeminiGenerateContent_PreservesAudioAndVideo(t *testing.T) {
+	body := []byte(`{"model":"client-alias","messages":[
+		{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"ReadMediaFile","input":{}}]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"a","content":[
+				{"type":"text","text":"recorded"},
+				{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}},
+				{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}},
+				{"type":"audio","source":{"type":"base64","media_type":"audio/mpeg","data":"SUQz"}}
+			]},
+			{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}},
+			{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}},
+			{"type":"audio","source":{"type":"base64","media_type":"audio/mpeg","data":"SUQz"}}
+		]}
+	]}`)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(body, "gemini-4-hydrogen")
+	require.NoError(t, err)
+	var parts struct {
+		Contents []struct{ Parts json.RawMessage }
+	}
+	require.NoError(t, json.Unmarshal(out, &parts))
+	require.Len(t, parts.Contents, 2)
+	require.JSONEq(t, `[
+		{"functionResponse":{"name":"ReadMediaFile","response":{"content":"recorded"},"parts":[
+			{"inlineData":{"mimeType":"video/mp4","data":"+///AA=="}},
+			{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},
+			{"inlineData":{"mimeType":"audio/mpeg","data":"SUQz"}}
+		]}},
+		{"inlineData":{"mimeType":"video/mp4","data":"+///AA=="}},
+		{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},
+		{"inlineData":{"mimeType":"audio/mpeg","data":"SUQz"}}
+	]`, string(parts.Contents[1].Parts))
+
+	out, err = convertClaudeMessagesToGeminiGenerateContent(body, "gemini-2.5-flash")
+	require.Nil(t, out)
+	require.EqualError(t, err, "messages[1].content[0].content[1]: video tool results require a Gemini 3+ final model")
+}
+
+func TestConvertClaudeMessagesToGeminiGenerateContent_RejectsAudioAndVideoURLSources(t *testing.T) {
+	for _, kind := range []string{"video", "audio"} {
+		t.Run(kind, func(t *testing.T) {
+			block := `{"type":"` + kind + `","source":{"type":"url","url":"https://private.example/secret"}}`
+			for _, tt := range []struct{ block, want string }{
+				{block, "messages[0].content[0]: send the " + kind + " as a base64 source for Gemini Messages"},
+				{`{"type":"tool_result","tool_use_id":"a","content":[` + block + `]}`, "messages[0].content[0].content[0]: send the tool-result " + kind + " as a base64 source"},
+			} {
+				out, err := convertClaudeMessagesToGeminiGenerateContent([]byte(`{"messages":[{"role":"user","content":[`+tt.block+`]}]}`), "gemini-4-hydrogen")
+				require.Nil(t, out)
+				require.EqualError(t, err, tt.want)
+			}
+		})
 	}
 }
 

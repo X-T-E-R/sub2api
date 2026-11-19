@@ -90,15 +90,33 @@ type ContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
-	// image
+	// image, video, audio
 	Source *ImageSource `json:"source,omitempty"`
 }
 
-// ImageSource Claude 图片来源
+// ImageSource describes the Anthropic source envelope shared by image, video and audio blocks.
 type ImageSource struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // "image/png", "image/jpeg" 等
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
+}
+
+// InlineData validates the base64 envelope and preserves MIME type and encoded data verbatim.
+func (s *ImageSource) InlineData() *GeminiInlineData {
+	if s == nil || s.Type != "base64" || s.MediaType == "" || s.Data == "" {
+		return nil
+	}
+	return &GeminiInlineData{MimeType: s.MediaType, Data: s.Data}
+}
+
+// ClaudeInlineMediaFromSourceMap converts a source from an already decoded JSON object.
+func ClaudeInlineMediaFromSourceMap(source any) *GeminiInlineData {
+	m, _ := source.(map[string]any)
+	var s ImageSource
+	s.Type, _ = m["type"].(string)
+	s.MediaType, _ = m["media_type"].(string)
+	s.Data, _ = m["data"].(string)
+	return s.InlineData()
 }
 
 // ClaudeResponse Claude Messages API 响应

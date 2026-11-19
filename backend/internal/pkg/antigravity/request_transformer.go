@@ -173,11 +173,11 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	messages := claudeReq.Messages
 	geminiOptions := geminiMessagesConversionOptions{enabled: opts.GeminiMessages.enabledForModel(targetModel)}
 	if geminiOptions.enabled {
-		geminiOptions.toolResultImages = supportsGeminiToolResultImages(targetModel)
+		geminiOptions.toolResultMedia = SupportsGeminiToolResultMedia(targetModel)
 		geminiOptions.terminalMessage = effectiveGeminiTerminalMessage(messages, false)
 		boundary := effectiveGeminiTerminalMessage(messages, true)
 		if boundary >= 0 && boundary < geminiOptions.terminalMessage && messages[boundary].Role == "user" {
-			if err := validateGeminiContinuationHistory(messages[:boundary+1], geminiOptions.toolResultImages); err != nil {
+			if err := validateGeminiContinuationHistory(messages[:boundary+1], geminiOptions.toolResultMedia); err != nil {
 				return nil, err
 			}
 			if opts.GeminiMessages.AllowThinkingTailContinuation {
@@ -203,7 +203,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	}
 	if geminiOptions.enabled && geminiOptions.terminalMessage >= 0 {
 		last := geminiOptions.terminalMessage
-		if err := validateGeminiMessageContent(messages[last].Content, last, geminiOptions.toolResultImages); err != nil {
+		if err := validateGeminiMessageContent(messages[last].Content, last, geminiOptions.toolResultMedia); err != nil {
 			return nil, err
 		}
 	}
@@ -527,7 +527,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 				if geminiOptions.recoveredThinkingTail {
 					return nil, nil, false, geminiMessagesError(fmt.Sprintf("messages[%d]", i), "send a nonempty user message or real tool results before retrying a partial assistant turn")
 				}
-				if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultImages); err != nil {
+				if err := validateGeminiContinuationHistory(messages, geminiOptions.toolResultMedia); err != nil {
 					return nil, nil, false, err
 				}
 			}
@@ -571,7 +571,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 	}
 	// Hoisted or dropped envelopes can expose a different terminal user source.
 	if geminiOptions.enabled && lastSourceMessage >= 0 && lastSourceMessage != geminiOptions.terminalMessage && contents[len(contents)-1].Role == "user" {
-		if err := validateGeminiMessageContent(messages[lastSourceMessage].Content, lastSourceMessage, geminiOptions.toolResultImages); err != nil {
+		if err := validateGeminiMessageContent(messages[lastSourceMessage].Content, lastSourceMessage, geminiOptions.toolResultMedia); err != nil {
 			return nil, nil, false, err
 		}
 	}
@@ -655,14 +655,12 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			}
 			parts = append(parts, part)
 
-		case "image":
-			if block.Source != nil && block.Source.Type == "base64" {
-				parts = append(parts, GeminiPart{
-					InlineData: &GeminiInlineData{
-						MimeType: block.Source.MediaType,
-						Data:     block.Source.Data,
-					},
-				})
+		case "image", "video", "audio":
+			if block.Type != "image" && !allowDummyThought {
+				continue
+			}
+			if inline := block.Source.InlineData(); inline != nil {
+				parts = append(parts, GeminiPart{InlineData: inline})
 			}
 
 		case "tool_use":
@@ -700,7 +698,7 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			}
 
 			// 解析 content
-			resultContent, imageParts := parseToolResultContent(block.Content, block.IsError, geminiOptions)
+			resultContent, mediaParts := parseToolResultContent(block.Content, block.IsError, geminiOptions)
 			resultKey := "result"
 			if geminiOptions.enabled && block.IsError {
 				resultKey = "error"
@@ -713,7 +711,7 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 						resultKey: resultContent,
 					},
 					ID:    block.ToolUseID,
-					Parts: imageParts,
+					Parts: mediaParts,
 				},
 			})
 		}
@@ -750,18 +748,18 @@ func parseToolResultContent(content json.RawMessage, isError bool, geminiOptions
 	var arr []map[string]any
 	if err := json.Unmarshal(content, &arr); err == nil {
 		var texts []string
-		var imageParts []GeminiFunctionResponsePart
+		var mediaParts []GeminiFunctionResponsePart
 		for _, item := range arr {
 			if text, ok := item["text"].(string); ok {
 				texts = append(texts, text)
 			}
-			if geminiOptions.toolResultImages && item["type"] == "image" {
-				if source, ok := item["source"].(map[string]any); ok && source["type"] == "base64" {
-					mimeType, _ := source["media_type"].(string)
-					data, _ := source["data"].(string)
-					imageParts = append(imageParts, GeminiFunctionResponsePart{
-						InlineData: &GeminiInlineData{MimeType: mimeType, Data: data},
-					})
+			if !geminiOptions.toolResultMedia {
+				continue
+			}
+			switch item["type"] {
+			case "image", "video", "audio":
+				if inline := ClaudeInlineMediaFromSourceMap(item["source"]); inline != nil {
+					mediaParts = append(mediaParts, GeminiFunctionResponsePart{InlineData: inline})
 				}
 			}
 		}
@@ -772,7 +770,7 @@ func parseToolResultContent(content json.RawMessage, isError bool, geminiOptions
 			}
 			return "Command executed successfully.", nil
 		}
-		return result, imageParts
+		return result, mediaParts
 	}
 
 	// 返回原始 JSON

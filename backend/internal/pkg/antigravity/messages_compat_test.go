@@ -137,6 +137,69 @@ func TestGeminiMessagesCompatibilityPreservesImagesAndTools(t *testing.T) {
 	require.Equal(t, &GeminiInlineData{MimeType: "image/jpeg", Data: "bGFzdC1pbWFnZQ=="}, results[3].InlineData)
 }
 
+func TestGeminiMessagesCompatibilityAudioAndVideo(t *testing.T) {
+	input := `{"messages":[
+		{"role":"assistant","content":[{"type":"tool_use","id":"capture-1","name":"ReadMediaFile","input":{}}]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"capture-1","content":[
+				{"type":"text","text":"recorded"},
+				{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}},
+				{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}},
+				{"type":"audio","source":{"type":"base64","media_type":"audio/mpeg","data":"SUQz"}}
+			]},
+			{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}},
+			{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}},
+			{"type":"audio","source":{"type":"base64","media_type":"audio/mpeg","data":"SUQz"}}
+		]}
+	]}`
+	policy := GeminiMessagesCompatibilityOptions{Enabled: true}
+	result, err := transformGeminiMessagesForTest(t, input, "gemini-4-hydrogen", policy)
+	require.NoError(t, err)
+	require.Equal(t, []string{"model", "user"}, geminiRolesForTest(result.Request.Contents))
+	parts := result.Request.Contents[1].Parts
+	require.Len(t, parts, 4)
+	require.Equal(t, &GeminiFunctionResponse{
+		ID: "capture-1", Name: "ReadMediaFile", Response: map[string]any{"result": "recorded"},
+		Parts: []GeminiFunctionResponsePart{
+			{InlineData: &GeminiInlineData{MimeType: "video/mp4", Data: "+///AA=="}},
+			{InlineData: &GeminiInlineData{MimeType: "audio/wav", Data: "UklGRg=="}},
+			{InlineData: &GeminiInlineData{MimeType: "audio/mpeg", Data: "SUQz"}},
+		},
+	}, parts[0].FunctionResponse)
+	require.Equal(t, []GeminiPart{
+		{InlineData: &GeminiInlineData{MimeType: "video/mp4", Data: "+///AA=="}},
+		{InlineData: &GeminiInlineData{MimeType: "audio/wav", Data: "UklGRg=="}},
+		{InlineData: &GeminiInlineData{MimeType: "audio/mpeg", Data: "SUQz"}},
+	}, parts[1:])
+
+	_, err = transformGeminiMessagesForTest(t, input, "gemini-2.5-flash", policy)
+	require.EqualError(t, err, "messages[1].content[0].content[1]: video tool results require a Gemini 3+ final model")
+}
+
+func TestGeminiMessagesCompatibilityRejectsInvalidAudioAndVideo(t *testing.T) {
+	for _, kind := range []string{"video", "audio"} {
+		for _, tt := range []struct{ name, source string }{
+			{"URL", `{"type":"url","url":"https://private.example/secret"}`},
+			{"nil", `null`},
+			{"missing MIME", `{"type":"base64","data":"secret"}`},
+			{"missing data", `{"type":"base64","media_type":"` + kind + `/custom"}`},
+		} {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				block := `{"type":"` + kind + `","source":` + tt.source + `}`
+				for _, tc := range []struct{ content, want string }{
+					{block, "messages[0].content[0]: send the " + kind + " as a base64 source for Gemini Messages"},
+					{`{"type":"tool_result","tool_use_id":"a","content":[` + block + `]}`, "messages[0].content[0].content[0]: send the tool-result " + kind + " as a base64 source"},
+				} {
+					_, err := transformGeminiMessagesForTest(t, `{"messages":[{"role":"user","content":[`+tc.content+`]}]}`, "gemini-4-hydrogen", GeminiMessagesCompatibilityOptions{Enabled: true})
+					var compatErr *GeminiMessagesCompatibilityError
+					require.ErrorAs(t, err, &compatErr)
+					require.EqualError(t, err, tc.want)
+				}
+			})
+		}
+	}
+}
+
 func TestGeminiMessagesCompatibilityRealToolOutput(t *testing.T) {
 	tests := []struct {
 		name    string

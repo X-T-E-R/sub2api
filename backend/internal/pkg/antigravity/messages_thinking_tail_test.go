@@ -44,6 +44,8 @@ func TestGeminiMessagesThinkingTailBoundaries(t *testing.T) {
 		{"unknown block", `{"role":"assistant","content":[{"type":"unknown","data":"private"}]}`, "nonempty assistant text"},
 		{"redacted thinking", `{"role":"assistant","content":[{"type":"redacted_thinking","data":"private"}]}`, "nonempty assistant text"},
 		{"image", `{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}]}`, "nonempty assistant text"},
+		{"video", `{"role":"assistant","content":[{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}}]}`, "nonempty assistant text"},
+		{"audio", `{"role":"assistant","content":[{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}}]}`, "nonempty assistant text"},
 		{"unsupported user", `{"role":"user","content":[{"type":"text","text":"keep"},{"type":"document","source":{"type":"text","data":"private"}}]}`, "supported by Gemini Messages"},
 		{"null assistant", `{"role":"assistant","content":null}`, "nonempty assistant text"},
 	}
@@ -58,6 +60,8 @@ func TestGeminiMessagesThinkingTailBoundaries(t *testing.T) {
 		`{"type":"unknown","data":"private"}`,
 		`{"type":"redacted_thinking","data":"private"}`,
 		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}`,
+		`{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+///AA=="}}`,
+		`{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}}`,
 		`{"type":"tool_use","id":"a","name":"echo","input":{}}`,
 	} {
 		_, err := transformGeminiMessagesForTest(t, `{"messages":[{"role":"user","content":"question"},{"role":"assistant","content":[{"type":"thinking","thinking":"partial"},`+block+`]}]}`, "gemini-3.8-flash", GeminiMessagesCompatibilityOptions{Enabled: true})

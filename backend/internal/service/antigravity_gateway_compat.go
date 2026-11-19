@@ -295,7 +295,7 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 			requestType = "web_search"
 			targetModel = antigravity.EffectiveWebSearchModel(options.WebSearchModel)
 		}
-		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
+		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody, targetModel)
 		if err != nil {
 			return nil, err
 		}
