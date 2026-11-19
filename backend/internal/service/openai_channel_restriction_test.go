@@ -358,3 +358,51 @@ func TestOpenAISelectAccountForModelWithExclusions_StickyRestrictedUpstreamFalls
 	require.Equal(t, 1, cache.deletedSessions["openai:sticky-session"])
 	require.Equal(t, int64(2), cache.sessionBindings["openai:sticky-session"])
 }
+
+func TestOpenAISelectAccount_SupportsChannelMappedForwardModelWhitelist(t *testing.T) {
+	t.Parallel()
+
+	channelSvc := newTestChannelService(makeStandardRepo(Channel{
+		ID:       1,
+		Status:   StatusActive,
+		GroupIDs: []int64{10},
+		ModelMapping: map[string]map[string]string{
+			PlatformOpenAI: {"public-gpt": "channel-gpt-5"},
+		},
+	}, map[int64]string{10: PlatformOpenAI}))
+
+	account := Account{
+		ID:          11,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Priority:    1,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"channel-gpt-5": "gpt-5.4"},
+		},
+	}
+	svc := &OpenAIGatewayService{
+		accountRepo:    stubOpenAIAccountRepo{accounts: []Account{account}},
+		channelService: channelSvc,
+	}
+
+	groupID := int64(10)
+	// Without WithOpenAIForwardModel, the raw public alias does not match the
+	// account's channel-mapped whitelist key.
+	_, err := svc.SelectAccountForModelWithExclusions(context.Background(), &groupID, "", "public-gpt", nil)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+
+	// With WithOpenAIForwardModel recorded by the handler after channel mapping,
+	// scheduling admits the account whose whitelist matches the forwarded model.
+	ctx := WithOpenAIForwardModel(context.Background(), "channel-gpt-5", false)
+	selected, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "public-gpt", nil)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.Equal(t, int64(11), selected.ID)
+
+	// Unrelated forward model still gets rejected.
+	badCtx := WithOpenAIForwardModel(context.Background(), "other-model", false)
+	_, err = svc.SelectAccountForModelWithExclusions(badCtx, &groupID, "", "public-gpt", nil)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+}

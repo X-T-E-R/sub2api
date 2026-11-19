@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,9 +13,7 @@ import (
 
 // TestWrapReleaseOnDone_NoGoroutineLeak 验证 wrapReleaseOnDone 修复后不会泄露 goroutine
 func TestWrapReleaseOnDone_NoGoroutineLeak(t *testing.T) {
-	// 记录测试开始时的 goroutine 数量
 	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
 	initialGoroutines := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -28,24 +27,11 @@ func TestWrapReleaseOnDone_NoGoroutineLeak(t *testing.T) {
 	// 正常释放
 	release()
 
-	// 等待足够时间确保 goroutine 退出
-	time.Sleep(200 * time.Millisecond)
-
-	// 验证只释放一次
-	if count := atomic.LoadInt32(&releaseCount); count != 1 {
-		t.Errorf("expected release count to be 1, got %d", count)
-	}
-
-	// 强制 GC，清理已退出的 goroutine
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	// 验证 goroutine 数量没有增加（允许±2的误差，考虑到测试框架本身可能创建的 goroutine）
-	finalGoroutines := runtime.NumGoroutine()
-	if finalGoroutines > initialGoroutines+2 {
-		t.Errorf("goroutine leak detected: initial=%d, final=%d, leaked=%d",
-			initialGoroutines, finalGoroutines, finalGoroutines-initialGoroutines)
-	}
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return runtime.NumGoroutine() <= initialGoroutines+2
+	}, time.Second, 5*time.Millisecond, "goroutine leak detected: initial=%d", initialGoroutines)
 }
 
 // TestWrapReleaseOnDone_ContextCancellation 验证 context 取消时也能正确释放
@@ -53,20 +39,24 @@ func TestWrapReleaseOnDone_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var releaseCount int32
+	released := make(chan struct{}, 1)
 	_ = wrapReleaseOnDone(ctx, func() {
 		atomic.AddInt32(&releaseCount, 1)
+		select {
+		case released <- struct{}{}:
+		default:
+		}
 	})
 
 	// 取消 context，应该触发释放
 	cancel()
 
-	// 等待释放完成
-	time.Sleep(100 * time.Millisecond)
-
-	// 验证释放被调用
-	if count := atomic.LoadInt32(&releaseCount); count != 1 {
-		t.Errorf("expected release count to be 1, got %d", count)
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for release after context cancellation")
 	}
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
 }
 
 func TestWrapReleaseOnDone_AlreadyCancelledReleasesExactlyOnce(t *testing.T) {
@@ -99,13 +89,8 @@ func TestWrapReleaseOnDone_MultipleCallsOnlyReleaseOnce(t *testing.T) {
 	release()
 	release()
 
-	// 等待执行完成
-	time.Sleep(100 * time.Millisecond)
-
-	// 验证只释放一次
-	if count := atomic.LoadInt32(&releaseCount); count != 1 {
-		t.Errorf("expected release count to be 1, got %d", count)
-	}
+	// release 内部同步执行 sync.Once，无需 sleep 等待
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
 }
 
 // TestWrapReleaseOnDone_NilReleaseFunc 验证 nil releaseFunc 不会 panic
@@ -130,19 +115,19 @@ func TestWrapReleaseOnDone_ConcurrentCalls(t *testing.T) {
 		atomic.AddInt32(&releaseCount, 1)
 	})
 
-	// 并发调用 release
+	// 并发调用 release，使用 WaitGroup 确定性等待全部完成
 	const numGoroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
-		go release()
+		go func() {
+			defer wg.Done()
+			release()
+		}()
 	}
+	wg.Wait()
 
-	// 等待所有 goroutine 完成
-	time.Sleep(200 * time.Millisecond)
-
-	// 验证只释放一次
-	if count := atomic.LoadInt32(&releaseCount); count != 1 {
-		t.Errorf("expected release count to be 1, got %d", count)
-	}
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
 }
 
 // BenchmarkWrapReleaseOnDone 性能基准测试

@@ -30,3 +30,25 @@ func openAIForwardModelFromContext(ctx context.Context) (openAIForwardModel, boo
 	forwardModel, ok := ctx.Value(openAIForwardModelContextKey{}).(openAIForwardModel)
 	return forwardModel, ok
 }
+
+// isOpenAIAccountModelSupportedForContext checks whether an account can serve
+// either the client's requestedModel or the channel-mapped forward model
+// recorded via WithOpenAIForwardModel. Checking both preserves legacy accounts
+// whose whitelist keys match the client-facing alias while also allowing
+// accounts whose model_mapping keys match the channel-mapped target sent to
+// Forward.
+func isOpenAIAccountModelSupportedForContext(ctx context.Context, account *Account, requestedModel string) bool {
+	if requestedModel == "" {
+		return true
+	}
+	if account == nil {
+		return false
+	}
+	if account.IsModelSupported(requestedModel) {
+		return true
+	}
+	if fwd, ok := openAIForwardModelFromContext(ctx); ok && fwd.model != "" && fwd.model != requestedModel {
+		return account.IsModelSupported(fwd.model)
+	}
+	return false
+}

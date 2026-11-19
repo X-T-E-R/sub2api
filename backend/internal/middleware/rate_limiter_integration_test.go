@@ -91,6 +91,19 @@ func performRequest(router *gin.Engine) *httptest.ResponseRecorder {
 
 func startRedis(t *testing.T, ctx context.Context) *redis.Client {
 	t.Helper()
+	if addr := os.Getenv("SUB2API_TEST_REDIS_ADDR"); addr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr: addr,
+			DB:   1,
+		})
+		require.NoError(t, rdb.Ping(ctx).Err())
+		require.NoError(t, rdb.FlushDB(ctx).Err())
+		t.Cleanup(func() {
+			_ = rdb.FlushDB(ctx).Err()
+			_ = rdb.Close()
+		})
+		return rdb
+	}
 	ensureDockerAvailable(t)
 
 	redisContainer, err := tcredis.Run(ctx, redisImageTag)

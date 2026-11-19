@@ -260,8 +260,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				retryOpts := transformOpts
 				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, retryOpts)
-				if txErr == nil && malformedRecovery != nil && malformedRecovery.autoReason != "" {
-					retryGeminiBody, txErr = antigravityAutoFunctionMode(retryGeminiBody)
+				if txErr == nil {
+					retryGeminiBody, txErr = malformedRecovery.reapply(retryGeminiBody)
 				}
 				if txErr != nil {
 					continue
@@ -392,8 +392,8 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected budget_tokens constraint error, retrying with rectified budget (budget_tokens=%d, max_tokens=%d)", account.ID, BudgetRectifyBudgetTokens, BudgetRectifyMaxTokens)
 
 					retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, transformOpts)
-					if txErr == nil && malformedRecovery != nil && malformedRecovery.autoReason != "" {
-						retryGeminiBody, txErr = antigravityAutoFunctionMode(retryGeminiBody)
+					if txErr == nil {
+						retryGeminiBody, txErr = malformedRecovery.reapply(retryGeminiBody)
 					}
 					if txErr == nil {
 						retryResult, retryErr := s.antigravityRetryLoop(antigravityRetryLoopParams{

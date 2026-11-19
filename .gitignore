@@ -122,6 +122,9 @@ tests
 CLAUDE.md
 .claude
 scripts
+!scripts/
+!scripts/ccp-crucible/
+!scripts/ccp-crucible/**
 !backend/scripts/
 !backend/scripts/resolve-version.sh
 .code-review-state

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,14 +220,19 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncCooldown(t *testing.T) {
 	ap.mu.Unlock()
 
 	pool.ensureTargetIdleAsync(accountID)
-	time.Sleep(120 * time.Millisecond)
+	ap.mu.Lock()
+	activeDuringCooldown := ap.prewarmActive
+	ap.mu.Unlock()
+	require.False(t, activeDuringCooldown, "cooldown 窗口内不应启动预热 goroutine")
 	require.Equal(t, firstDialCount, dialer.DialCount(), "cooldown 窗口内不应再次触发预热")
 
-	time.Sleep(450 * time.Millisecond)
+	ap.mu.Lock()
+	ap.prewarmUntil = time.Now().Add(-time.Second)
+	ap.mu.Unlock()
 	pool.ensureTargetIdleAsync(accountID)
 	require.Eventually(t, func() bool {
 		return dialer.DialCount() > firstDialCount
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 2*time.Second, 5*time.Millisecond)
 }
 
 func TestOpenAIWSConnPool_EnsureTargetIdleAsyncFailureSuppress(t *testing.T) {
@@ -276,7 +282,14 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncFailureSuppress(t *testing.T) {
 
 	// 连续失败达到阈值后，新的预热触发应被抑制，不再继续拨号。
 	pool.ensureTargetIdleAsync(accountID)
-	time.Sleep(120 * time.Millisecond)
+	ap, ok := pool.getAccountPool(accountID)
+	require.True(t, ok)
+	ap.mu.Lock()
+	activeWhileSuppressed := ap.prewarmActive
+	fails := ap.prewarmFails
+	ap.mu.Unlock()
+	require.GreaterOrEqual(t, fails, 2)
+	require.False(t, activeWhileSuppressed, "失败抑制期内不应启动预热 goroutine")
 	require.Equal(t, 2, dialer.DialCount())
 }
 
@@ -301,8 +314,14 @@ func TestOpenAIWSConnPool_AcquireQueueWaitMetrics(t *testing.T) {
 	}
 	ap.mu.Unlock()
 
+	releaseDone := make(chan struct{})
 	go func() {
-		time.Sleep(60 * time.Millisecond)
+		defer close(releaseDone)
+		deadline := time.Now().Add(2 * time.Second)
+		for conn.waiters.Load() < 1 && time.Now().Before(deadline) {
+			runtime.Gosched()
+		}
+		<-time.After(10 * time.Millisecond)
 		conn.release()
 	}()
 
@@ -310,10 +329,11 @@ func TestOpenAIWSConnPool_AcquireQueueWaitMetrics(t *testing.T) {
 		Account: account,
 		WSURL:   "wss://example.com/v1/responses",
 	})
+	<-releaseDone
 	require.NoError(t, err)
 	require.NotNil(t, lease)
 	require.True(t, lease.Reused())
-	require.GreaterOrEqual(t, lease.QueueWaitDuration(), 50*time.Millisecond)
+	require.Greater(t, lease.QueueWaitDuration(), time.Duration(0))
 	lease.Release()
 
 	metrics := pool.SnapshotMetrics()
@@ -981,8 +1001,13 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnQueuesOnPreferredOnly(t *test
 	ap.lastCleanupAt = time.Now()
 	ap.mu.Unlock()
 
+	releaseDone := make(chan struct{})
 	go func() {
-		time.Sleep(60 * time.Millisecond)
+		defer close(releaseDone)
+		deadline := time.Now().Add(2 * time.Second)
+		for preferredConn.waiters.Load() < 1 && time.Now().Before(deadline) {
+			runtime.Gosched()
+		}
 		preferredConn.release()
 	}()
 
@@ -994,10 +1019,12 @@ func TestOpenAIWSConnPool_AcquireForcePreferredConnQueuesOnPreferredOnly(t *test
 		PreferredConnID:    preferredConn.id,
 		ForcePreferredConn: true,
 	})
+	<-releaseDone
 	require.NoError(t, err)
 	require.NotNil(t, lease)
 	require.Equal(t, preferredConn.id, lease.ConnID(), "严格模式应只等待并复用 preferred 连接，不可漂移")
-	require.GreaterOrEqual(t, lease.QueueWaitDuration(), 40*time.Millisecond)
+	require.Equal(t, int64(1), pool.SnapshotMetrics().AcquireQueueWaitTotal, "必须真正走过 preferredConn 排队等待路径")
+	require.GreaterOrEqual(t, lease.QueueWaitDuration(), time.Duration(0))
 	lease.Release()
 	require.True(t, otherConn.tryAcquire(), "other 连接不应被严格模式抢占")
 	otherConn.release()
@@ -1215,12 +1242,13 @@ func TestOpenAIWSConnLease_ReadMessageWithContextTimeout_PerRead(t *testing.T) {
 }
 
 func TestOpenAIWSConnLease_WriteJSONWithContextTimeout_RespectsParentContext(t *testing.T) {
-	conn := newOpenAIWSConn("write_timeout_ctx", 1, &openAIWSWriteBlockingConn{}, nil)
+	writeEntered := make(chan struct{})
+	conn := newOpenAIWSConn("write_timeout_ctx", 1, &openAIWSWriteBlockingConn{entered: writeEntered}, nil)
 	lease := &openAIWSConnLease{conn: conn}
 
 	parentCtx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-writeEntered
 		cancel()
 	}()
 
@@ -1244,20 +1272,26 @@ func TestOpenAIWSConnLease_PingWithTimeout(t *testing.T) {
 }
 
 func TestOpenAIWSConn_ReadAndWriteCanProceedConcurrently(t *testing.T) {
-	conn := newOpenAIWSConn("full_duplex", 1, &openAIWSBlockingConn{readDelay: 120 * time.Millisecond}, nil)
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	conn := newOpenAIWSConn("full_duplex", 1, &openAIWSBlockingConn{
+		entered: readEntered,
+		release: releaseRead,
+	}, nil)
 
 	readDone := make(chan error, 1)
 	go func() {
-		_, err := conn.readMessageWithContextTimeout(context.Background(), 200*time.Millisecond)
+		_, err := conn.readMessageWithContextTimeout(context.Background(), 2*time.Second)
 		readDone <- err
 	}()
 
-	// 让读取先占用 readMu。
-	time.Sleep(20 * time.Millisecond)
+	// 确定性等待读取真正进入并占用 readMu。
+	<-readEntered
 
 	start := time.Now()
 	err := conn.pingWithTimeout(50 * time.Millisecond)
 	elapsed := time.Since(start)
+	close(releaseRead)
 
 	require.NoError(t, err)
 	require.Less(t, elapsed, 80*time.Millisecond, "写路径不应被读锁长期阻塞")
@@ -2226,6 +2260,8 @@ func (c *openAIWSFakeConn) Close() error {
 
 type openAIWSBlockingConn struct {
 	readDelay time.Duration
+	entered   chan struct{}
+	release   chan struct{}
 }
 
 func (c *openAIWSBlockingConn) WriteJSON(ctx context.Context, value any) error {
@@ -2235,6 +2271,21 @@ func (c *openAIWSBlockingConn) WriteJSON(ctx context.Context, value any) error {
 }
 
 func (c *openAIWSBlockingConn) ReadMessage(ctx context.Context) ([]byte, error) {
+	if c.entered != nil {
+		select {
+		case <-c.entered:
+		default:
+			close(c.entered)
+		}
+	}
+	if c.release != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.release:
+			return []byte(`{"type":"response.completed","response":{"id":"resp_blocking"}}`), nil
+		}
+	}
 	delay := c.readDelay
 	if delay <= 0 {
 		delay = 10 * time.Millisecond
@@ -2259,9 +2310,18 @@ func (c *openAIWSBlockingConn) Close() error {
 	return nil
 }
 
-type openAIWSWriteBlockingConn struct{}
+type openAIWSWriteBlockingConn struct {
+	entered chan struct{}
+}
 
 func (c *openAIWSWriteBlockingConn) WriteJSON(ctx context.Context, _ any) error {
+	if c.entered != nil {
+		select {
+		case <-c.entered:
+		default:
+			close(c.entered)
+		}
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }

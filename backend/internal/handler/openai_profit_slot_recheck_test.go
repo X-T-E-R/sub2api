@@ -1,5 +1,3 @@
-//go:build unit
-
 package handler
 
 // 槽位终检与生图跳门回归（handler 半程）：

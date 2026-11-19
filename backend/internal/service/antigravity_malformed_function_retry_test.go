@@ -318,3 +318,19 @@ func TestAntigravityMalformedZeroOutputAutoReplayUsesSingleToolNote(t *testing.T
 		require.Equal(t, 3, entry.count, "both actual AUTO failures must be counted")
 	}
 }
+
+func TestAntigravityMalformedStage2ReapplyPreservesSingleToolNote(t *testing.T) {
+	wire := []byte(`{"model":"gemini-4-hydrogen","request":{"contents":[{"role":"user","parts":[{"text":"question"}]}],"toolConfig":{"functionCallingConfig":{"mode":"VALIDATED"}}}}`)
+
+	stage1 := &antigravityMalformedRecovery{autoReason: "recent_malformed_function_call"}
+	gotStage1, err := stage1.reapply(wire)
+	require.NoError(t, err)
+	require.Equal(t, "AUTO", gjson.GetBytes(gotStage1, antigravityFunctionModePath).String())
+	require.Equal(t, 1, len(gjson.GetBytes(gotStage1, "request.contents.0.parts").Array()))
+
+	stage2 := &antigravityMalformedRecovery{autoReason: antigravityMalformedSingleToolReason}
+	gotStage2, err := stage2.reapply(wire)
+	require.NoError(t, err)
+	require.Equal(t, "AUTO", gjson.GetBytes(gotStage2, antigravityFunctionModePath).String())
+	require.Equal(t, antigravityMalformedSingleToolNote, gjson.GetBytes(gotStage2, "request.contents.0.parts.1.text").String())
+}

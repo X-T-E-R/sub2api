@@ -2257,10 +2257,9 @@ func TestFetchCodexModelsManifestAPIKeySharedRefreshSurvivesCallerCancellation(t
 		}{manifest: manifest, err: err}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	if got := calls.Load(); got != 1 {
-		t.Errorf("upstream calls before shared refresh completed: got %d, want 1", got)
-	}
+	// Verify second caller shares the in-flight refresh rather than triggering a
+	// second upstream call. Wait deterministically for the result after releasing
+	// the singleflight leader and assert total upstream calls == 1.
 	close(release)
 	select {
 	case result := <-secondResult:
@@ -2272,6 +2271,9 @@ func TestFetchCodexModelsManifestAPIKeySharedRefreshSurvivesCallerCancellation(t
 		}
 	case <-time.After(time.Second):
 		t.Fatal("second caller did not receive shared refresh result")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("upstream calls after shared refresh completed: got %d, want 1", got)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("total upstream calls: got %d, want 1", got)
@@ -2312,15 +2314,16 @@ func TestFetchCodexModelsManifestAPIKeyConcurrentRequestsShareRefresh(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("upstream request did not start")
 	}
-	time.Sleep(50 * time.Millisecond)
-	if got := calls.Load(); got != 1 {
-		t.Errorf("concurrent upstream calls: got %d, want 1", got)
-	}
+	// Wait for all concurrent callers to finish after releasing the singleflight
+	// leader, then assert only a single upstream call occurred.
 	close(release)
 	for i := 0; i < callers; i++ {
 		if err := <-errs; err != nil {
 			t.Errorf("caller %d returned error: %v", i, err)
 		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("concurrent upstream calls: got %d, want 1", got)
 	}
 }
 
@@ -2612,17 +2615,10 @@ func TestFetchCodexModelsManifestAPIKeyServesStaleWhileRefreshing(t *testing.T) 
 	default:
 		close(releaseRefresh)
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
+	require.Eventually(t, func() bool {
 		manifest, err := s.FetchCodexModelsManifest(context.Background(), account, "0.144.0", "")
-		if err == nil && string(manifest.Body) == `{"models":[{"slug":"new"}]}` {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("refreshed manifest was not cached: manifest=%v err=%v", manifest, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return err == nil && string(manifest.Body) == `{"models":[{"slug":"new"}]}`
+	}, time.Second, 5*time.Millisecond, "refreshed manifest was not cached")
 	if got := calls.Load(); got != 2 {
 		t.Errorf("stale refresh was not deduplicated: calls=%d, want 2", got)
 	}
@@ -2675,22 +2671,16 @@ func TestFetchCodexModelsManifestAPIKeyRevalidatesStaleETag(t *testing.T) {
 		t.Fatal("ETag revalidation did not complete")
 	}
 
-	deadline := time.Now().Add(time.Second)
-	for {
+	require.Eventually(t, func() bool {
 		s.codexModelsManifestCache.mu.Lock()
-		fresh := false
+		defer s.codexModelsManifestCache.mu.Unlock()
 		for _, entry := range s.codexModelsManifestCache.entries {
-			fresh = time.Now().Before(entry.expiresAt)
+			if time.Now().Before(entry.expiresAt) {
+				return true
+			}
 		}
-		s.codexModelsManifestCache.mu.Unlock()
-		if fresh {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("304 revalidation did not renew the cached manifest")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return false
+	}, time.Second, 5*time.Millisecond, "304 revalidation did not renew the cached manifest")
 	manifest, err = s.FetchCodexModelsManifest(context.Background(), account, "0.144.0", "")
 	if err != nil || string(manifest.Body) != `{"models":[{"slug":"gpt-5.6-sol","use_responses_lite":false}]}` {
 		t.Fatalf("renewed cached manifest: body=%q err=%v", manifest.Body, err)

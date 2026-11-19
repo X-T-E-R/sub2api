@@ -167,6 +167,29 @@ func appendAntigravityMalformedSingleToolNote(body []byte) ([]byte, error) {
 	return sjson.SetBytes(body, "request.contents."+strconv.Itoa(target)+".parts.-1", antigravity.GeminiPart{Text: antigravityMalformedSingleToolNote})
 }
 
+// reapply restores active malformed-function recovery rewrites (mode relaxation
+// and, for stage-2 repeated failures, the single-tool recovery note) onto a
+// body rebuilt after a signature or budget 400 retry.
+func (r *antigravityMalformedRecovery) reapply(body []byte) ([]byte, error) {
+	if r == nil || r.autoReason == "" {
+		return body, nil
+	}
+	var err error
+	if gjson.GetBytes(body, antigravityFunctionModePath).String() != "AUTO" {
+		body, err = antigravityAutoFunctionMode(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if r.autoReason == antigravityMalformedSingleToolReason {
+		body, err = appendAntigravityMalformedSingleToolNote(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return body, nil
+}
+
 func (r *antigravityMalformedRecovery) finish(g *antigravityThoughtGeneration, successful bool) {
 	if r == nil {
 		return

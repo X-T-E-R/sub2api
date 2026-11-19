@@ -46,6 +46,19 @@ func TestAuthRegisterRateLimitThresholdHitReturns429(t *testing.T) {
 
 func startAuthRouteRedis(t *testing.T, ctx context.Context) *redis.Client {
 	t.Helper()
+	if addr := strings.TrimSpace(os.Getenv("SUB2API_TEST_REDIS_ADDR")); addr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr: addr,
+			DB:   2,
+		})
+		require.NoError(t, rdb.Ping(ctx).Err())
+		require.NoError(t, rdb.FlushDB(ctx).Err())
+		t.Cleanup(func() {
+			_ = rdb.FlushDB(ctx).Err()
+			_ = rdb.Close()
+		})
+		return rdb
+	}
 	ensureAuthRouteDockerAvailable(t)
 
 	redisContainer, err := tcredis.Run(ctx, authRouteRedisImageTag)
