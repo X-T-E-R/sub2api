@@ -65,6 +65,7 @@ jobs:
         uses: pnpm/action-setup@v6
         with:
           version: 9
+          dest: ${{ runner.temp }}/setup-pnpm
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -92,7 +93,9 @@ jobs:
           go version | grep -q 'go1.27.0'
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
+        env:
+          GOLANGCI_LINT_CACHE: ${{ runner.temp }}/golangci-lint-cache
         with:
           version: v2.13
-          args: --timeout=30m
+          args: --timeout=30m --allow-parallel-runners
           working-directory: backend
