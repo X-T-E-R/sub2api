@@ -21,8 +21,9 @@ jobs:
           /bin/sh deploy/tests/docker-runtime-resources-test.sh
           /bin/sh deploy/test-caddyfile-cache.sh
 
-  test:
-    runs-on: ubuntu-latest
+  test-unit:
+    name: Unit Tests
+    runs-on: ${{ fromJSON(github.repository_owner == 'X-T-E-R' && github.actor == 'X-T-E-R' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && '["self-hosted","ccp","cpu"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -37,18 +38,34 @@ jobs:
       - name: Unit tests
         working-directory: backend
         run: make test-unit
+
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+      - name: Verify Go version
+        run: |
+          go version | grep -q 'go1.27.3'
       - name: Integration tests
         working-directory: backend
         run: make test-integration
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository_owner == 'X-T-E-R' && github.actor == 'X-T-E-R' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && '["self-hosted","ccp","cpu"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           version: 9
+          dest: ${{ runner.temp }}/setup-pnpm
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -62,7 +79,7 @@ jobs:
         run: make test-frontend
 
   golangci-lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository_owner == 'X-T-E-R' && github.actor == 'X-T-E-R' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && '["self-hosted","ccp","cpu"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -76,7 +93,9 @@ jobs:
           go version | grep -q 'go1.27.3'
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
+        env:
+          GOLANGCI_LINT_CACHE: ${{ runner.temp }}/golangci-lint-cache
         with:
           version: v2.14.0
-          args: --timeout=30m
+          args: --timeout=30m --allow-parallel-runners
           working-directory: backend
