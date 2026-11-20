@@ -5,13 +5,14 @@ on:
   pull_request:
   schedule:
     - cron: '0 3 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   backend-security:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository_owner == 'X-T-E-R' && github.actor == 'X-T-E-R' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && '["self-hosted","ccp","cpu"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -31,7 +32,7 @@ jobs:
           govulncheck ./...
 
   frontend-security:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository_owner == 'X-T-E-R' && github.actor == 'X-T-E-R' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && '["self-hosted","ccp","cpu"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up pnpm
@@ -53,6 +54,6 @@ jobs:
           pnpm audit --prod --audit-level=high --json > audit.json || true
       - name: Check audit exceptions
         run: |
-          python tools/check_pnpm_audit_exceptions.py \
+          $(command -v python3 || command -v python) tools/check_pnpm_audit_exceptions.py \
             --audit frontend/audit.json \
             --exceptions .github/audit-exceptions.yml
