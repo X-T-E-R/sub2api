@@ -209,7 +209,8 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	}
 
 	// 1. 构建 contents
-	contents, messageSystemParts, strippedThinking, err := buildContents(messages, toolIDToName, isThinkingEnabled, allowDummyThought, geminiOptions)
+	claudeToolResultMedia := strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetModel)), "claude-")
+	contents, messageSystemParts, strippedThinking, err := buildContents(messages, toolIDToName, isThinkingEnabled, allowDummyThought, claudeToolResultMedia, geminiOptions)
 	if err != nil {
 		return nil, fmt.Errorf("build contents: %w", err)
 	}
@@ -493,7 +494,7 @@ func buildSystemInstruction(system json.RawMessage, modelName string, opts Trans
 }
 
 // buildContents 构建 contents
-func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiContent, []GeminiPart, bool, error) {
+func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought, claudeToolResultMedia bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiContent, []GeminiPart, bool, error) {
 	var contents []GeminiContent
 	var systemParts []GeminiPart
 	strippedThinking := false
@@ -508,7 +509,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 		messageOptions := geminiOptions
 		// Only the terminal continuation tail keeps its received signature carriers verbatim.
 		messageOptions.preserveThoughtCarrier = geminiOptions.thinkingTailContinuation && i == geminiOptions.terminalMessage
-		parts, strippedThisMsg, err := buildPartsWithCompatibility(msg.Content, toolIDToName, allowDummyThought, messageOptions)
+		parts, strippedThisMsg, err := buildPartsWithCompatibility(msg.Content, toolIDToName, allowDummyThought, claudeToolResultMedia && role == "user", messageOptions)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("build parts for message %d: %w", i, err)
 		}
@@ -587,11 +588,11 @@ const DummyThoughtSignature = "skip_thought_signature_validator"
 // buildParts 构建消息的 parts
 // allowDummyThought: 只有 Gemini 模型支持 dummy thought signature
 func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDummyThought bool) ([]GeminiPart, bool, error) {
-	return buildPartsWithCompatibility(content, toolIDToName, allowDummyThought, geminiMessagesConversionOptions{})
+	return buildPartsWithCompatibility(content, toolIDToName, allowDummyThought, false, geminiMessagesConversionOptions{})
 }
 
-func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[string]string, allowDummyThought bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiPart, bool, error) {
-	var parts []GeminiPart
+func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[string]string, allowDummyThought, claudeToolResultMedia bool, geminiOptions geminiMessagesConversionOptions) ([]GeminiPart, bool, error) {
+	var parts, claudeMediaParts []GeminiPart
 	strippedThinking := false
 
 	// 尝试解析为字符串
@@ -698,7 +699,18 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 			}
 
 			// 解析 content
-			resultContent, mediaParts := parseToolResultContent(block.Content, block.IsError, geminiOptions)
+			resultContent, mediaParts := parseToolResultContent(block.Content, block.IsError, claudeToolResultMedia, geminiOptions)
+			if claudeToolResultMedia && len(mediaParts) > 0 {
+				label := fmt.Sprintf("Image returned by tool %s (call %s):", funcName, block.ToolUseID)
+				if len(mediaParts) > 1 {
+					label = fmt.Sprintf("%d images returned by tool %s (call %s):", len(mediaParts), funcName, block.ToolUseID)
+				}
+				claudeMediaParts = append(claudeMediaParts, GeminiPart{Text: label})
+				for _, media := range mediaParts {
+					claudeMediaParts = append(claudeMediaParts, GeminiPart{InlineData: media.InlineData})
+				}
+				mediaParts = nil
+			}
 			resultKey := "result"
 			if geminiOptions.enabled && block.IsError {
 				resultKey = "error"
@@ -717,29 +729,45 @@ func buildPartsWithCompatibility(content json.RawMessage, toolIDToName map[strin
 		}
 	}
 
+	if len(claudeMediaParts) > 0 {
+		// Antigravity turns these parts back into Anthropic user blocks for Claude.
+		// An image between two responses breaks the contiguous tool_result batch.
+		ordered := make([]GeminiPart, 0, len(parts)+len(claudeMediaParts))
+		for _, part := range parts {
+			if part.FunctionResponse != nil {
+				ordered = append(ordered, part)
+			}
+		}
+		ordered = append(ordered, claudeMediaParts...)
+		for _, part := range parts {
+			if part.FunctionResponse == nil {
+				ordered = append(ordered, part)
+			}
+		}
+		parts = ordered
+	}
 	return parts, strippedThinking, nil
 }
 
 // parseToolResultContent 解析 tool_result 的 content
-func parseToolResultContent(content json.RawMessage, isError bool, geminiOptions geminiMessagesConversionOptions) (string, []GeminiFunctionResponsePart) {
-	if len(content) == 0 {
-		if geminiOptions.enabled {
-			return "", nil
-		}
+func parseToolResultContent(content json.RawMessage, isError, claudeToolResultMedia bool, geminiOptions geminiMessagesConversionOptions) (string, []GeminiFunctionResponsePart) {
+	emptyResult := ""
+	if !geminiOptions.enabled {
 		if isError {
-			return "Tool execution failed with no output.", nil
+			emptyResult = "Tool execution failed with no output."
+		} else {
+			emptyResult = "Command executed successfully."
 		}
-		return "Command executed successfully.", nil
+	}
+	if len(content) == 0 {
+		return emptyResult, nil
 	}
 
 	// 尝试解析为字符串
 	var str string
 	if err := json.Unmarshal(content, &str); err == nil {
 		if !geminiOptions.enabled && strings.TrimSpace(str) == "" {
-			if isError {
-				return "Tool execution failed with no output.", nil
-			}
-			return "Command executed successfully.", nil
+			return emptyResult, nil
 		}
 		return str, nil
 	}
@@ -753,28 +781,50 @@ func parseToolResultContent(content json.RawMessage, isError bool, geminiOptions
 			if text, ok := item["text"].(string); ok {
 				texts = append(texts, text)
 			}
-			if !geminiOptions.toolResultMedia {
-				continue
-			}
-			switch item["type"] {
-			case "image", "video", "audio":
-				if inline := ClaudeInlineMediaFromSourceMap(item["source"]); inline != nil {
-					mediaParts = append(mediaParts, GeminiFunctionResponsePart{InlineData: inline})
+			var inline *GeminiInlineData
+			if claudeToolResultMedia {
+				inline = claudeToolResultInlineData(item)
+			} else if geminiOptions.toolResultMedia {
+				switch item["type"] {
+				case "image", "video", "audio":
+					inline = ClaudeInlineMediaFromSourceMap(item["source"])
 				}
+			}
+			if inline != nil {
+				mediaParts = append(mediaParts, GeminiFunctionResponsePart{InlineData: inline})
 			}
 		}
 		result := strings.Join(texts, "\n")
 		if !geminiOptions.enabled && strings.TrimSpace(result) == "" {
-			if isError {
-				return "Tool execution failed with no output.", nil
-			}
-			return "Command executed successfully.", nil
+			result = emptyResult
 		}
 		return result, mediaParts
 	}
 
+	if claudeToolResultMedia {
+		var item map[string]any
+		if err := json.Unmarshal(content, &item); err == nil {
+			if inline := claudeToolResultInlineData(item); inline != nil {
+				return emptyResult, []GeminiFunctionResponsePart{{InlineData: inline}}
+			}
+		}
+	}
 	// 返回原始 JSON
 	return string(content), nil
+}
+
+func claudeToolResultInlineData(item map[string]any) *GeminiInlineData {
+	kind, _ := item["type"].(string)
+	switch kind {
+	case "image":
+		return ClaudeInlineMediaFromSourceMap(item["source"])
+	case "document":
+		inline := ClaudeInlineMediaFromSourceMap(item["source"])
+		if inline != nil && inline.MimeType == "application/pdf" {
+			return inline
+		}
+	}
+	return nil
 }
 
 // buildGenerationConfig 构建 generationConfig

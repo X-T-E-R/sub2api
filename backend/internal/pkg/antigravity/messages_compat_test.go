@@ -488,7 +488,6 @@ func TestGeminiMessagesCompatibilityImageToolModelScope(t *testing.T) {
 		{name: "unknown Gemini generation", model: "gemini-custom", policy: GeminiMessagesCompatibilityOptions{Enabled: true}, wantError: true},
 		{name: "disabled", model: "gemini-3.8-flash"},
 		{name: "model opted out", model: "gemini-3.8-flash", policy: GeminiMessagesCompatibilityOptions{Enabled: true, Models: []string{"gemini-2.5-flash"}}},
-		{name: "Claude unchanged", model: "claude-sonnet-4-5", policy: GeminiMessagesCompatibilityOptions{Enabled: true}},
 		{name: "OpenAI unchanged", model: "gpt-5", policy: GeminiMessagesCompatibilityOptions{Enabled: true}},
 		{name: "Grok unchanged", model: "grok-4", policy: GeminiMessagesCompatibilityOptions{Enabled: true}},
 	}

@@ -256,6 +256,93 @@ func TestAntigravityMessages_MultimodalInlineDataAndToolResultMedia(t *testing.T
 	})
 }
 
+func TestAntigravityMessages_ClaudeToolResultMediaWire(t *testing.T) {
+	const mixed = `{"type":"tool_result","tool_use_id":"a","content":[
+		{"type":"text","text":"<image path=\"a.jpg\">\n</image>"},
+		{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/4AAQSkZJRgABAQ=="}}
+	]}`
+	const object = `{"type":"tool_result","tool_use_id":"b","content":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}}`
+	const frA = `{"functionResponse":{"id":"a","name":"ReadMediaFile","response":{"result":"<image path=\"a.jpg\">\n</image>"}}}`
+	const frB = `{"functionResponse":{"id":"b","name":"ReadMediaFile","response":{"result":"Command executed successfully."}}}`
+	const frC = `{"functionResponse":{"id":"c","name":"ReadTextFile","response":{"result":"captions"}}}`
+	const mediaA = `{"text":"Image returned by tool ReadMediaFile (call a):"},{"inlineData":{"mimeType":"image/jpeg","data":"/9j/4AAQSkZJRgABAQ=="}}`
+	const mediaB = `{"text":"Image returned by tool ReadMediaFile (call b):"},{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}`
+	const callA = `{"type":"tool_use","id":"a","name":"ReadMediaFile","input":{"path":"a.jpg"}}`
+	const callB = `{"type":"tool_use","id":"b","name":"ReadMediaFile","input":{"path":"b.png"}}`
+	const callC = `{"type":"tool_use","id":"c","name":"ReadTextFile","input":{"path":"captions.txt"}}`
+	for _, tc := range []struct{ name, calls, results, wantParts string }{
+		{name: "text and image", calls: callA, results: mixed, wantParts: frA + "," + mediaA},
+		{name: "single image object", calls: callB, results: object, wantParts: frB + "," + mediaB},
+		{
+			name: "parallel image and text tools", calls: callA + "," + callB + "," + callC,
+			results:   mixed + "," + object + `,{"type":"tool_result","tool_use_id":"c","content":"captions"},{"type":"text","text":"compare both images"}`,
+			wantParts: frA + "," + frB + "," + frC + "," + mediaA + "," + mediaB + `,{"text":"compare both images"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := newAntigravityAccount(110, "ag-claude-tool-media", 1, map[string]any{"claude-opus-5-5": "claude-opus-5-5-high"})
+			h := newGatewayHarness(t, gatewayHarnessConfig{
+				Accounts: []*service.Account{acc},
+				Respond: func(_ int, req capturedUpstreamRequest) (*http.Response, error) {
+					require.Equal(t, acc.ID, req.AccountID)
+					require.Equal(t, http.MethodPost, req.Method)
+					require.Contains(t, req.URL, "/v1internal:streamGenerateContent")
+					require.Equal(t, "claude-opus-5-5-high", gjson.GetBytes(req.Body, "model").String())
+					contents := gjson.GetBytes(req.Body, "request.contents").Array()
+					require.Len(t, contents, 3)
+					require.Equal(t, "model", contents[1].Get("role").String())
+					require.Equal(t, "user", contents[2].Get("role").String())
+					require.JSONEq(t, "["+tc.wantParts+"]", contents[2].Get("parts").Raw)
+					return antigravityTextSSE("media-seen", 50, 12, 0), nil
+				},
+			})
+			body := `{"model":"claude-opus-5-5","max_tokens":256,"messages":[
+				{"role":"user","content":"inspect the media"},
+				{"role":"assistant","content":[` + tc.calls + `]},
+				{"role":"user","content":[` + tc.results + `]}
+			]}`
+			rec := h.post(t, "/v1/messages", nil, body)
+			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+			require.Len(t, h.requests(), 1)
+			h.assertSlotsBalanced(t)
+		})
+	}
+}
+
+func TestAntigravityMessages_GeminiToolResultMediaWire(t *testing.T) {
+	for _, target := range []string{"gemini-3-flash", "gemini-4-neon"} {
+		t.Run(target, func(t *testing.T) {
+			acc := newAntigravityAccount(111, "ag-gemini-tool-media", 1, map[string]any{"media-model": target})
+			h := newGatewayHarness(t, gatewayHarnessConfig{
+				Accounts: []*service.Account{acc},
+				Respond: func(_ int, req capturedUpstreamRequest) (*http.Response, error) {
+					require.Equal(t, target, gjson.GetBytes(req.Body, "model").String())
+					require.JSONEq(t, `[{"functionResponse":{"id":"a","name":"ReadMediaFile","response":{"result":"three files"},"parts":[
+						{"inlineData":{"mimeType":"image/jpeg","data":"/9j/"}},
+						{"inlineData":{"mimeType":"video/mp4","data":"+/8A"}},
+						{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}}
+					]}}]`, gjson.GetBytes(req.Body, "request.contents.2.parts").Raw)
+					return antigravityTextSSE("media-seen", 50, 12, 0), nil
+				},
+			})
+			body := `{"model":"media-model","max_tokens":256,"messages":[
+				{"role":"user","content":"inspect the media"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"ReadMediaFile","input":{}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[
+					{"type":"text","text":"three files"},
+					{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/"}},
+					{"type":"video","source":{"type":"base64","media_type":"video/mp4","data":"+/8A"}},
+					{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"UklGRg=="}}
+				]}]}
+			]}`
+			rec := h.post(t, "/v1/messages", nil, body)
+			require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+			require.Len(t, h.requests(), 1)
+			h.assertSlotsBalanced(t)
+		})
+	}
+}
+
 func TestAntigravityMessages_HeterogeneousToolResultAndUserTextTurnInvariants(t *testing.T) {
 	acc := newAntigravityAccount(105, "ag-tool-mix", 1, map[string]any{
 		"tool-model": "gemini-4-hydrogen",
@@ -330,9 +417,9 @@ func TestAntigravityMessages_TwoStageMalformedFunctionCallRecovery(t *testing.T)
 
 	malformedPartial := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"planning","thoughtSignature":"sig-1"}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"thoughtsTokenCount":2}}}`
 	responses := []*http.Response{
-		sseHTTPResponse(malformedPartial),     // Req 1: VALIDATED -> MALFORMED_FUNCTION_CALL (count -> 1)
-		sseHTTPResponse(malformedPartial),     // Req 2: Stage 1 AUTO -> MALFORMED_FUNCTION_CALL (count -> 2)
-		antigravityTextSSE("recovered", 12, 4, 0), // Req 3: Stage 2 AUTO + single-tool recovery note -> STOP (clears state)
+		sseHTTPResponse(malformedPartial),          // Req 1: VALIDATED -> MALFORMED_FUNCTION_CALL (count -> 1)
+		sseHTTPResponse(malformedPartial),          // Req 2: Stage 1 AUTO -> MALFORMED_FUNCTION_CALL (count -> 2)
+		antigravityTextSSE("recovered", 12, 4, 0),  // Req 3: Stage 2 AUTO + single-tool recovery note -> STOP (clears state)
 		antigravityTextSSE("next-clean", 12, 4, 0), // Req 4: back to VALIDATED without recovery note
 	}
 
