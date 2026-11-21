@@ -47,15 +47,18 @@ type upstreamResponder func(attempt int, req capturedUpstreamRequest) (*http.Res
 
 // gatewayHarnessConfig configures a self-contained in-process Gin gateway instance.
 type gatewayHarnessConfig struct {
-	Group    *service.Group
-	Accounts []*service.Account
-	Channels []service.Channel
-	Settings map[string]string
-	Config   *config.Config
+	Group           *service.Group
+	Accounts        []*service.Account
+	Channels        []service.Channel
+	Settings        map[string]string
+	Config          *config.Config
 	APIKeyID        int64
 	UserID          int64
 	UnassignedGroup bool
 	Respond         upstreamResponder
+	// HTTPUpstream replaces the recording upstream (for memory benchmarks that
+	// must not retain request bodies). Respond and requests() are unused then.
+	HTTPUpstream service.HTTPUpstream
 }
 
 // gatewayHarness wires the real Gin router, gateway middlewares, handlers,
@@ -72,7 +75,7 @@ type gatewayHarness struct {
 	apiKey      *service.APIKey
 }
 
-func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness {
+func newGatewayHarness(t testing.TB, opts gatewayHarnessConfig) *gatewayHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -154,6 +157,10 @@ func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness 
 	}
 
 	upstream := &recordingHTTPUpstream{respond: opts.Respond}
+	var httpUpstream service.HTTPUpstream = upstream
+	if opts.HTTPUpstream != nil {
+		httpUpstream = opts.HTTPUpstream
+	}
 	agTokenProvider := service.NewAntigravityTokenProvider(accountRepo, staticAntigravityTokenCache{}, nil)
 	agService := service.NewAntigravityGatewayService(
 		accountRepo,
@@ -161,7 +168,7 @@ func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness 
 		schedulerSnapshot,
 		agTokenProvider,
 		nil,
-		upstream,
+		httpUpstream,
 		settingService,
 		nil,
 		nil,
@@ -184,7 +191,7 @@ func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness 
 		nil,
 		billingCacheService,
 		nil,
-		upstream,
+		httpUpstream,
 		deferredService,
 		nil,
 		nil,
@@ -214,7 +221,7 @@ func newGatewayHarness(t *testing.T, opts gatewayHarnessConfig) *gatewayHarness 
 		billingService,
 		nil,
 		billingCacheService,
-		upstream,
+		httpUpstream,
 		deferredService,
 		nil,
 		nil,
@@ -578,9 +585,13 @@ func (c *memSchedulerCache) GetAccount(_ context.Context, id int64) (*service.Ac
 	return nil, nil
 }
 
-func (c *memSchedulerCache) SetAccount(_ context.Context, _ *service.Account) error           { return nil }
-func (c *memSchedulerCache) UpdateLastUsed(_ context.Context, _ map[int64]time.Time) error    { return nil }
-func (c *memSchedulerCache) ListBuckets(_ context.Context) ([]service.SchedulerBucket, error) { return nil, nil }
+func (c *memSchedulerCache) SetAccount(_ context.Context, _ *service.Account) error { return nil }
+func (c *memSchedulerCache) UpdateLastUsed(_ context.Context, _ map[int64]time.Time) error {
+	return nil
+}
+func (c *memSchedulerCache) ListBuckets(_ context.Context) ([]service.SchedulerBucket, error) {
+	return nil, nil
+}
 
 type memAccountRepo struct {
 	service.AccountRepository
@@ -631,8 +642,8 @@ func (r *memAccountRepo) SetOverloaded(_ context.Context, _ int64, _ time.Time) 
 func (r *memAccountRepo) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, _ string) error {
 	return nil
 }
-func (r *memAccountRepo) ClearTempUnschedulable(_ context.Context, _ int64) error       { return nil }
-func (r *memAccountRepo) ClearAntigravityQuotaScopes(_ context.Context, _ int64) error  { return nil }
+func (r *memAccountRepo) ClearTempUnschedulable(_ context.Context, _ int64) error        { return nil }
+func (r *memAccountRepo) ClearAntigravityQuotaScopes(_ context.Context, _ int64) error   { return nil }
 func (r *memAccountRepo) UpdateExtra(_ context.Context, _ int64, _ map[string]any) error { return nil }
 func (r *memAccountRepo) SetError(_ context.Context, _ int64, _ string) error            { return nil }
 func (r *memAccountRepo) ClearRateLimit(_ context.Context, _ int64) error                { return nil }
@@ -899,7 +910,9 @@ func (c *countingConcurrencyCache) GetAccountConcurrencyBatch(_ context.Context,
 func (c *countingConcurrencyCache) IncrementAccountWaitCount(context.Context, int64, int) (bool, error) {
 	return true, nil
 }
-func (c *countingConcurrencyCache) DecrementAccountWaitCount(context.Context, int64) error { return nil }
+func (c *countingConcurrencyCache) DecrementAccountWaitCount(context.Context, int64) error {
+	return nil
+}
 func (c *countingConcurrencyCache) IncrementWaitCount(context.Context, int64, int) (bool, error) {
 	return true, nil
 }

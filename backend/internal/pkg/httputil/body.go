@@ -30,23 +30,10 @@ func ReadRequestBodyWithPrealloc(req *http.Request) ([]byte, error) {
 		return nil, nil
 	}
 
-	capHint := requestBodyReadInitCap
-	if req.ContentLength > 0 {
-		switch {
-		case req.ContentLength < int64(requestBodyReadInitCap):
-			capHint = requestBodyReadInitCap
-		case req.ContentLength > int64(requestBodyReadMaxInitCap):
-			capHint = requestBodyReadMaxInitCap
-		default:
-			capHint = int(req.ContentLength)
-		}
-	}
-
-	buf := bytes.NewBuffer(make([]byte, 0, capHint))
-	if _, err := io.Copy(buf, req.Body); err != nil {
+	raw, err := readBodyWithLengthHint(req.Body, req.ContentLength)
+	if err != nil {
 		return nil, err
 	}
-	raw := buf.Bytes()
 
 	enc := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Encoding")))
 	if enc == "" || enc == "identity" {
@@ -73,6 +60,56 @@ func ReadLenientJSONRequestBodyWithPrealloc(req *http.Request, maxNormalizedByte
 		return nil, err
 	}
 	return NormalizeLenientJSONRequestBody(body, maxNormalizedBytes)
+}
+
+// readBodyWithLengthHint reads r to EOF. The declared length is only a hint:
+// the buffer starts at most requestBodyReadMaxInitCap and then grows at most
+// 2x of the bytes actually received, so a forged Content-Length cannot make
+// the gateway allocate memory the client never sent. When the hint is honest
+// the last growth step lands exactly on it, so a multi-MiB body retains
+// len == cap instead of the up-to-2x slack of append/bytes.Buffer doubling.
+func readBodyWithLengthHint(r io.Reader, contentLength int64) ([]byte, error) {
+	initCap := requestBodyReadInitCap
+	switch {
+	case contentLength > int64(requestBodyReadMaxInitCap):
+		initCap = requestBodyReadMaxInitCap
+	case contentLength > int64(requestBodyReadInitCap):
+		initCap = int(contentLength)
+	}
+	buf := make([]byte, 0, initCap)
+	for {
+		if len(buf) == cap(buf) {
+			if int64(len(buf)) >= contentLength {
+				// Declared length reached (or no usable hint): confirm EOF with a
+				// one-byte probe before growing past it.
+				var probe [1]byte
+				n, err := io.ReadFull(r, probe[:])
+				if n == 0 && (err == io.EOF || err == io.ErrUnexpectedEOF) {
+					return buf, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				buf = append(buf, probe[0])
+				continue
+			}
+			next := int64(2 * cap(buf))
+			if next > contentLength {
+				next = contentLength
+			}
+			grown := make([]byte, len(buf), int(next))
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
 
 func decompressRequestBody(encoding string, raw []byte) ([]byte, error) {

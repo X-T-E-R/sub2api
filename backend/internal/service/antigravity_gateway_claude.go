@@ -523,6 +523,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	}
 
 	requestID := PropagateUpstreamRequestAndTraceHeaders(c, resp.Header, "")
+	releaseAcceptedAntigravityClaudeHistory(&claudeReq)
 
 	// Pin policy and count only client-delivered structural events, including policy-off responses.
 	cont := s.newAntigravityThoughtContinuation(ctx, account, originalModel, prefix, proxyURL, accessToken, action, finalBody)

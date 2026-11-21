@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -88,6 +89,56 @@ type antigravityMalformedRecovery struct {
 	autoReason    string
 }
 
+// antigravityMalformedRetryKey hashes the caller scope and the full Claude history
+// (system, tools, every message) without materializing a serialized copy of it.
+// Raw JSON pieces are compacted one at a time so whitespace differences between an
+// initial request and its retry still map to the same entry; the scratch buffer is
+// bounded by the largest single piece instead of the whole multi-MiB history.
+func antigravityMalformedRetryKey(apiKeyID int64, session, wireModel string, req *antigravity.ClaudeRequest) ([sha256.Size]byte, error) {
+	h := sha256.New()
+	var scratch bytes.Buffer
+	var lenPrefix [8]byte
+	writeField := func(b []byte) {
+		binary.BigEndian.PutUint64(lenPrefix[:], uint64(len(b)))
+		_, _ = h.Write(lenPrefix[:])
+		_, _ = h.Write(b)
+	}
+	writeRaw := func(raw json.RawMessage) error {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			writeField([]byte("null"))
+			return nil
+		}
+		scratch.Reset()
+		if err := json.Compact(&scratch, raw); err != nil {
+			return err
+		}
+		writeField(scratch.Bytes())
+		return nil
+	}
+	writeField([]byte(strconv.FormatInt(apiKeyID, 10)))
+	writeField([]byte(session))
+	writeField([]byte(req.Model))
+	writeField([]byte(wireModel))
+	if err := writeRaw(req.System); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	tools, err := json.Marshal(req.Tools)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	writeField(tools)
+	writeField([]byte(strconv.Itoa(len(req.Messages))))
+	for i := range req.Messages {
+		writeField([]byte(req.Messages[i].Role))
+		if err := writeRaw(req.Messages[i].Content); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+	}
+	var key [sha256.Size]byte
+	h.Sum(key[:0])
+	return key, nil
+}
+
 // A constrained Messages tool_choice and the native Gemini configuration
 // contract are never rewritten by this recovery.
 func (s *AntigravityGatewayService) prepareMalformedFunctionRecovery(c *gin.Context, req *antigravity.ClaudeRequest, body []byte) ([]byte, *antigravityMalformedRecovery, error) {
@@ -115,8 +166,7 @@ func (s *AntigravityGatewayService) prepareMalformedFunctionRecovery(c *gin.Cont
 	}
 	// Key on the request's history, not tool_choice: an explicit AUTO retry
 	// must find the same failure entry as the initial omitted choice.
-	input, err := json.Marshal([]any{strconv.FormatInt(apiKeyID, 10), session, req.Model,
-		model, req.System, req.Tools, req.Messages})
+	key, err := antigravityMalformedRetryKey(apiKeyID, session, model, req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,7 +175,7 @@ func (s *AntigravityGatewayService) prepareMalformedFunctionRecovery(c *gin.Cont
 			s.malformedFunctionRetries = newAntigravityMalformedRetryCache()
 		}
 	})
-	recovery := &antigravityMalformedRecovery{cache: s.malformedFunctionRetries, key: sha256.Sum256(input), effectiveMode: mode}
+	recovery := &antigravityMalformedRecovery{cache: s.malformedFunctionRetries, key: key, effectiveMode: mode}
 	count := recovery.cache.count(recovery.key)
 	if count == 0 || (count == 1 && mode == "AUTO") {
 		return body, recovery, nil
