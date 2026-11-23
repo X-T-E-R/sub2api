@@ -92,12 +92,12 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("Adaptive Anthropic endpoint returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, gatewayUpstreamErrorBodyReadLimit))
+		detail := buildAccountTestUpstreamError("Adaptive Anthropic endpoint", resp.StatusCode, body)
 		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+			_ = s.accountRepo.SetError(ctx, account.ID, detail.message)
 		}
-		return s.sendErrorAndEnd(c, errMsg)
+		return s.sendFormattedErrorAndEnd(c, detail)
 	}
 
 	if err := s.processCNProviderAdaptiveAnthropicStream(c, resp.Body); err != nil {
@@ -149,12 +149,12 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("Adaptive Responses endpoint returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, gatewayUpstreamErrorBodyReadLimit))
+		detail := buildAccountTestUpstreamError("Adaptive Responses endpoint", resp.StatusCode, body)
 		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+			_ = s.accountRepo.SetError(ctx, account.ID, detail.message)
 		}
-		return s.sendErrorAndEnd(c, errMsg)
+		return s.sendFormattedErrorAndEnd(c, detail)
 	}
 
 	if err := s.processOpenAIStream(c, resp.Body); err != nil {
@@ -238,12 +238,12 @@ func (s *AccountTestService) testCNProviderAnthropicConnection(c *gin.Context, a
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("Anthropic endpoint returned %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, gatewayUpstreamErrorBodyReadLimit))
+		detail := buildAccountTestUpstreamError("Anthropic endpoint", resp.StatusCode, body)
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && s.accountRepo != nil {
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+			_ = s.accountRepo.SetError(ctx, account.ID, detail.message)
 		}
-		return s.sendErrorAndEnd(c, errMsg)
+		return s.sendFormattedErrorAndEnd(c, detail)
 	}
 
 	return s.processClaudeStream(c, resp.Body)

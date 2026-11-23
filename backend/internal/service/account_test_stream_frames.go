@@ -217,9 +217,10 @@ func claudeStreamStopReason(data map[string]any) string {
 	return ""
 }
 
-// openAIStreamAbnormalTerminalMessage describes an OpenAI Responses terminal
-// event that reports a non-successful end of the response.
-func openAIStreamAbnormalTerminalMessage(eventType string, data map[string]any) string {
+// openAIStreamAbnormalTerminalDetail describes an OpenAI Responses terminal
+// event that reports a non-successful end of the response while preserving
+// sanitized upstream root-cause details and structured verification links.
+func openAIStreamAbnormalTerminalDetail(eventType string, payload []byte, data map[string]any) accountTestErrorDetail {
 	base := "OpenAI stream ended before response.completed"
 	switch eventType {
 	case "response.incomplete":
@@ -229,17 +230,19 @@ func openAIStreamAbnormalTerminalMessage(eventType string, data map[string]any) 
 	}
 	responseData, _ := data["response"].(map[string]any)
 	if responseData == nil {
-		return base
+		return accountTestErrorDetail{message: base}
 	}
-	if errData, ok := responseData["error"].(map[string]any); ok {
-		if msg, ok := errData["message"].(string); ok && msg != "" {
-			return fmt.Sprintf("%s: %s", base, msg)
+	if errVal, ok := responseData["error"]; ok && errVal != nil {
+		if errMap, isMap := errVal.(map[string]any); !isMap || len(errMap) > 0 {
+			if errStr, isStr := errVal.(string); !isStr || strings.TrimSpace(errStr) != "" {
+				return buildAccountTestUpstreamError(base, 0, payload)
+			}
 		}
 	}
 	if details, ok := responseData["incomplete_details"].(map[string]any); ok {
 		if reason, ok := details["reason"].(string); ok && reason != "" {
-			return fmt.Sprintf("%s (%s)", base, reason)
+			return accountTestErrorDetail{message: fmt.Sprintf("%s (%s)", base, SanitizeUpstreamErrorMessage(reason))}
 		}
 	}
-	return base
+	return accountTestErrorDetail{message: base}
 }

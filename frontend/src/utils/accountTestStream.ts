@@ -79,6 +79,114 @@ export function accountTestStreamModeLabelKey(mode: string): string {
   return ''
 }
 
+/** A plain text segment or a validated `http(s)://` link for safe template rendering. */
+export type TextLinkToken =
+  | { kind: 'text'; text: string }
+  | { kind: 'link'; text: string; href: string }
+
+const HTTP_URL_PATTERN = /https?:\/\/[^\s<>"'`]+/gi
+const TRAILING_LINK_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?', ']', '}'])
+
+function trimTrailingUrlPunctuation(raw: string): string {
+  let end = raw.length
+  while (end > 0) {
+    const ch = raw[end - 1]
+    if (TRAILING_LINK_PUNCTUATION.has(ch)) {
+      end -= 1
+      continue
+    }
+    if (ch === ')') {
+      const slice = raw.slice(0, end)
+      const opens = (slice.match(/\(/g) || []).length
+      const closes = (slice.match(/\)/g) || []).length
+      if (closes > opens) {
+        end -= 1
+        continue
+      }
+    }
+    break
+  }
+  return raw.slice(0, end)
+}
+
+function isExactUrlMatch(raw: string, exact: string): boolean {
+  if (raw === exact) return true
+  if (!raw.startsWith(exact)) return false
+  const suffix = raw.slice(exact.length)
+  const openParens = (exact.match(/\(/g) || []).length - (exact.match(/\)/g) || []).length
+  for (const ch of suffix) {
+    if (TRAILING_LINK_PUNCTUATION.has(ch)) continue
+    if (ch === ')' && openParens <= 0) continue
+    return false
+  }
+  return true
+}
+
+/**
+ * Splits plain text into inert text segments and validated `http(s)://` links
+ * so Vue templates can render clickable verification URLs without `v-html`.
+ *
+ * Explicit backend links passed in `exactUrls` are preserved verbatim (never
+ * passed through prose trailing-punctuation trimming) so verification tokens
+ * ending in punctuation such as `.` keep exact href fidelity.
+ */
+export function splitTextWithLinks(text: string, exactUrls?: readonly string[]): TextLinkToken[] {
+  if (!text) return []
+
+  const normalizedExactUrls = (exactUrls ?? [])
+    .map((u) => u.trim())
+    .filter((u) => {
+      if (!u) return false
+      try {
+        const parsed = new URL(u)
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      } catch {
+        return false
+      }
+    })
+    .sort((a, b) => b.length - a.length)
+
+  const tokens: TextLinkToken[] = []
+  let lastIndex = 0
+
+  for (const match of text.matchAll(HTTP_URL_PATTERN)) {
+    const raw = match[0]
+    const index = match.index ?? 0
+    if (index > lastIndex) {
+      tokens.push({ kind: 'text', text: text.slice(lastIndex, index) })
+    }
+
+    const matchedExact = normalizedExactUrls.find((exact) => isExactUrlMatch(raw, exact))
+    const candidate = matchedExact ?? trimTrailingUrlPunctuation(raw)
+    let safeHref = ''
+    try {
+      const parsed = new URL(candidate)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        safeHref = matchedExact ? candidate : parsed.href
+      }
+    } catch {
+      safeHref = ''
+    }
+
+    if (safeHref) {
+      tokens.push({ kind: 'link', text: candidate, href: safeHref })
+      if (candidate.length < raw.length) {
+        tokens.push({ kind: 'text', text: raw.slice(candidate.length) })
+      }
+    } else {
+      tokens.push({ kind: 'text', text: raw })
+    }
+
+    lastIndex = index + raw.length
+  }
+
+  if (lastIndex < text.length) {
+    tokens.push({ kind: 'text', text: text.slice(lastIndex) })
+  }
+
+  return tokens
+}
+
 /** Decodes one SSE line into an event, or `null` for comments/blank/malformed lines. */
 function decodeEventLine(rawLine: string): AccountTestStreamEvent | null {
   const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
@@ -112,7 +220,42 @@ export async function consumeAccountTestStream(options: AccountTestStreamOptions
   })
 
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`)
+    let detail = ''
+    try {
+      const raw = (await response.text()).trim()
+      if (raw) {
+        try {
+          const parsed: unknown = JSON.parse(raw)
+          if (typeof parsed === 'object' && parsed !== null) {
+            const record = parsed as Record<string, unknown>
+            const nestedError =
+              typeof record.error === 'object' && record.error !== null
+                ? (record.error as Record<string, unknown>)
+                : null
+            const candidate =
+              (typeof nestedError?.message === 'string' && nestedError.message.trim()) ||
+              (typeof record.message === 'string' && record.message.trim()) ||
+              (typeof record.error === 'string' && record.error.trim()) ||
+              ''
+            detail = candidate || raw
+          } else {
+            detail = raw
+          }
+        } catch {
+          detail = raw
+        }
+      }
+    } catch (error: unknown) {
+      if (
+        options.signal.aborted ||
+        (error instanceof DOMException && error.name === 'AbortError') ||
+        (error instanceof Error && error.name === 'AbortError')
+      ) {
+        throw error
+      }
+      detail = ''
+    }
+    throw new Error(detail ? `HTTP error! status: ${response.status}: ${detail}` : `HTTP error! status: ${response.status}`)
   }
 
   const reader = response.body?.getReader()

@@ -40,6 +40,8 @@ export interface AccountTestStreamEvent extends AccountTestMetadata {
   text?: string
   success?: boolean
   error?: string
+  validation_url?: string
+  appeal_url?: string
   image_url?: string
   audio_url?: string
   video_url?: string

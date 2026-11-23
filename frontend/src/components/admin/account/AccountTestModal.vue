@@ -242,12 +242,25 @@
             </div>
 
             <!-- Output Lines -->
-            <div v-for="(line, index) in outputLines" :key="index" :class="line.class">
-              {{ line.text }}
+            <div
+              v-for="(line, index) in outputLines"
+              :key="index"
+              :class="[line.class, 'whitespace-pre-wrap break-words']"
+            >
+              <template v-for="(token, tokenIdx) in splitTextWithLinks(line.text)" :key="tokenIdx">
+                <a
+                  v-if="token.kind === 'link'"
+                  :href="token.href"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="break-all text-sky-300 underline decoration-sky-400/70 underline-offset-2 hover:text-sky-200"
+                >{{ token.text }}</a>
+                <template v-else>{{ token.text }}</template>
+              </template>
             </div>
 
             <!-- Streaming Content -->
-            <div v-if="streamingContent" class="text-green-400">
+            <div v-if="streamingContent" class="whitespace-pre-wrap break-words text-green-400">
               {{ streamingContent }}<span class="animate-pulse">_</span>
             </div>
 
@@ -265,19 +278,31 @@
               v-else-if="status === 'error'"
               data-testid="account-test-result"
               data-status="error"
-              class="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3 text-red-400"
+              class="mt-3 flex items-start gap-2 border-t border-gray-700 pt-3 text-red-400"
             >
-              <Icon name="x" size="sm" :stroke-width="2" />
-              <span>{{ errorMessage }}</span>
+              <Icon name="x" size="sm" class="mt-0.5 shrink-0" :stroke-width="2" />
+              <span class="min-w-0 flex-1 whitespace-pre-wrap break-words select-text">
+                <template v-for="(token, tokenIdx) in errorMessageTokens" :key="tokenIdx">
+                  <a
+                    v-if="token.kind === 'link'"
+                    :href="token.href"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="break-all text-sky-300 underline decoration-sky-400/70 underline-offset-2 hover:text-sky-200"
+                  >{{ token.text }}</a>
+                  <template v-else>{{ token.text }}</template>
+                </template>
+              </span>
             </div>
           </div>
         </div>
 
         <!-- Copy Button -->
         <button
-          v-if="outputLines.length > 0"
+          v-if="outputLines.length > 0 || Boolean(errorMessage)"
+          data-testid="account-test-copy"
           @click="copyOutput"
-          class="absolute right-2 top-2 rounded-lg bg-gray-800/80 p-1.5 text-gray-400 opacity-0 transition-all hover:bg-gray-700 hover:text-white group-hover:opacity-100"
+          class="absolute right-2 top-2 rounded-lg bg-gray-800/80 p-1.5 text-gray-400 opacity-0 transition-all hover:bg-gray-700 hover:text-white focus-visible:opacity-100 group-hover:opacity-100"
           :title="t('admin.accounts.copyOutput')"
         >
           <Icon name="link" size="sm" :stroke-width="2" />
@@ -452,7 +477,8 @@ import {
 import {
   accountTestStreamModeLabelKey,
   consumeAccountTestStream,
-  mergeAccountTestMetadata
+  mergeAccountTestMetadata,
+  splitTextWithLinks
 } from '@/utils/accountTestStream'
 import type {
   AccountTestMetadata,
@@ -490,6 +516,10 @@ const status = ref<'idle' | 'connecting' | 'success' | 'error'>('idle')
 const outputLines = ref<OutputLine[]>([])
 const streamingContent = ref('')
 const errorMessage = ref('')
+const errorExactUrls = ref<string[]>([])
+const errorMessageTokens = computed(() =>
+  splitTextWithLinks(errorMessage.value, errorExactUrls.value)
+)
 const availableModels = ref<AccountTestModelOption[]>([])
 const selectedModelId = ref('')
 const testPrompt = ref('')
@@ -1200,6 +1230,7 @@ const resetState = () => {
   outputLines.value = []
   streamingContent.value = ''
   errorMessage.value = ''
+  errorExactUrls.value = []
   testMetadata.value = {}
   generatedImages.value = []
   generatedAudios.value = []
@@ -1296,11 +1327,13 @@ const startTest = async () => {
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       status.value = 'idle'
+      errorExactUrls.value = []
       return
     }
     status.value = 'error'
     const msg = error instanceof Error ? error.message : t('common.unknownError')
     errorMessage.value = msg
+    errorExactUrls.value = []
     addLine(t('admin.accounts.errorPrefix', { message: msg }), 'text-red-400')
   }
 }
@@ -1399,12 +1432,18 @@ const handleEvent = (event: AccountTestStreamEvent) => {
       } else {
         status.value = 'error'
         errorMessage.value = event.error || t('admin.accounts.testFailed')
+        errorExactUrls.value = [event.validation_url, event.appeal_url]
+          .filter((url): url is string => typeof url === 'string' && url.trim() !== '')
+          .map((url) => url.trim())
       }
       break
 
     case 'error':
       status.value = 'error'
       errorMessage.value = event.error || t('common.unknownError')
+      errorExactUrls.value = [event.validation_url, event.appeal_url]
+        .filter((url): url is string => typeof url === 'string' && url.trim() !== '')
+        .map((url) => url.trim())
       if (streamingContent.value) {
         addLine(streamingContent.value, 'text-green-300')
         streamingContent.value = ''
@@ -1414,7 +1453,18 @@ const handleEvent = (event: AccountTestStreamEvent) => {
 }
 
 const copyOutput = () => {
-  const text = outputLines.value.map((l) => l.text).join('\n')
+  const parts = outputLines.value.map((l) => l.text)
+  if (streamingContent.value) {
+    parts.push(streamingContent.value)
+  }
+  if (
+    status.value === 'error' &&
+    errorMessage.value &&
+    !parts.some((line) => line.includes(errorMessage.value))
+  ) {
+    parts.push(errorMessage.value)
+  }
+  const text = parts.join('\n')
   copyToClipboard(text, t('admin.accounts.outputCopied'))
 }
 </script>

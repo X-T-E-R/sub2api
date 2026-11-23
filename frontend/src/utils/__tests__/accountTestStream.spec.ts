@@ -4,7 +4,8 @@ import {
   consumeAccountTestStream,
   mergeAccountTestMetadata,
   metadataText,
-  metadataVerbatim
+  metadataVerbatim,
+  splitTextWithLinks
 } from '@/utils/accountTestStream'
 import type { AccountTestStreamEvent } from '@/types/accountTestStream'
 
@@ -141,8 +142,8 @@ describe('consumeAccountTestStream', () => {
     expect(errorSpy).toHaveBeenCalled()
   })
 
-  it('fails loudly on a non-OK response', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 502 } as Response) as any
+  it('fails loudly on a non-OK response and surfaces upstream error detail when present', async () => {
+    global.fetch = vi.fn().mockResolvedValue(new Response('', { status: 502 })) as any
     await expect(
       consumeAccountTestStream({
         url: '/api/v1/admin/accounts/7/test',
@@ -151,6 +152,40 @@ describe('consumeAccountTestStream', () => {
         onEvent: () => {}
       })
     ).rejects.toThrow('HTTP error! status: 502')
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response('{"error":{"message":"Verify your account to continue."}}', { status: 403 })
+    ) as any
+    await expect(
+      consumeAccountTestStream({
+        url: '/api/v1/admin/accounts/7/test',
+        body: {},
+        signal: new AbortController().signal,
+        onEvent: () => {}
+      })
+    ).rejects.toThrow('HTTP error! status: 403: Verify your account to continue.')
+  })
+
+  it('rethrows AbortError instead of turning cancellation into an HTTP error while reading a non-OK body', async () => {
+    const controller = new AbortController()
+    const abortError = new DOMException('The operation was aborted.', 'AbortError')
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: vi.fn(async () => {
+        controller.abort()
+        throw abortError
+      })
+    } as unknown as Response) as any
+
+    await expect(
+      consumeAccountTestStream({
+        url: '/api/v1/admin/accounts/7/test',
+        body: {},
+        signal: controller.signal,
+        onEvent: () => {}
+      })
+    ).rejects.toBe(abortError)
   })
 
   it('reports a missing response body with the caller message', async () => {
@@ -241,5 +276,68 @@ describe('accountTestStreamModeLabelKey', () => {
       'streamMode.native_non_stream'
     )
     expect(accountTestStreamModeLabelKey('chunked')).toBe('')
+  })
+})
+
+describe('splitTextWithLinks', () => {
+  it('extracts http(s) URLs cleanly while trimming trailing sentence punctuation', () => {
+    const url = 'https://accounts.google.com/v3/signin/continue?plt=abc123&token=xyz'
+    const tokens = splitTextWithLinks(
+      `Upstream returned 403: Verify your account. | validation_url: ${url}).`
+    )
+
+    expect(tokens).toEqual([
+      { kind: 'text', text: 'Upstream returned 403: Verify your account. | validation_url: ' },
+      { kind: 'link', text: url, href: url },
+      { kind: 'text', text: ').' }
+    ])
+  })
+
+  it('keeps balanced parentheses in URLs and never linkifies non-http(s) or HTML payloads', () => {
+    const tokens = splitTextWithLinks(
+      'javascript:alert(1) <img src=x onerror=alert(1)> https://en.wikipedia.org/wiki/Test_(example) "onclick="alert(1)'
+    )
+
+    const links = tokens.filter((token) => token.kind === 'link')
+    expect(links).toEqual([
+      {
+        kind: 'link',
+        text: 'https://en.wikipedia.org/wiki/Test_(example)',
+        href: 'https://en.wikipedia.org/wiki/Test_(example)'
+      }
+    ])
+    expect(tokens.map((t) => t.text).join('')).toContain('javascript:alert(1)')
+    expect(tokens.map((t) => t.text).join('')).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  it('preserves explicit backend verification URLs verbatim even when query values end in punctuation', () => {
+    const exactUrl = 'https://accounts.google.com/v3/signin/continue?plt=abc.'
+    const tokens = splitTextWithLinks(
+      `Upstream returned 403: Verify your account. | validation_url: ${exactUrl}`,
+      [exactUrl]
+    )
+
+    expect(tokens).toEqual([
+      { kind: 'text', text: 'Upstream returned 403: Verify your account. | validation_url: ' },
+      { kind: 'link', text: exactUrl, href: exactUrl }
+    ])
+  })
+
+  it('does not truncate a longer URL sharing a prefix with exactUrls while still trimming trailing sentence punctuation after exactUrls', () => {
+    const exactUrl = 'https://accounts.google.com/v3/signin'
+    const longerUrl = 'https://accounts.google.com/v3/signin/continue?plt=abc123'
+    const tokens = splitTextWithLinks(
+      `Primary (${exactUrl}). Alternate: ${longerUrl}.`,
+      [exactUrl]
+    )
+
+    expect(tokens).toEqual([
+      { kind: 'text', text: 'Primary (' },
+      { kind: 'link', text: exactUrl, href: exactUrl },
+      { kind: 'text', text: ').' },
+      { kind: 'text', text: ' Alternate: ' },
+      { kind: 'link', text: longerUrl, href: longerUrl },
+      { kind: 'text', text: '.' }
+    ])
   })
 })

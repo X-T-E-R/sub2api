@@ -822,4 +822,44 @@ describe('AccountTestModal', () => {
 
     expect(sentBody()).not.toHaveProperty('reasoning_effort')
   })
+
+  it('将错误消息中的验证链接渲染为安全可点击外链，且阻止 XSS 并支持复制完整错误', async () => {
+    const validationURL =
+      'https://accounts.google.com/v3/signin/continue?plt=abc123.&token=verify-xyz.'
+    const rawError = `Upstream returned 403 (PERMISSION_DENIED / VALIDATION_REQUIRED): Verify <img src=x onerror=alert(1)> javascript:alert(1) | validation_url: ${validationURL}`
+
+    global.fetch = vi.fn().mockResolvedValue(
+      streamResponse([
+        'data: {"type":"test_start","model":"gemini-3.6-flash"}\n',
+        `data: ${JSON.stringify({ type: 'error', error: rawError, validation_url: validationURL })}\n`
+      ])
+    ) as any
+
+    const wrapper = mountModal(buildAntigravityAccount())
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await startButton(wrapper).trigger('click')
+    await flushPromises()
+
+    const result = wrapper.get('[data-testid="account-test-result"]')
+    expect(result.attributes('data-status')).toBe('error')
+    expect(result.text()).toContain('PERMISSION_DENIED / VALIDATION_REQUIRED')
+    expect(result.text()).toContain('<img src=x onerror=alert(1)>')
+    expect(result.text()).toContain('javascript:alert(1)')
+
+    // Never inject untrusted HTML elements or javascript: anchors.
+    expect(result.find('img').exists()).toBe(false)
+    const links = result.findAll('a')
+    expect(links).toHaveLength(1)
+    expect(links[0].attributes('href')).toBe(validationURL)
+    expect(links[0].attributes('target')).toBe('_blank')
+    expect(links[0].attributes('rel')).toBe('noopener noreferrer')
+    expect(links[0].text()).toBe(validationURL)
+
+    // Copying terminal output includes the error message and validation URL.
+    await wrapper.get('[data-testid="account-test-copy"]').trigger('click')
+    expect(copyToClipboard).toHaveBeenCalledTimes(1)
+    expect(copyToClipboard.mock.calls[0][0]).toContain(rawError)
+  })
 })

@@ -645,4 +645,31 @@ describe('AccountTestModal', () => {
 
     expect(wrapper.find('[data-testid="account-test-effort"]').exists()).toBe(false)
   })
+
+  it('renders validation URLs in error events as safe clickable links without XSS', async () => {
+    const validationURL =
+      'https://accounts.google.com/v3/signin/continue?plt=abc123.&token=verify-xyz.'
+    const rawError = `Upstream returned 403 (PERMISSION_DENIED): Verify <img src=x onerror=alert(1)> javascript:alert(1) | validation_url: ${validationURL}`
+
+    global.fetch = vi.fn().mockResolvedValue(
+      streamResponse([
+        'data: {"type":"test_start","model":"gpt-5.4"}\n',
+        `data: ${JSON.stringify({ type: 'error', error: rawError, validation_url: validationURL })}\n`
+      ])
+    ) as any
+
+    const wrapper = await mountModal()
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    const result = wrapper.get('[data-testid="account-test-result"]')
+    expect(result.attributes('data-status')).toBe('error')
+    expect(result.find('img').exists()).toBe(false)
+    const links = result.findAll('a')
+    expect(links).toHaveLength(1)
+    expect(links[0].attributes('href')).toBe(validationURL)
+    expect(links[0].attributes('target')).toBe('_blank')
+    expect(links[0].attributes('rel')).toBe('noopener noreferrer')
+    expect(result.text()).toContain('<img src=x onerror=alert(1)>')
+  })
 })

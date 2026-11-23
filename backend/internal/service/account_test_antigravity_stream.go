@@ -21,16 +21,20 @@ import (
 // protocol transformer's synthesized message_stop after EOF.
 type accountTestForwardWriter struct {
 	gin.ResponseWriter
-	service *AccountTestService
-	admin   *gin.Context
-	pending string
-	usable  bool
-	failure string
-	headers http.Header
+	service     *AccountTestService
+	admin       *gin.Context
+	pending     string
+	usable      bool
+	failure     string
+	failureInfo accountTestErrorDetail
+	statusCode  int
+	errorBody   bytes.Buffer
+	headers     http.Header
 }
 
 func (w *accountTestForwardWriter) Header() http.Header { return w.headers }
 func (w *accountTestForwardWriter) WriteHeader(code int) {
+	w.statusCode = code
 	if code >= 400 {
 		w.failure = fmt.Sprintf("Forward returned HTTP %d", code)
 	}
@@ -39,14 +43,40 @@ func (w *accountTestForwardWriter) WriteHeaderNow() {}
 
 // Admin event writes already flush atomically; Forward's keepalive flush must
 // not race the raw-reader metadata writer on Gin's response state.
-func (w *accountTestForwardWriter) Flush()                            {}
-func (w *accountTestForwardWriter) Status() int                       { return http.StatusOK }
+func (w *accountTestForwardWriter) Flush() {}
+func (w *accountTestForwardWriter) Status() int {
+	if w.statusCode != 0 {
+		return w.statusCode
+	}
+	return http.StatusOK
+}
 func (w *accountTestForwardWriter) Size() int                         { return 0 }
 func (w *accountTestForwardWriter) Written() bool                     { return true }
 func (w *accountTestForwardWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
+func (w *accountTestForwardWriter) errorDetail() accountTestErrorDetail {
+	if w.statusCode >= 400 && w.errorBody.Len() > 0 {
+		if detail := buildAccountTestUpstreamError("Forward", w.statusCode, w.errorBody.Bytes()); detail.message != "" {
+			return detail
+		}
+	}
+	if w.failureInfo.message != "" {
+		return w.failureInfo
+	}
+	return accountTestErrorDetail{message: w.failure}
+}
 func (w *accountTestForwardWriter) Write(p []byte) (int, error) {
 	if err := w.admin.Request.Context().Err(); err != nil {
 		return 0, err
+	}
+	if w.statusCode >= 400 {
+		if remaining := int(gatewayUpstreamErrorBodyReadLimit) - w.errorBody.Len(); remaining > 0 {
+			if len(p) > remaining {
+				_, _ = w.errorBody.Write(p[:remaining])
+			} else {
+				_, _ = w.errorBody.Write(p)
+			}
+		}
+		return len(p), nil
 	}
 	w.pending += strings.ReplaceAll(string(p), "\r\n", "\n")
 	for {
@@ -79,10 +109,12 @@ func (w *accountTestForwardWriter) Write(p []byte) (int, error) {
 					w.service.sendEvent(w.admin, TestEvent{Type: "content", Text: payload.Get("content_block").Raw})
 				}
 			case "error":
-				w.failure = payload.Get("error.message").String()
-				if w.failure == "" {
-					w.failure = "Upstream stream error"
+				detail := buildAccountTestUpstreamError("", 0, []byte(data))
+				if detail.message == "" {
+					detail.message = "Upstream stream error"
 				}
+				w.failure = detail.message
+				w.failureInfo = detail
 			}
 		}
 	}
@@ -90,13 +122,28 @@ func (w *accountTestForwardWriter) Write(p []byte) (int, error) {
 }
 
 type accountTestRawStreamState struct {
-	mu       sync.Mutex
-	service  *AccountTestService
-	admin    *gin.Context
-	observer *upstreamResponseModelObserver
-	terminal bool
-	failure  error
-	pending  string
+	mu                   sync.Mutex
+	service              *AccountTestService
+	admin                *gin.Context
+	observer             *upstreamResponseModelObserver
+	terminal             bool
+	failure              error
+	failureDetail        accountTestErrorDetail
+	pending              string
+	upstreamErrorStatus  int
+	upstreamErrorBody    []byte
+	upstreamTransportErr error
+}
+
+func (s *accountTestRawStreamState) lastUpstreamError() (int, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.upstreamErrorStatus == 0 || len(s.upstreamErrorBody) == 0 {
+		return s.upstreamErrorStatus, nil, s.upstreamTransportErr
+	}
+	body := make([]byte, len(s.upstreamErrorBody))
+	copy(body, s.upstreamErrorBody)
+	return s.upstreamErrorStatus, body, s.upstreamTransportErr
 }
 
 func (s *accountTestRawStreamState) observeLine(line string) {
@@ -110,7 +157,12 @@ func (s *accountTestRawStreamState) observeLine(line string) {
 	s.observer.ObserveGemini(data)
 	s.service.sendEvent(s.admin, TestEvent{Type: "test_metadata", UpstreamResponseModel: s.observer.Model(), UpstreamResponseModelConflict: s.observer.Conflict()})
 	if e := gjson.GetBytes(data, "error"); e.Exists() {
-		s.failure = fmt.Errorf("upstream stream error: %s", e.Get("message").String())
+		detail := buildAccountTestUpstreamError("upstream stream error", 0, data)
+		if detail.message == "" {
+			detail.message = "upstream stream error"
+		}
+		s.failure = errors.New(detail.message)
+		s.failureDetail = detail
 	}
 	candidates := gjson.GetBytes(data, "response.candidates")
 	if !candidates.Exists() {
@@ -122,6 +174,7 @@ func (s *accountTestRawStreamState) observeLine(line string) {
 			s.terminal = true
 		} else if reason != "" {
 			s.failure = fmt.Errorf("upstream generation ended with %s", reason)
+			s.failureDetail = accountTestErrorDetail{}
 		}
 	}
 }
@@ -139,6 +192,7 @@ func (s *accountTestRawStreamState) observe(p []byte, err error) {
 	}
 	if len(s.pending) > 8<<20 {
 		s.failure = fmt.Errorf("upstream stream frame exceeds 8 MiB")
+		s.failureDetail = accountTestErrorDetail{}
 		s.pending = ""
 	}
 	if err != nil {
@@ -149,6 +203,7 @@ func (s *accountTestRawStreamState) observe(p []byte, err error) {
 			}
 		} else {
 			s.failure = err
+			s.failureDetail = accountTestErrorDetail{}
 		}
 	}
 }
@@ -164,20 +219,56 @@ func (b *accountTestObservedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+type accountTestErrorBodyTap struct {
+	io.ReadCloser
+	state *accountTestRawStreamState
+}
+
+func (b *accountTestErrorBodyTap) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.state.mu.Lock()
+		if remaining := int(gatewayUpstreamErrorBodyReadLimit) - len(b.state.upstreamErrorBody); remaining > 0 {
+			chunk := p[:n]
+			if len(chunk) > remaining {
+				chunk = chunk[:remaining]
+			}
+			b.state.upstreamErrorBody = append(b.state.upstreamErrorBody, chunk...)
+		}
+		b.state.mu.Unlock()
+	}
+	return n, err
+}
+
 type accountTestObservedUpstream struct {
 	HTTPUpstream
 	state *accountTestRawStreamState
 }
 
 func (u *accountTestObservedUpstream) wrap(resp *http.Response, err error) (*http.Response, error) {
-	if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
-		u.state.mu.Lock()
-		defer u.state.mu.Unlock()
-		u.state.terminal = false
-		u.state.failure = nil
-		u.state.pending = ""
-		u.state.observer = &upstreamResponseModelObserver{}
-		resp.Body = &accountTestObservedBody{ReadCloser: resp.Body, state: u.state}
+	u.state.mu.Lock()
+	defer u.state.mu.Unlock()
+	// Every upstream attempt owns its own terminal outcome so a retry's transport
+	// error never inherits a stale HTTP error body from an earlier attempt.
+	u.state.upstreamErrorStatus = 0
+	u.state.upstreamErrorBody = nil
+	u.state.upstreamTransportErr = nil
+	if err != nil {
+		u.state.upstreamTransportErr = err
+		return resp, err
+	}
+	if resp != nil {
+		if resp.StatusCode == http.StatusOK {
+			u.state.terminal = false
+			u.state.failure = nil
+			u.state.failureDetail = accountTestErrorDetail{}
+			u.state.pending = ""
+			u.state.observer = &upstreamResponseModelObserver{}
+			resp.Body = &accountTestObservedBody{ReadCloser: resp.Body, state: u.state}
+		} else if resp.StatusCode >= 400 && resp.Body != nil {
+			u.state.upstreamErrorStatus = resp.StatusCode
+			resp.Body = &accountTestErrorBodyTap{ReadCloser: resp.Body, state: u.state}
+		}
 	}
 	return resp, err
 }
@@ -257,22 +348,28 @@ func (s *AccountTestService) streamAntigravityAccountTest(c *gin.Context, accoun
 	forward.Request = c.Request.Clone(ctx)
 	forward.Request.Body = io.NopCloser(bytes.NewReader(body))
 	result, err := isolated.Forward(ctx, forward, account, body, false)
-	if err != nil {
-		return s.sendErrorAndEnd(c, err.Error())
-	}
 	if ctx.Err() != nil {
 		return s.sendErrorAndEnd(c, "Test canceled: "+ctx.Err().Error())
 	}
+	if err != nil {
+		return s.sendFormattedErrorAndEnd(c, buildAntigravityAccountTestError(err, state, writer))
+	}
 	state.mu.Lock()
-	failure, terminal, responseModel, conflict := state.failure, state.terminal, state.observer.Model(), state.observer.Conflict()
+	failure, failureDetail, terminal, responseModel, conflict := state.failure, state.failureDetail, state.terminal, state.observer.Model(), state.observer.Conflict()
+	upstreamErrorStatus := state.upstreamErrorStatus
+	upstreamErrorBody := append([]byte(nil), state.upstreamErrorBody...)
 	state.mu.Unlock()
 	if failure != nil {
-		return s.sendErrorAndEnd(c, "Stream failed: "+failure.Error())
+		failureDetail.message = "Stream failed: " + failure.Error()
+		return s.sendFormattedErrorAndEnd(c, failureDetail)
 	}
-	if writer.failure != "" {
-		return s.sendErrorAndEnd(c, writer.failure)
+	if writerDetail := writer.errorDetail(); writerDetail.message != "" {
+		return s.sendFormattedErrorAndEnd(c, writerDetail)
 	}
 	if !terminal {
+		if upstreamErrorStatus >= 400 && len(bytes.TrimSpace(upstreamErrorBody)) > 0 {
+			return s.sendFormattedErrorAndEnd(c, buildAccountTestUpstreamError("Upstream", upstreamErrorStatus, upstreamErrorBody))
+		}
 		return s.sendErrorAndEnd(c, "Upstream stream ended without a generation terminal")
 	}
 	if !writer.usable {
